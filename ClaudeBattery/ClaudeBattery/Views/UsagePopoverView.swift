@@ -1,19 +1,20 @@
 import SwiftUI
 
 struct UsagePopoverView: View {
+    @ObservedObject var authManager: AuthManager
     @ObservedObject var usageService: UsageService
     let onSignIn: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if let usage = usageService.latestUsage {
+            if !authManager.isAuthenticated {
+                unauthenticatedContent
+            } else if let usage = usageService.latestUsage {
                 authenticatedContent(usage: usage)
             } else if usageService.consecutiveFailures >= 10 {
                 errorContent
-            } else if usageService.lastSuccessfulFetch == nil && usageService.consecutiveFailures == 0 {
-                loadingContent
             } else {
-                unauthenticatedContent
+                loadingContent
             }
         }
         .padding(16)
