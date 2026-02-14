@@ -6,9 +6,14 @@ import UserNotifications
 struct ClaudeBatteryApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
 
+    @Environment(\.openSettings) private var openSettings
+
     var body: some Scene {
         Settings {
             SettingsView(signOut: { [weak appDelegate] in appDelegate?.signOut() })
+                .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
+                    openSettings()
+                }
         }
     }
 }
