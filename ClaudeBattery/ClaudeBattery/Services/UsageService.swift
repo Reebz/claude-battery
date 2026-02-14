@@ -142,9 +142,13 @@ class UsageService: NSObject, ObservableObject {
 
             guard (200...299).contains(httpResponse.statusCode) else {
                 consecutiveFailures += 1
-                logger.warning("Unexpected HTTP status: \(httpResponse.statusCode)")
+                let body = String(data: data, encoding: .utf8) ?? "(non-utf8)"
+                logger.warning("Unexpected HTTP status: \(httpResponse.statusCode) body: \(body.prefix(500))")
                 return
             }
+
+            let rawBody = String(data: data, encoding: .utf8) ?? "(non-utf8)"
+            logger.info("Usage API response (\(data.count) bytes): \(rawBody.prefix(1000))")
 
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
