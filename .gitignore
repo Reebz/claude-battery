@@ -21,3 +21,7 @@ xcuserdata/
 # Distribution
 dist/
 *.dmg
+
+# Local docs and todos
+docs/
+todos/
