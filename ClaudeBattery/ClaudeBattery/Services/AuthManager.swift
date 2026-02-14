@@ -1,6 +1,9 @@
 import AppKit
 import WebKit
 import Combine
+import os
+
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app", category: "Auth")
 
 @MainActor
 class AuthManager: NSObject, ObservableObject {
@@ -11,13 +14,21 @@ class AuthManager: NSObject, ObservableObject {
     private var loginWindowController: NSWindowController?
     private var loginTimeoutTask: Task<Void, Never>?
 
+    private static let sessionExpirationKey = "sessionKeyExpiration"
+
+    private lazy var apiSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.httpShouldSetCookies = false
+        config.timeoutIntervalForRequest = 30
+        return URLSession(configuration: config)
+    }()
+
     init(keychain: KeychainService) {
         self.keychain = keychain
         super.init()
 
-        // Check for existing credentials on launch
-        if keychain.read(forKey: "sessionKey") != nil,
-           keychain.read(forKey: "organizationId") != nil {
+        if keychain.read(forKey: KeychainService.Keys.sessionKey) != nil,
+           keychain.read(forKey: KeychainService.Keys.organizationId) != nil {
             isAuthenticated = true
         }
     }
@@ -38,10 +49,7 @@ class AuthManager: NSObject, ObservableObject {
         webView.navigationDelegate = self
         self.loginWebView = webView
 
-        // Register cookie observer before navigation
         config.websiteDataStore.httpCookieStore.add(self)
-
-        // Prime cookie store
         config.websiteDataStore.httpCookieStore.getAllCookies { _ in }
 
         let window = NSWindow(
@@ -66,12 +74,18 @@ class AuthManager: NSObject, ObservableObject {
     }
 
     private func handleCookieCaptured(_ cookie: HTTPCookie) {
-        // Validate cookie attributes
         guard cookie.domain.hasSuffix("claude.ai"),
               cookie.isSecure,
               cookie.path == "/" else { return }
 
-        keychain.save(cookie.value, forKey: "sessionKey")
+        keychain.save(cookie.value, forKey: KeychainService.Keys.sessionKey)
+
+        // Store cookie expiration for proactive session management
+        if let expiresDate = cookie.expiresDate {
+            UserDefaults.standard.set(expiresDate, forKey: Self.sessionExpirationKey)
+        }
+
+        logger.info("Session cookie captured successfully")
 
         loginTimeoutTask?.cancel()
         loginTimeoutTask = nil
@@ -79,7 +93,6 @@ class AuthManager: NSObject, ObservableObject {
         loginWebView?.stopLoading()
         loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
 
-        // Clear data store immediately
         WKWebsiteDataStore.default().removeData(
             ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
             modifiedSince: .distantPast
@@ -88,8 +101,6 @@ class AuthManager: NSObject, ObservableObject {
                 self?.loginWebView = nil
                 self?.loginWindowController?.close()
                 self?.loginWindowController = nil
-
-                // Discover org ID
                 await self?.fetchOrganizationId()
             }
         }
@@ -98,21 +109,23 @@ class AuthManager: NSObject, ObservableObject {
     // MARK: - Org Discovery
 
     private func fetchOrganizationId() async {
-        guard let sessionKey = keychain.read(forKey: "sessionKey") else { return }
+        guard let sessionKey = keychain.read(forKey: KeychainService.Keys.sessionKey) else { return }
 
-        let url = URL(string: "https://claude.ai/api/organizations")!
-        var request = URLRequest(url: url)
-        request.setValue("sessionKey=\(sessionKey)", forHTTPHeaderField: "Cookie")
-        request.setValue("web_claude_ai", forHTTPHeaderField: "anthropic-client-platform")
-        request.setValue("1.0.0", forHTTPHeaderField: "anthropic-client-version")
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        guard let request = ClaudeAPI.makeRequest(path: "/api/organizations", sessionKey: sessionKey) else {
+            logger.error("Failed to construct organizations API URL")
+            return
+        }
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await apiSession.data(for: request)
 
-            guard let httpResponse = response as? HTTPURLResponse else { return }
+            guard let httpResponse = response as? HTTPURLResponse else {
+                logger.error("Non-HTTP response from organizations API")
+                return
+            }
 
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                logger.warning("Auth failure during org discovery (HTTP \(httpResponse.statusCode))")
                 handleAuthFailure()
                 return
             }
@@ -120,38 +133,37 @@ class AuthManager: NSObject, ObservableObject {
             let orgs = try JSONDecoder().decode([Organization].self, from: data)
 
             if orgs.isEmpty {
-                // No Pro/Max subscription
+                logger.info("No organizations found — user may not have Pro/Max subscription")
                 isAuthenticated = false
                 return
             }
 
-            keychain.save(orgs[0].uuid, forKey: "organizationId")
+            keychain.save(orgs[0].uuid, forKey: KeychainService.Keys.organizationId)
             isAuthenticated = true
+            logger.info("Organization discovered successfully")
         } catch {
-            // Network or decode error — don't set authenticated
+            logger.error("Org discovery failed: \(error.localizedDescription)")
         }
     }
 
     // MARK: - Sign Out
 
-    func signOut() async {
+    func signOut() {
         keychain.deleteAll()
-
-        await withCheckedContinuation { continuation in
-            WKWebsiteDataStore.default().removeData(
-                ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
-                modifiedSince: .distantPast
-            ) {
-                continuation.resume()
-            }
-        }
-
+        UserDefaults.standard.removeObject(forKey: Self.sessionExpirationKey)
+        WKWebsiteDataStore.default().removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+            modifiedSince: .distantPast
+        ) { }
         isAuthenticated = false
+        logger.info("Signed out")
     }
 
     func handleAuthFailure() {
         keychain.deleteAll()
+        UserDefaults.standard.removeObject(forKey: Self.sessionExpirationKey)
         isAuthenticated = false
+        logger.info("Auth failure — credentials cleared")
     }
 
     // MARK: - Allowed Domains
@@ -159,9 +171,10 @@ class AuthManager: NSObject, ObservableObject {
     private func isAllowedDomain(_ host: String) -> Bool {
         host == "claude.ai" ||
         host.hasSuffix(".claude.ai") ||
-        host.hasSuffix(".google.com") ||
-        host.hasSuffix(".apple.com") ||
-        host.hasSuffix(".cloudflare.com")
+        host.hasSuffix(".anthropic.com") ||
+        host == "accounts.google.com" ||
+        host == "appleid.apple.com" ||
+        host.hasSuffix(".challenges.cloudflare.com")
     }
 }
 
@@ -177,17 +190,16 @@ extension AuthManager: WKNavigationDelegate {
         if isAllowedDomain(host) {
             decisionHandler(.allow)
         } else {
+            logger.info("Blocked navigation to disallowed domain: \(host)")
             decisionHandler(.cancel)
         }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // Update window title with current URL
         if let url = webView.url {
             loginWindowController?.window?.title = "Sign in to Claude — \(url.host ?? "")"
         }
 
-        // Fallback cookie check on every navigation finish
         Task {
             let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
             for cookie in cookies where cookie.name == "sessionKey" {
@@ -196,7 +208,6 @@ extension AuthManager: WKNavigationDelegate {
             }
         }
 
-        // Start timeout timer on first navigation
         if loginTimeoutTask == nil {
             loginTimeoutTask = Task {
                 try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
