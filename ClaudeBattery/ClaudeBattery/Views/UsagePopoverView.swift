@@ -180,10 +180,14 @@ struct UsagePopoverView: View {
         return "Updated \(minutes) min ago"
     }
 
-    private func formatResetDate(_ date: Date) -> String {
+    private static let resetDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "MMM d 'at' h:mm a"
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    private func formatResetDate(_ date: Date) -> String {
+        Self.resetDateFormatter.string(from: date)
     }
 
     private func formatResetCountdown(_ date: Date) -> String {

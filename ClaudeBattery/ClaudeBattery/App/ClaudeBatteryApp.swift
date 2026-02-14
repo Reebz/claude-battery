@@ -47,7 +47,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Observe auth state changes to start/stop polling
         authManager.$isAuthenticated
-            .dropFirst() // Skip the initial value (already handled above)
+            .dropFirst()
             .receive(on: RunLoop.main)
             .sink { [weak self] isAuthenticated in
                 guard let self else { return }
@@ -60,16 +60,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
     }
 
-    nonisolated func applicationWillTerminate(_ notification: Notification) {
-        Task { @MainActor in
-            usageService?.stopPolling()
-        }
-    }
-
     func signOut() {
         usageService.stopPolling()
-        Task {
-            await authManager.signOut()
-        }
+        authManager.signOut()
     }
 }

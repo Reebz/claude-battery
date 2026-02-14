@@ -1,6 +1,9 @@
 import AppKit
 import Foundation
 import UserNotifications
+import os
+
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app", category: "Usage")
 
 @MainActor
 class UsageService: NSObject, ObservableObject {
@@ -8,26 +11,40 @@ class UsageService: NSObject, ObservableObject {
     @Published var lastSuccessfulFetch: Date?
     @Published private(set) var consecutiveFailures: Int = 0
 
+    private enum Constants {
+        static let staleThresholdSeconds: TimeInterval = 660
+        static let baseInterval: TimeInterval = 120
+        static let backoffInterval1: TimeInterval = 300
+        static let backoffInterval2: TimeInterval = 600
+        static let maxBackoffInterval: TimeInterval = 1800
+        static let staleFailureThreshold = 3
+        static let errorFailureThreshold = 10
+        static let defaultNotificationThreshold: Double = 20.0
+        static let sessionExpirationKey = "sessionKeyExpiration"
+    }
+
     var isStale: Bool {
         guard let last = lastSuccessfulFetch else { return true }
-        return Date().timeIntervalSince(last) > 660
+        return Date().timeIntervalSince(last) > Constants.staleThresholdSeconds
     }
 
     var pollInterval: TimeInterval {
-        if consecutiveFailures < 3 { return 120 }
-        if consecutiveFailures < 6 { return 300 }
-        if consecutiveFailures < 10 { return 600 }
-        return 1800
+        if consecutiveFailures < Constants.staleFailureThreshold { return Constants.baseInterval }
+        if consecutiveFailures < 6 { return Constants.backoffInterval1 }
+        if consecutiveFailures < Constants.errorFailureThreshold { return Constants.backoffInterval2 }
+        return Constants.maxBackoffInterval
     }
 
     private let keychain: KeychainService
     private var timer: Timer?
-    private var activity: NSObjectProtocol?
     private var isPolling = false
     private var didNotifyBelowThreshold = false
 
     var notificationThreshold: Double {
-        get { UserDefaults.standard.double(forKey: "notificationThreshold").isZero ? 20.0 : UserDefaults.standard.double(forKey: "notificationThreshold") }
+        get {
+            let value = UserDefaults.standard.double(forKey: "notificationThreshold")
+            return value.isZero ? Constants.defaultNotificationThreshold : value
+        }
         set { UserDefaults.standard.set(newValue, forKey: "notificationThreshold") }
     }
 
@@ -44,7 +61,6 @@ class UsageService: NSObject, ObservableObject {
         self.keychain = keychain
         super.init()
 
-        // Subscribe to wake notifications
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(handleWake),
@@ -60,10 +76,6 @@ class UsageService: NSObject, ObservableObject {
     // MARK: - Polling
 
     func startPolling() {
-        activity = ProcessInfo.processInfo.beginActivity(
-            options: [],
-            reason: "Menu bar usage polling"
-        )
         Task { await pollUsage() }
         scheduleNextPoll()
     }
@@ -71,8 +83,6 @@ class UsageService: NSObject, ObservableObject {
     func stopPolling() {
         timer?.invalidate()
         timer = nil
-        if let activity { ProcessInfo.processInfo.endActivity(activity) }
-        activity = nil
     }
 
     private func scheduleNextPoll() {
@@ -91,44 +101,48 @@ class UsageService: NSObject, ObservableObject {
         isPolling = true
         defer { isPolling = false }
 
-        // Check if keychain is locked (screen locked)
-        if keychain.isKeychainLocked {
-            return // Skip without incrementing failures
-        }
-
-        guard let sessionKey = keychain.read(forKey: "sessionKey"),
-              let orgId = keychain.read(forKey: "organizationId") else {
+        guard let sessionKey = keychain.read(forKey: KeychainService.Keys.sessionKey),
+              let orgId = keychain.read(forKey: KeychainService.Keys.organizationId) else {
             return
         }
 
-        let url = URL(string: "https://claude.ai/api/organizations/\(orgId)/usage")!
-        var request = URLRequest(url: url)
-        request.setValue("sessionKey=\(sessionKey)", forHTTPHeaderField: "Cookie")
-        request.setValue("web_claude_ai", forHTTPHeaderField: "anthropic-client-platform")
-        request.setValue("1.0.0", forHTTPHeaderField: "anthropic-client-version")
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
-        request.setValue("empty", forHTTPHeaderField: "sec-fetch-dest")
-        request.setValue("cors", forHTTPHeaderField: "sec-fetch-mode")
-        request.setValue("same-origin", forHTTPHeaderField: "sec-fetch-site")
-        request.setValue("https://claude.ai", forHTTPHeaderField: "origin")
-        request.setValue("https://claude.ai/settings/usage", forHTTPHeaderField: "referer")
+        // Check if session cookie has expired
+        let expiration = UserDefaults.standard.object(forKey: Constants.sessionExpirationKey) as? Date
+        if let expiration, expiration < Date() {
+            logger.info("Session cookie expired, triggering re-auth")
+            onAuthFailure?()
+            return
+        }
+
+        // Validate orgId is a UUID
+        guard orgId.range(of: "^[a-f0-9\\-]{36}$", options: .regularExpression) != nil else {
+            logger.error("Invalid orgId format in keychain")
+            return
+        }
+
+        guard let request = ClaudeAPI.makeRequest(path: "/api/organizations/\(orgId)/usage", sessionKey: sessionKey) else {
+            logger.error("Failed to construct usage API URL")
+            return
+        }
 
         do {
             let (data, response) = try await session.data(for: request)
 
             guard let httpResponse = response as? HTTPURLResponse else {
                 consecutiveFailures += 1
+                logger.error("Non-HTTP response received")
                 return
             }
 
-            // Auth failure
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                logger.info("Auth failure (HTTP \(httpResponse.statusCode))")
                 onAuthFailure?()
                 return
             }
 
             guard (200...299).contains(httpResponse.statusCode) else {
                 consecutiveFailures += 1
+                logger.warning("Unexpected HTTP status: \(httpResponse.statusCode)")
                 return
             }
 
@@ -141,16 +155,15 @@ class UsageService: NSObject, ObservableObject {
             lastSuccessfulFetch = Date()
             consecutiveFailures = 0
 
-            // Check notification threshold
             if let weeklyRemaining = latestUsage?.weeklyRemaining {
                 checkAndNotify(remaining: weeklyRemaining, threshold: notificationThreshold)
             }
         } catch {
             consecutiveFailures += 1
+            logger.error("Poll failed: \(error.localizedDescription)")
         }
     }
 
-    // Called by AppDelegate to wire auth failure
     var onAuthFailure: (() -> Void)?
 
     // MARK: - Notifications
