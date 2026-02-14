@@ -13,6 +13,101 @@ class MenuBarController {
     private let digitFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
     private let smallFont = NSFont.monospacedDigitSystemFont(ofSize: 7, weight: .regular)
 
+    // Cached static icons
+    private lazy var unauthenticatedIcon: NSImage = {
+        let iconSize = NSSize(width: 34, height: 18)
+        let image = NSImage(size: iconSize, flipped: false) { rect in
+            let batteryRect = NSRect(x: 0, y: 3, width: 30, height: 12)
+            let path = NSBezierPath(roundedRect: batteryRect, xRadius: 2, yRadius: 2)
+            NSColor.black.setStroke()
+            path.lineWidth = 1.0
+            path.stroke()
+
+            let nubRect = NSRect(x: 30, y: 5.5, width: 2, height: 5)
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: nubRect, xRadius: 0.5, yRadius: 0.5).fill()
+
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
+    private lazy var loadingIcon: NSImage = {
+        let iconSize = NSSize(width: 40, height: 18)
+        let font = digitFont
+        let image = NSImage(size: iconSize, flipped: false) { rect in
+            let batteryRect = NSRect(x: 0, y: 3, width: 30, height: 12)
+            let path = NSBezierPath(roundedRect: batteryRect, xRadius: 2, yRadius: 2)
+            NSColor.black.setStroke()
+            path.lineWidth = 1.0
+            path.stroke()
+
+            let nubRect = NSRect(x: 30, y: 5.5, width: 2, height: 5)
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: nubRect, xRadius: 0.5, yRadius: 0.5).fill()
+
+            let text = "..." as NSString
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
+            let size = text.size(withAttributes: attrs)
+            text.draw(at: NSPoint(x: 7, y: (18 - size.height) / 2), withAttributes: attrs)
+
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
+    private lazy var staleIcon: NSImage = {
+        let iconSize = NSSize(width: 40, height: 18)
+        let font = digitFont
+        let image = NSImage(size: iconSize, flipped: false) { rect in
+            let batteryRect = NSRect(x: 0, y: 3, width: 30, height: 12)
+            let path = NSBezierPath(roundedRect: batteryRect, xRadius: 2, yRadius: 2)
+            NSColor.gray.setStroke()
+            path.lineWidth = 1.0
+            path.stroke()
+
+            let nubRect = NSRect(x: 30, y: 5.5, width: 2, height: 5)
+            NSColor.gray.setFill()
+            NSBezierPath(roundedRect: nubRect, xRadius: 0.5, yRadius: 0.5).fill()
+
+            let text = "..." as NSString
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.gray]
+            let size = text.size(withAttributes: attrs)
+            text.draw(at: NSPoint(x: 7, y: (18 - size.height) / 2), withAttributes: attrs)
+
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
+    private lazy var errorIcon: NSImage = {
+        let iconSize = NSSize(width: 40, height: 18)
+        let font = digitFont
+        let image = NSImage(size: iconSize, flipped: false) { rect in
+            let batteryRect = NSRect(x: 0, y: 3, width: 30, height: 12)
+            let path = NSBezierPath(roundedRect: batteryRect, xRadius: 2, yRadius: 2)
+            NSColor.gray.setStroke()
+            path.lineWidth = 1.0
+            path.stroke()
+
+            let nubRect = NSRect(x: 30, y: 5.5, width: 2, height: 5)
+            NSColor.gray.setFill()
+            NSBezierPath(roundedRect: nubRect, xRadius: 0.5, yRadius: 0.5).fill()
+
+            let text = "!" as NSString
+            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.gray]
+            let size = text.size(withAttributes: attrs)
+            text.draw(at: NSPoint(x: 12, y: (18 - size.height) / 2), withAttributes: attrs)
+
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
+
     init(authManager: AuthManager, usageService: UsageService) {
         self.authManager = authManager
         self.usageService = usageService
@@ -41,6 +136,7 @@ class MenuBarController {
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(
             rootView: UsagePopoverView(
+                authManager: authManager,
                 usageService: usageService,
                 onSignIn: { [weak self] in self?.authManager.presentLogin() }
             )
@@ -49,13 +145,9 @@ class MenuBarController {
 
     private func setupObservers() {
         usageService.$latestUsage
-            .combineLatest(
-                usageService.$consecutiveFailures,
-                usageService.$lastSuccessfulFetch,
-                authManager.$isAuthenticated
-            )
+            .combineLatest(usageService.$consecutiveFailures, authManager.$isAuthenticated)
             .receive(on: RunLoop.main)
-            .sink { [weak self] usage, failures, lastFetch, isAuth in
+            .sink { [weak self] usage, _, isAuth in
                 self?.updateIcon(usage, isAuthenticated: isAuth)
             }
             .store(in: &cancellables)
@@ -85,7 +177,9 @@ class MenuBarController {
         guard let button = statusItem.button else { return }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
+        DispatchQueue.main.async { [weak self] in
+            self?.popover.contentViewController?.view.window?.makeKey()
+        }
     }
 
     private func showContextMenu() {
@@ -94,7 +188,6 @@ class MenuBarController {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
 
-        // Set targets for menu items
         for item in menu.items where item.action != nil {
             item.target = self
         }
@@ -123,15 +216,15 @@ class MenuBarController {
         let image: NSImage
 
         if !isAuthenticated {
-            image = makeUnauthenticatedIcon()
+            image = unauthenticatedIcon
         } else if let usage = usage {
             image = makeBatteryIcon(usage: usage)
         } else if usageService.consecutiveFailures >= 10 {
-            image = makeErrorIcon()
+            image = errorIcon
         } else if usageService.isStale && usageService.consecutiveFailures >= 3 {
-            image = makeStaleIcon()
+            image = staleIcon
         } else {
-            image = makeLoadingIcon()
+            image = loadingIcon
         }
 
         statusItem.button?.image = image
@@ -145,22 +238,37 @@ class MenuBarController {
         let weeklyResetText = formatResetTime(usage.weeklyResetDate)
         let sessionResetText = formatResetTime(usage.sessionResetDate)
 
-        let totalWidth: CGFloat = computeIconWidth(weeklyPercent: weeklyPercent, weeklyReset: weeklyResetText, sessionPercent: sessionPercent, sessionReset: sessionResetText)
+        // Compute text sizes once
+        let percentFontAttrs: [NSAttributedString.Key: Any] = [.font: digitFont]
+        let resetFontAttrs: [NSAttributedString.Key: Any] = [.font: smallFont]
+
+        let weeklyPercentStr = "\(weeklyPercent)%" as NSString
+        let weeklyResetStr = weeklyResetText as NSString
+        let sessionPercentStr = "\(sessionPercent)%" as NSString
+        let sessionResetStr = sessionResetText as NSString
+
+        let weeklyPercentSize = weeklyPercentStr.size(withAttributes: percentFontAttrs)
+        let weeklyResetSize = weeklyResetStr.size(withAttributes: resetFontAttrs)
+        let sessionPercentSize = sessionPercentStr.size(withAttributes: percentFontAttrs)
+        let sessionResetSize = sessionResetStr.size(withAttributes: resetFontAttrs)
+
+        let batteryWidth: CGFloat = 30
+        let batteryHeight: CGFloat = 12
+        let nubWidth: CGFloat = 2
+        let nubHeight: CGFloat = 5
+        let sessionBarWidth: CGFloat = 3
+        let sessionBarHeight: CGFloat = 10
+        let cornerRadius: CGFloat = 2
+        let fillInset: CGFloat = 1.5
         let iconHeight: CGFloat = 18
 
+        let totalWidth = batteryWidth + nubWidth + 2 + weeklyPercentSize.width + 2 + weeklyResetSize.width + 4 + 0.5 + 4 + sessionBarWidth + 2 + sessionPercentSize.width + 2 + sessionResetSize.width + 1
+
         let fgColor: NSColor = isLowBattery ? .white : .black
-        let font = digitFont
-        let sFont = smallFont
         let batteryColor: NSColor = isLowBattery ? .systemRed : .black
 
         let image = NSImage(size: NSSize(width: totalWidth, height: iconHeight), flipped: false) { rect in
-            let batteryWidth: CGFloat = 30
-            let batteryHeight: CGFloat = 12
             let batteryY: CGFloat = (iconHeight - batteryHeight) / 2
-            let nubWidth: CGFloat = 2
-            let nubHeight: CGFloat = 5
-            let cornerRadius: CGFloat = 2
-            let fillInset: CGFloat = 1.5
 
             // Battery outline
             let bodyRect = NSRect(x: 0, y: batteryY, width: batteryWidth, height: batteryHeight)
@@ -191,26 +299,22 @@ class MenuBarController {
                 )
                 let fillColor: NSColor = isLowBattery ? .systemRed : batteryColor
                 fillColor.setFill()
-                let fillPath = NSBezierPath(roundedRect: fillRect, xRadius: 1, yRadius: 1)
-                fillPath.fill()
+                NSBezierPath(roundedRect: fillRect, xRadius: 1, yRadius: 1).fill()
             }
 
             // Weekly % text
-            let percentText = "\(weeklyPercent)%" as NSString
-            let percentAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: fgColor]
-            let percentSize = percentText.size(withAttributes: percentAttrs)
+            let percentDrawAttrs: [NSAttributedString.Key: Any] = [.font: self.digitFont, .foregroundColor: fgColor]
+            let resetDrawAttrs: [NSAttributedString.Key: Any] = [.font: self.smallFont, .foregroundColor: fgColor]
+
             let percentX = batteryWidth + nubWidth + 2
-            percentText.draw(at: NSPoint(x: percentX, y: (iconHeight - percentSize.height) / 2), withAttributes: percentAttrs)
+            weeklyPercentStr.draw(at: NSPoint(x: percentX, y: (iconHeight - weeklyPercentSize.height) / 2), withAttributes: percentDrawAttrs)
 
             // Weekly reset text
-            let resetAttrs: [NSAttributedString.Key: Any] = [.font: sFont, .foregroundColor: fgColor]
-            let resetText = weeklyResetText as NSString
-            let resetSize = resetText.size(withAttributes: resetAttrs)
-            let resetX = percentX + percentSize.width + 2
-            resetText.draw(at: NSPoint(x: resetX, y: (iconHeight - resetSize.height) / 2), withAttributes: resetAttrs)
+            let resetX = percentX + weeklyPercentSize.width + 2
+            weeklyResetStr.draw(at: NSPoint(x: resetX, y: (iconHeight - weeklyResetSize.height) / 2), withAttributes: resetDrawAttrs)
 
             // Divider
-            let dividerX = resetX + resetSize.width + 4
+            let dividerX = resetX + weeklyResetSize.width + 4
             let dividerColor: NSColor = isLowBattery ? .white.withAlphaComponent(0.5) : .black.withAlphaComponent(0.3)
             dividerColor.setStroke()
             let dividerPath = NSBezierPath()
@@ -221,8 +325,6 @@ class MenuBarController {
 
             // Session bar
             let sessionBarX = dividerX + 4
-            let sessionBarWidth: CGFloat = 3
-            let sessionBarHeight: CGFloat = 10
             let sessionBarY = (iconHeight - sessionBarHeight) / 2
             let sessionFillHeight = sessionBarHeight * CGFloat(sessionPercent) / 100.0
 
@@ -240,99 +342,17 @@ class MenuBarController {
             }
 
             // Session % text
-            let sessionText = "\(sessionPercent)%" as NSString
-            let sessionSize = sessionText.size(withAttributes: percentAttrs)
             let sessionTextX = sessionBarX + sessionBarWidth + 2
-            sessionText.draw(at: NSPoint(x: sessionTextX, y: (iconHeight - sessionSize.height) / 2), withAttributes: percentAttrs)
+            sessionPercentStr.draw(at: NSPoint(x: sessionTextX, y: (iconHeight - sessionPercentSize.height) / 2), withAttributes: percentDrawAttrs)
 
             // Session reset text
-            let sessionResetStr = sessionResetText as NSString
-            let sessionResetSize = sessionResetStr.size(withAttributes: resetAttrs)
-            let sessionResetX = sessionTextX + sessionSize.width + 2
-            sessionResetStr.draw(at: NSPoint(x: sessionResetX, y: (iconHeight - sessionResetSize.height) / 2), withAttributes: resetAttrs)
+            let sessionResetX = sessionTextX + sessionPercentSize.width + 2
+            sessionResetStr.draw(at: NSPoint(x: sessionResetX, y: (iconHeight - sessionResetSize.height) / 2), withAttributes: resetDrawAttrs)
 
             return true
         }
 
         image.isTemplate = !isLowBattery
-        return image
-    }
-
-    private func makeUnauthenticatedIcon() -> NSImage {
-        let iconSize = NSSize(width: 34, height: 18)
-        let image = NSImage(size: iconSize, flipped: false) { rect in
-            let batteryRect = NSRect(x: 0, y: 3, width: 30, height: 12)
-            let path = NSBezierPath(roundedRect: batteryRect, xRadius: 2, yRadius: 2)
-            NSColor.black.setStroke()
-            path.lineWidth = 1.0
-            path.stroke()
-
-            // Nub
-            let nubRect = NSRect(x: 30, y: 5.5, width: 2, height: 5)
-            NSColor.black.setFill()
-            NSBezierPath(roundedRect: nubRect, xRadius: 0.5, yRadius: 0.5).fill()
-
-            return true
-        }
-        image.isTemplate = true
-        return image
-    }
-
-    private func makeLoadingIcon() -> NSImage {
-        let iconSize = NSSize(width: 40, height: 18)
-        let font = digitFont
-        let image = NSImage(size: iconSize, flipped: false) { rect in
-            let batteryRect = NSRect(x: 0, y: 3, width: 30, height: 12)
-            let path = NSBezierPath(roundedRect: batteryRect, xRadius: 2, yRadius: 2)
-            NSColor.black.setStroke()
-            path.lineWidth = 1.0
-            path.stroke()
-
-            let nubRect = NSRect(x: 30, y: 5.5, width: 2, height: 5)
-            NSColor.black.setFill()
-            NSBezierPath(roundedRect: nubRect, xRadius: 0.5, yRadius: 0.5).fill()
-
-            let text = "..." as NSString
-            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
-            let size = text.size(withAttributes: attrs)
-            text.draw(at: NSPoint(x: 7, y: (18 - size.height) / 2), withAttributes: attrs)
-
-            return true
-        }
-        image.isTemplate = true
-        return image
-    }
-
-    private func makeStaleIcon() -> NSImage {
-        let icon = makeLoadingIcon()
-        icon.lockFocus()
-        NSColor.black.withAlphaComponent(0.5).setFill()
-        icon.unlockFocus()
-        return icon
-    }
-
-    private func makeErrorIcon() -> NSImage {
-        let iconSize = NSSize(width: 40, height: 18)
-        let font = digitFont
-        let image = NSImage(size: iconSize, flipped: false) { rect in
-            let batteryRect = NSRect(x: 0, y: 3, width: 30, height: 12)
-            let path = NSBezierPath(roundedRect: batteryRect, xRadius: 2, yRadius: 2)
-            NSColor.gray.setStroke()
-            path.lineWidth = 1.0
-            path.stroke()
-
-            let nubRect = NSRect(x: 30, y: 5.5, width: 2, height: 5)
-            NSColor.gray.setFill()
-            NSBezierPath(roundedRect: nubRect, xRadius: 0.5, yRadius: 0.5).fill()
-
-            let text = "!" as NSString
-            let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.gray]
-            let size = text.size(withAttributes: attrs)
-            text.draw(at: NSPoint(x: 12, y: (18 - size.height) / 2), withAttributes: attrs)
-
-            return true
-        }
-        image.isTemplate = true
         return image
     }
 
@@ -354,18 +374,5 @@ class MenuBarController {
         } else {
             return "\(max(1, minutes))m"
         }
-    }
-
-    private func computeIconWidth(weeklyPercent: Int, weeklyReset: String, sessionPercent: Int, sessionReset: String) -> CGFloat {
-        let percentAttrs: [NSAttributedString.Key: Any] = [.font: digitFont]
-        let resetAttrs: [NSAttributedString.Key: Any] = [.font: smallFont]
-
-        let weeklyPercentWidth = ("\(weeklyPercent)%" as NSString).size(withAttributes: percentAttrs).width
-        let weeklyResetWidth = (weeklyReset as NSString).size(withAttributes: resetAttrs).width
-        let sessionPercentWidth = ("\(sessionPercent)%" as NSString).size(withAttributes: percentAttrs).width
-        let sessionResetWidth = (sessionReset as NSString).size(withAttributes: resetAttrs).width
-
-        // battery(30) + nub(2) + gap(2) + weeklyPercent + gap(2) + weeklyReset + gap(4) + divider(0.5) + gap(4) + sessionBar(3) + gap(2) + sessionPercent + gap(2) + sessionReset
-        return 30 + 2 + 2 + weeklyPercentWidth + 2 + weeklyResetWidth + 4 + 0.5 + 4 + 3 + 2 + sessionPercentWidth + 2 + sessionResetWidth + 1
     }
 }
