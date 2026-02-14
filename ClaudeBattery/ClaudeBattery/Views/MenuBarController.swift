@@ -136,6 +136,7 @@ class MenuBarController {
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(
             rootView: UsagePopoverView(
+                authManager: authManager,
                 usageService: usageService,
                 onSignIn: { [weak self] in self?.authManager.presentLogin() }
             )
@@ -176,7 +177,9 @@ class MenuBarController {
         guard let button = statusItem.button else { return }
         NSApp.activate(ignoringOtherApps: true)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        popover.contentViewController?.view.window?.makeKey()
+        DispatchQueue.main.async { [weak self] in
+            self?.popover.contentViewController?.view.window?.makeKey()
+        }
     }
 
     private func showContextMenu() {
