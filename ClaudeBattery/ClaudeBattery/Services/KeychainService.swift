@@ -1,11 +1,11 @@
 import Foundation
-import Security
 import os
 
-private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app", category: "Keychain")
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app", category: "Storage")
 
 final class KeychainService {
-    private let service: String
+    private let defaults = UserDefaults.standard
+    private let prefix: String
 
     enum Keys {
         static let sessionKey = "sessionKey"
@@ -13,68 +13,20 @@ final class KeychainService {
     }
 
     init() {
-        self.service = Bundle.main.bundleIdentifier ?? "com.claudebattery.app"
+        self.prefix = "cb_"
     }
 
-    private var baseQuery: [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecUseDataProtectionKeychain as String: true,
-        ]
+    func save(_ value: String, forKey key: String) {
+        defaults.set(value, forKey: prefix + key)
+        logger.info("Saved \(key)")
     }
 
-    func save(_ value: String, forKey account: String) {
-        guard let data = value.data(using: .utf8) else { return }
-
-        var deleteQuery = baseQuery
-        deleteQuery[kSecAttrAccount as String] = account
-        SecItemDelete(deleteQuery as CFDictionary)
-
-        var addQuery = baseQuery
-        addQuery[kSecAttrAccount as String] = account
-        addQuery[kSecValueData as String] = data
-        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
-
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        if status != errSecSuccess {
-            logger.error("Keychain save failed for \(account): \(status)")
-        }
+    func read(forKey key: String) -> String? {
+        defaults.string(forKey: prefix + key)
     }
 
-    func read(forKey account: String) -> String? {
-        var query = baseQuery
-        query[kSecAttrAccount as String] = account
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        if status == errSecInteractionNotAllowed {
-            return nil
-        }
-
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let value = String(data: data, encoding: .utf8) else {
-            if status != errSecItemNotFound {
-                logger.error("Keychain read failed for \(account): \(status)")
-            }
-            return nil
-        }
-
-        return value
-    }
-
-    func delete(forKey account: String) {
-        var query = baseQuery
-        query[kSecAttrAccount as String] = account
-
-        let status = SecItemDelete(query as CFDictionary)
-        if status != errSecSuccess && status != errSecItemNotFound {
-            logger.error("Keychain delete failed for \(account): \(status)")
-        }
+    func delete(forKey key: String) {
+        defaults.removeObject(forKey: prefix + key)
     }
 
     func deleteAll() {
