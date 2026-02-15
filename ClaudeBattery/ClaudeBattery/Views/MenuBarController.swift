@@ -3,7 +3,7 @@ import SwiftUI
 import Combine
 
 @MainActor
-class MenuBarController {
+class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private var cancellables = Set<AnyCancellable>()
@@ -114,6 +114,8 @@ class MenuBarController {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
+        super.init()
+
         setupButton()
         setupPopover()
         setupObservers()
@@ -192,16 +194,15 @@ class MenuBarController {
             item.target = self
         }
 
+        menu.delegate = self
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
-        statusItem.menu = nil
     }
 
     @objc private func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
-        if #available(macOS 14.0, *) {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        } else {
+        // Try both selectors — one will work depending on macOS version
+        if !NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil) {
             NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
         }
     }
@@ -355,7 +356,17 @@ class MenuBarController {
         image.isTemplate = !isLowBattery
         return image
     }
+}
 
+// MARK: - NSMenuDelegate
+
+extension MenuBarController: NSMenuDelegate {
+    func menuDidClose(_ menu: NSMenu) {
+        statusItem.menu = nil
+    }
+}
+
+extension MenuBarController {
     // MARK: - Formatting
 
     private func formatResetTime(_ date: Date?) -> String {
