@@ -162,6 +162,21 @@ class UsageService: NSObject, ObservableObject {
             if let weeklyRemaining = latestUsage?.weeklyRemaining {
                 checkAndNotify(remaining: weeklyRemaining, threshold: notificationThreshold)
             }
+        } catch let decodingError as DecodingError {
+            consecutiveFailures += 1
+            // Log full decoding error details
+            switch decodingError {
+            case .keyNotFound(let key, let context):
+                logger.error("Decoding: missing key '\(key.stringValue)' at \(context.codingPath.map(\.stringValue).joined(separator: "."))")
+            case .typeMismatch(let type, let context):
+                logger.error("Decoding: type mismatch for \(String(describing: type)) at \(context.codingPath.map(\.stringValue).joined(separator: "."))")
+            case .valueNotFound(let type, let context):
+                logger.error("Decoding: value not found for \(String(describing: type)) at \(context.codingPath.map(\.stringValue).joined(separator: "."))")
+            case .dataCorrupted(let context):
+                logger.error("Decoding: data corrupted at \(context.codingPath.map(\.stringValue).joined(separator: ".")): \(context.debugDescription)")
+            @unknown default:
+                logger.error("Decoding: unknown error: \(decodingError.localizedDescription)")
+            }
         } catch {
             consecutiveFailures += 1
             logger.error("Poll failed: \(error.localizedDescription)")
@@ -225,15 +240,54 @@ extension UsageService: UNUserNotificationCenterDelegate {
 // MARK: - Models
 
 struct UsageResponse: Codable {
-    let fiveHour: UsageTier
-    let sevenDay: UsageTier
-    let sevenDayOpus: UsageTier
-    let sevenDaySonnet: UsageTier
+    let fiveHour: UsageTier?
+    let sevenDay: UsageTier?
+    let sevenDayOpus: UsageTier?
+    let sevenDaySonnet: UsageTier?
+
+    // Accept any extra keys from the API
+    private struct DynamicKey: CodingKey {
+        var stringValue: String
+        var intValue: Int?
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: DynamicKey.self)
+
+        // Log all top-level keys for debugging
+        let allKeys = container.allKeys.map(\.stringValue)
+        let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app", category: "Usage")
+        logger.info("API response keys: \(allKeys.joined(separator: ", "))")
+
+        // Decode from a standard keyed container using snake_case conversion
+        let standard = try decoder.container(keyedBy: CodingKeys.self)
+        fiveHour = try? standard.decode(UsageTier.self, forKey: .fiveHour)
+        sevenDay = try? standard.decode(UsageTier.self, forKey: .sevenDay)
+        sevenDayOpus = try? standard.decode(UsageTier.self, forKey: .sevenDayOpus)
+        sevenDaySonnet = try? standard.decode(UsageTier.self, forKey: .sevenDaySonnet)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case fiveHour, sevenDay, sevenDayOpus, sevenDaySonnet
+    }
 }
 
 struct UsageTier: Codable {
-    let utilization: Double
+    let utilization: Double?
     let resetsAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case utilization, resetsAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        utilization = try? container.decode(Double.self, forKey: .utilization)
+        // Try Date first, fall back to nil if parsing fails
+        resetsAt = try? container.decode(Date.self, forKey: .resetsAt)
+    }
 }
 
 struct UsageData {
@@ -247,13 +301,13 @@ struct UsageData {
     let sonnetResetDate: Date?
 
     init(from response: UsageResponse) {
-        weeklyRemaining = max(0, min(100, 100 - response.sevenDay.utilization))
-        weeklyResetDate = response.sevenDay.resetsAt
-        sessionRemaining = max(0, min(100, 100 - response.fiveHour.utilization))
-        sessionResetDate = response.fiveHour.resetsAt
-        opusRemaining = max(0, min(100, 100 - response.sevenDayOpus.utilization))
-        opusResetDate = response.sevenDayOpus.resetsAt
-        sonnetRemaining = max(0, min(100, 100 - response.sevenDaySonnet.utilization))
-        sonnetResetDate = response.sevenDaySonnet.resetsAt
+        weeklyRemaining = max(0, min(100, 100 - (response.sevenDay?.utilization ?? 0)))
+        weeklyResetDate = response.sevenDay?.resetsAt
+        sessionRemaining = max(0, min(100, 100 - (response.fiveHour?.utilization ?? 0)))
+        sessionResetDate = response.fiveHour?.resetsAt
+        opusRemaining = max(0, min(100, 100 - (response.sevenDayOpus?.utilization ?? 0)))
+        opusResetDate = response.sevenDayOpus?.resetsAt
+        sonnetRemaining = max(0, min(100, 100 - (response.sevenDaySonnet?.utilization ?? 0)))
+        sonnetResetDate = response.sevenDaySonnet?.resetsAt
     }
 }
