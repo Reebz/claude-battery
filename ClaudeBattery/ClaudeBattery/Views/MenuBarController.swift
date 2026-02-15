@@ -2,10 +2,6 @@ import AppKit
 import SwiftUI
 import Combine
 
-extension Notification.Name {
-    static let openSettings = Notification.Name("openSettings")
-}
-
 @MainActor
 class MenuBarController {
     private let statusItem: NSStatusItem
@@ -203,7 +199,11 @@ class MenuBarController {
 
     @objc private func openSettings() {
         NSApp.activate(ignoringOtherApps: true)
-        NotificationCenter.default.post(name: .openSettings, object: nil)
+        if #available(macOS 14.0, *) {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        } else {
+            NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        }
     }
 
     @objc private func quit() {
