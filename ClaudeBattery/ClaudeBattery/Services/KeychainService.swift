@@ -16,18 +16,23 @@ final class KeychainService {
         self.service = Bundle.main.bundleIdentifier ?? "com.claudebattery.app"
     }
 
+    private var baseQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecUseDataProtectionKeychain as String: true,
+        ]
+    }
+
     func save(_ value: String, forKey account: String) {
         guard let data = value.data(using: .utf8) else { return }
 
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
+        var deleteQuery = baseQuery
+        deleteQuery[kSecAttrAccount as String] = account
+        SecItemDelete(deleteQuery as CFDictionary)
 
-        SecItemDelete(query as CFDictionary)
-
-        var addQuery = query
+        var addQuery = baseQuery
+        addQuery[kSecAttrAccount as String] = account
         addQuery[kSecValueData as String] = data
         addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
 
@@ -38,13 +43,10 @@ final class KeychainService {
     }
 
     func read(forKey account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
+        var query = baseQuery
+        query[kSecAttrAccount as String] = account
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
 
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -66,11 +68,8 @@ final class KeychainService {
     }
 
     func delete(forKey account: String) {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
+        var query = baseQuery
+        query[kSecAttrAccount as String] = account
 
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
