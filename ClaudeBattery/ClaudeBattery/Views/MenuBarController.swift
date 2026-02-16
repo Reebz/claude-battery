@@ -11,29 +11,42 @@ class MenuBarController: NSObject {
     private let usageService: UsageService
     private let onSignOut: () -> Void
     private var settingsWindowController: NSWindowController?
+    private var appearanceObservation: NSKeyValueObservation?
 
     private let digitFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
 
-    // Cached static icons
+    private var isMenuBarDark: Bool {
+        guard let button = statusItem.button else { return true }
+        return button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
 
-    private lazy var unauthenticatedIcon: NSImage = {
+    /// The primary icon color: white on dark menu bars, black on light menu bars.
+    private var iconColor: NSColor {
+        isMenuBarDark ? .white : .black
+    }
+
+    // MARK: - Dynamic Icon Factories (appearance-aware, never cached)
+
+    private func makeUnauthenticatedIcon() -> NSImage {
+        let color = iconColor
         let image = NSImage(size: NSSize(width: 34, height: 18), flipped: false) { rect in
-            NSColor.black.setStroke()
+            color.setStroke()
             let path = NSBezierPath(roundedRect: NSRect(x: 0, y: 3, width: 30, height: 12), xRadius: 2, yRadius: 2)
             path.lineWidth = 1.0
             path.stroke()
 
-            NSColor.black.setFill()
+            color.setFill()
             NSBezierPath(roundedRect: NSRect(x: 30, y: 5.5, width: 2, height: 5), xRadius: 0.5, yRadius: 0.5).fill()
 
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = false
         return image
-    }()
+    }
 
-    private func makeStatusIcon(text: String, color: NSColor) -> NSImage {
+    private func makeStatusIcon(text: String, alpha: CGFloat = 1.0) -> NSImage {
         let font = digitFont
+        let color = iconColor.withAlphaComponent(alpha)
         let image = NSImage(size: NSSize(width: 40, height: 18), flipped: false) { rect in
             color.setStroke()
             let outline = NSBezierPath(roundedRect: NSRect(x: 0, y: 3, width: 30, height: 12), xRadius: 2, yRadius: 2)
@@ -51,13 +64,9 @@ class MenuBarController: NSObject {
             )
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = false
         return image
     }
-
-    private lazy var loadingIcon = makeStatusIcon(text: "...", color: .black)
-    private lazy var staleIcon = makeStatusIcon(text: "...", color: .gray)
-    private lazy var errorIcon = makeStatusIcon(text: "!", color: .gray)
 
     init(authManager: AuthManager, usageService: UsageService, onSignOut: @escaping () -> Void) {
         self.authManager = authManager
@@ -104,6 +113,18 @@ class MenuBarController: NSObject {
                 self?.updateIcon(usage, isAuthenticated: isAuth)
             }
             .store(in: &cancellables)
+
+        // KVO on the button's effectiveAppearance — fires when wallpaper changes
+        // the menu bar from dark to light (or vice versa), unlike DistributedNotificationCenter.
+        appearanceObservation = statusItem.button?.observe(
+            \.effectiveAppearance, options: [.new, .old]
+        ) { [weak self] _, change in
+            guard change.oldValue?.name != change.newValue?.name else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.authManager.isAuthenticated)
+            }
+        }
     }
 
     // MARK: - Click Handling
@@ -159,7 +180,14 @@ class MenuBarController: NSObject {
             return
         }
 
-        let settingsView = SettingsView(signOut: onSignOut)
+        let settingsView = SettingsView(
+            isAuthenticated: authManager.isAuthenticated,
+            signOut: onSignOut,
+            signIn: { [weak self] in self?.authManager.presentLogin() },
+            closeWindow: { [weak self] in
+                self?.settingsWindowController?.close()
+            }
+        )
         let hostingController = NSHostingController(rootView: settingsView)
         let window = NSWindow(contentViewController: hostingController)
         window.title = "Claude Battery Settings"
@@ -193,15 +221,15 @@ class MenuBarController: NSObject {
         let image: NSImage
 
         if !isAuthenticated {
-            image = unauthenticatedIcon
+            image = makeUnauthenticatedIcon()
         } else if let usage = usage {
             image = makeBatteryIcon(usage: usage)
         } else if usageService.consecutiveFailures >= 10 {
-            image = errorIcon
+            image = makeStatusIcon(text: "!", alpha: 0.5)
         } else if usageService.isStale && usageService.consecutiveFailures >= 3 {
-            image = staleIcon
+            image = makeStatusIcon(text: "...", alpha: 0.5)
         } else {
-            image = loadingIcon
+            image = makeStatusIcon(text: "...")
         }
 
         statusItem.button?.image = image
@@ -212,7 +240,6 @@ class MenuBarController: NSObject {
         let sessionPercent = Int(usage.sessionRemaining)
         let isSessionLow = sessionPercent < 20
         let isWeeklyLow = weeklyPercent < 20
-        let anyLow = isSessionLow || isWeeklyLow
 
         let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .heavy)
         let smallNumberFont = NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .heavy)
@@ -228,6 +255,7 @@ class MenuBarController: NSObject {
         let gap: CGFloat = 4
 
         let totalWidth = nubWidth + batteryWidth + gap + batteryWidth + nubWidth
+        let baseColor = iconColor
 
         let image = NSImage(size: NSSize(width: totalWidth, height: iconHeight), flipped: false) { rect in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return true }
@@ -244,19 +272,15 @@ class MenuBarController: NSObject {
                     y: (iconHeight - numberSize.height) / 2
                 )
 
-                // Template mode: .black = opaque (macOS auto-colors as menu bar text)
-                // Non-template mode (anyLow): .white for outlines, .red for low fill
-                let strokeColor: NSColor = anyLow ? .white : .black
-
-                // 1. Outline
-                strokeColor.setStroke()
+                // 1. Outline — always uses baseColor (adapts to menu bar appearance)
+                baseColor.setStroke()
                 let outline = NSBezierPath(roundedRect: NSRect(x: bodyX, y: batteryY, width: batteryWidth, height: batteryHeight), xRadius: cornerRadius, yRadius: cornerRadius)
                 outline.lineWidth = 1.0
                 outline.stroke()
 
                 // 2. Nub
                 let nubX = nubOnLeft ? bodyX - nubWidth : bodyX + batteryWidth
-                strokeColor.setFill()
+                baseColor.setFill()
                 NSBezierPath(roundedRect: NSRect(x: nubX, y: batteryY + (batteryHeight - nubHeight) / 2, width: nubWidth, height: nubHeight), xRadius: 0.5, yRadius: 0.5).fill()
 
                 // 3. Fill level
@@ -267,13 +291,13 @@ class MenuBarController: NSObject {
                         ? bodyX + fillInset + interiorWidth - fillWidth
                         : bodyX + fillInset
                     fillRect = NSRect(x: fillX, y: batteryY + fillInset, width: fillWidth, height: interiorHeight)
-                    let fillColor: NSColor = anyLow ? (isLow ? .red : .white) : .black
+                    let fillColor: NSColor = isLow ? .red : baseColor
                     fillColor.setFill()
                     NSBezierPath(roundedRect: fillRect, xRadius: 1.5, yRadius: 1.5).fill()
                 }
 
-                // 4. Text — adaptive two-pass clipping
-                // Pass 1: Knockout over filled area (clear → transparent → contrasts with fill)
+                // 4. Text — two-pass clipping for contrast
+                // Pass 1: Knockout over filled area (punch transparent hole so fill color shows through)
                 if fillWidth > 0 {
                     ctx.saveGState()
                     ctx.clip(to: fillRect)
@@ -286,8 +310,6 @@ class MenuBarController: NSObject {
                 }
 
                 // Pass 2: Solid text over unfilled area
-                // Template mode: .black = opaque → macOS renders as menu bar text color
-                // Non-template mode: .white = visible on dark menu bar background
                 let unfilledWidth = interiorWidth - fillWidth
                 if unfilledWidth > 0 {
                     let unfilledX: CGFloat = nubOnLeft
@@ -299,7 +321,7 @@ class MenuBarController: NSObject {
                     ctx.clip(to: unfilledRect)
                     numberStr.draw(at: numberPoint, withAttributes: [
                         .font: font, .kern: kern,
-                        .foregroundColor: anyLow ? NSColor.white : NSColor.black
+                        .foregroundColor: baseColor
                     ])
                     ctx.restoreGState()
                 }
@@ -314,7 +336,7 @@ class MenuBarController: NSObject {
             return true
         }
 
-        image.isTemplate = !anyLow
+        image.isTemplate = false
         return image
     }
 }

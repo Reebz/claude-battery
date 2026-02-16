@@ -8,7 +8,12 @@ struct ClaudeBatteryApp: App {
 
     var body: some Scene {
         Settings {
-            SettingsView(signOut: { [weak appDelegate] in appDelegate?.signOut() })
+            SettingsView(
+                isAuthenticated: appDelegate.authManager?.isAuthenticated ?? false,
+                signOut: { [weak appDelegate] in appDelegate?.signOut() },
+                signIn: { [weak appDelegate] in appDelegate?.authManager?.presentLogin() },
+                closeWindow: { NSApp.keyWindow?.close() }
+            )
         }
     }
 }
@@ -16,7 +21,7 @@ struct ClaudeBatteryApp: App {
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var keychain: KeychainService!
-    private var authManager: AuthManager!
+    var authManager: AuthManager!
     private var usageService: UsageService!
     private var menuBarController: MenuBarController!
     private var cancellables = Set<AnyCancellable>()
