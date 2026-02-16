@@ -53,7 +53,7 @@ Build and run with Cmd+R.
 
 If you find Claude Battery useful, consider buying me a coffee.
 
-[![Buy Me A Coffee](https://media.giphy.com/media/513lZvPf6khjIQFibF/giphy.gif)](https://buymeacoffee.com/reebz)
+[![Buy Me A Coffee](https://private-user-images.githubusercontent.com/1386738/550422844-14c36bed-46d3-40a1-ad34-00cdbbac3955.gif?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzEyNDIzOTQsIm5iZiI6MTc3MTI0MjA5NCwicGF0aCI6Ii8xMzg2NzM4LzU1MDQyMjg0NC0xNGMzNmJlZC00NmQzLTQwYTEtYWQzNC0wMGNkYmJhYzM5NTUuZ2lmP1gtQW16LUFsZ29yaXRobT1BV1M0LUhNQUMtU0hBMjU2JlgtQW16LUNyZWRlbnRpYWw9QUtJQVZDT0RZTFNBNTNQUUs0WkElMkYyMDI2MDIxNiUyRnVzLWVhc3QtMSUyRnMzJTJGYXdzNF9yZXF1ZXN0JlgtQW16LURhdGU9MjAyNjAyMTZUMTE0MTM0WiZYLUFtei1FeHBpcmVzPTMwMCZYLUFtei1TaWduYXR1cmU9OTYzOTJkMWQyNDg5ZDI2OTMzY2VjMTU3YWNlYjI4ZWEwMGFmOGMzMjBmYzM1MDk2NDA5MGNjYWIwMWJlZmU0YiZYLUFtei1TaWduZWRIZWFkZXJzPWhvc3QifQ.oKHIp7WY4y-11I2acQ8fatUk2MQQoinf4Hsy6W6mgo4)](https://buymeacoffee.com/reebz)
 
 ## License
 
