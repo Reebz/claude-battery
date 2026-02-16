@@ -13,15 +13,9 @@ class AuthManager: NSObject, ObservableObject {
     private var loginWebView: WKWebView?
     private var loginWindowController: NSWindowController?
     private var loginTimeoutTask: Task<Void, Never>?
+    private var hasCapturedSession = false
 
     private static let sessionExpirationKey = "sessionKeyExpiration"
-
-    private lazy var apiSession: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.httpShouldSetCookies = false
-        config.timeoutIntervalForRequest = 30
-        return URLSession(configuration: config)
-    }()
 
     init(keychain: KeychainService) {
         self.keychain = keychain
@@ -74,22 +68,24 @@ class AuthManager: NSObject, ObservableObject {
     }
 
     private func handleCookieCaptured(_ cookie: HTTPCookie) {
-        logger.info("handleCookieCaptured: name=\(cookie.name) domain=\(cookie.domain) secure=\(cookie.isSecure) path=\(cookie.path) valueLen=\(cookie.value.count)")
-        guard cookie.domain.hasSuffix("claude.ai"),
+        guard !hasCapturedSession else { return }
+
+        guard cookie.domain == "claude.ai" || cookie.domain == ".claude.ai",
               cookie.isSecure,
               cookie.path == "/" else {
-            logger.warning("Cookie rejected — domain=\(cookie.domain) secure=\(cookie.isSecure) path=\(cookie.path)")
+            logger.info("Cookie rejected — domain=\(cookie.domain)")
             return
         }
 
+        hasCapturedSession = true
+
         keychain.save(cookie.value, forKey: KeychainService.Keys.sessionKey)
 
-        // Store cookie expiration for proactive session management
         if let expiresDate = cookie.expiresDate {
             UserDefaults.standard.set(expiresDate, forKey: Self.sessionExpirationKey)
         }
 
-        logger.info("Session cookie captured successfully")
+        logger.info("Session cookie captured")
 
         loginTimeoutTask?.cancel()
         loginTimeoutTask = nil
@@ -121,7 +117,7 @@ class AuthManager: NSObject, ObservableObject {
         }
 
         do {
-            let (data, response) = try await apiSession.data(for: request)
+            let (data, response) = try await ClaudeAPI.session.data(for: request)
 
             guard let httpResponse = response as? HTTPURLResponse else {
                 logger.error("Non-HTTP response from organizations API")
@@ -137,8 +133,10 @@ class AuthManager: NSObject, ObservableObject {
                 return
             }
 
+            #if DEBUG
             let rawBody = String(data: data, encoding: .utf8) ?? "(non-utf8)"
-            logger.info("Org discovery response: \(rawBody.prefix(1000))")
+            logger.debug("Org discovery response: \(rawBody.prefix(1000))")
+            #endif
 
             let orgs = try JSONDecoder().decode([Organization].self, from: data)
 
@@ -159,21 +157,24 @@ class AuthManager: NSObject, ObservableObject {
     // MARK: - Sign Out
 
     func signOut() {
-        keychain.deleteAll()
-        UserDefaults.standard.removeObject(forKey: Self.sessionExpirationKey)
+        clearCredentials()
         WKWebsiteDataStore.default().removeData(
             ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
             modifiedSince: .distantPast
         ) { }
-        isAuthenticated = false
         logger.info("Signed out")
     }
 
     func handleAuthFailure() {
+        clearCredentials()
+        logger.info("Auth failure — credentials cleared")
+    }
+
+    private func clearCredentials() {
+        hasCapturedSession = false
         keychain.deleteAll()
         UserDefaults.standard.removeObject(forKey: Self.sessionExpirationKey)
         isAuthenticated = false
-        logger.info("Auth failure — credentials cleared")
     }
 
     // MARK: - Allowed Domains
@@ -212,12 +213,9 @@ extension AuthManager: WKNavigationDelegate {
 
         Task {
             let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
-            let claudeCookies = cookies.filter { $0.domain.contains("claude") }
-            logger.info("didFinish: \(cookies.count) total cookies, \(claudeCookies.count) claude cookies")
-            for cookie in claudeCookies {
-                logger.info("  cookie: name=\(cookie.name) domain=\(cookie.domain) secure=\(cookie.isSecure) path=\(cookie.path)")
-            }
-            if let sessionCookie = cookies.first(where: { $0.name == "sessionKey" && $0.domain.contains("claude") }) {
+            if let sessionCookie = cookies.first(where: {
+                $0.name == "sessionKey" && ($0.domain == "claude.ai" || $0.domain == ".claude.ai")
+            }) {
                 handleCookieCaptured(sessionCookie)
                 return
             }
@@ -243,16 +241,10 @@ extension AuthManager: WKHTTPCookieStoreObserver {
     nonisolated func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
         Task { @MainActor [weak self] in
             let cookies = await cookieStore.allCookies()
-            let claudeCookies = cookies.filter { $0.domain.contains("claude") }
-            if !claudeCookies.isEmpty {
-                logger.info("cookiesDidChange: \(claudeCookies.count) claude cookies")
-                for cookie in claudeCookies {
-                    logger.info("  cookie: name=\(cookie.name) domain=\(cookie.domain) secure=\(cookie.isSecure) path=\(cookie.path)")
-                }
-            }
-            if let sessionCookie = cookies.first(where: { $0.name == "sessionKey" && $0.domain.contains("claude") }) {
+            if let sessionCookie = cookies.first(where: {
+                $0.name == "sessionKey" && ($0.domain == "claude.ai" || $0.domain == ".claude.ai")
+            }) {
                 self?.handleCookieCaptured(sessionCookie)
-                return
             }
         }
     }

@@ -6,7 +6,7 @@ struct UsagePopoverView: View {
     let onSignIn: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        Group {
             if !authManager.isAuthenticated {
                 unauthenticatedContent
             } else if let usage = usageService.latestUsage {
@@ -17,115 +17,105 @@ struct UsagePopoverView: View {
                 loadingContent
             }
         }
-        .padding(16)
-        .frame(width: 320)
+        .frame(width: 300)
+        .preferredColorScheme(.dark)
     }
 
     // MARK: - Authenticated
 
     @ViewBuilder
     private func authenticatedContent(usage: UsageData) -> some View {
-        Text("Claude Usage")
-            .font(.headline)
-
-        // Weekly quota
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Weekly Quota")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                Spacer()
-                Text(String(format: "%.0f%% remaining", usage.weeklyRemaining))
-                    .font(.subheadline)
-                    .foregroundColor(usage.weeklyRemaining < 20 ? .red : .secondary)
+        VStack(spacing: 8) {
+            LazyVGrid(columns: [
+                GridItem(.flexible(), spacing: 8),
+                GridItem(.flexible(), spacing: 8)
+            ], spacing: 8) {
+                sessionCard(usage: usage)
+                weeklyCard(usage: usage)
+                resetsCard(usage: usage)
+                modelsCard(usage: usage)
             }
 
-            ProgressView(value: usage.weeklyRemaining, total: 100)
-                .tint(usage.weeklyRemaining < 20 ? .red : .accentColor)
-
-            if let resetDate = usage.weeklyResetDate {
-                Text("Resets \(formatResetDate(resetDate))")
-                    .font(.caption)
+            VStack(spacing: 2) {
+                Text(lastUpdatedText)
+                    .font(.caption2)
                     .foregroundColor(.secondary)
+                Text("Right-click the battery icon in your menu bar for Settings.")
+                    .font(.system(size: 9))
+                    .foregroundColor(Color(white: 0.45))
+                    .multilineTextAlignment(.center)
             }
+            .padding(.top, 2)
         }
+        .padding(12)
+    }
 
-        Divider()
+    // MARK: - Cards
 
-        // Session
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Session")
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                Spacer()
-                Text(String(format: "%.0f%% remaining", usage.sessionRemaining))
-                    .font(.subheadline)
-                    .foregroundColor(usage.sessionRemaining < 20 ? .red : .secondary)
-            }
+    private let cardHeight: CGFloat = 110
 
-            ProgressView(value: usage.sessionRemaining, total: 100)
-                .tint(usage.sessionRemaining < 20 ? .red : .accentColor)
-
-            if let resetDate = usage.sessionResetDate {
-                Text("Resets \(formatResetCountdown(resetDate))")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+    private func sessionCard(usage: UsageData) -> some View {
+        UsageCard(title: "Session") {
+            ArcGauge(value: usage.sessionRemaining, color: gaugeColor(for: usage.sessionRemaining))
+                .frame(height: 58)
         }
+        .frame(height: cardHeight)
+    }
 
-        // Per-model breakdown (if data exists)
-        if usage.opusRemaining < 100 || usage.sonnetRemaining < 100 {
-            Divider()
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Per-Model Breakdown")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                if usage.opusRemaining < 100 {
-                    HStack {
-                        Text("Opus")
-                            .font(.caption)
-                        Spacer()
-                        Text(String(format: "%.0f%%", usage.opusRemaining))
-                            .font(.caption)
-                    }
-                    ProgressView(value: usage.opusRemaining, total: 100)
-                        .scaleEffect(y: 0.7)
-                }
-
-                if usage.sonnetRemaining < 100 {
-                    HStack {
-                        Text("Sonnet")
-                            .font(.caption)
-                        Spacer()
-                        Text(String(format: "%.0f%%", usage.sonnetRemaining))
-                            .font(.caption)
-                    }
-                    ProgressView(value: usage.sonnetRemaining, total: 100)
-                        .scaleEffect(y: 0.7)
-                }
-            }
+    private func weeklyCard(usage: UsageData) -> some View {
+        UsageCard(title: "Weekly") {
+            ArcGauge(value: usage.weeklyRemaining, color: gaugeColor(for: usage.weeklyRemaining))
+                .frame(height: 58)
         }
+        .frame(height: cardHeight)
+    }
 
-        Divider()
+    private func resetsCard(usage: UsageData) -> some View {
+        UsageCard(title: "Resets") {
+            VStack(alignment: .leading, spacing: 8) {
+                resetRow(label: "Session", date: usage.sessionResetDate)
+                resetRow(label: "Weekly", date: usage.weeklyResetDate)
+            }
+            .frame(maxHeight: .infinity, alignment: .center)
+        }
+        .frame(height: cardHeight)
+    }
 
-        // Last updated
+    private func modelsCard(usage: UsageData) -> some View {
+        UsageCard(title: "Models") {
+            VStack(spacing: 8) {
+                ModelBar(name: "Opus", value: usage.opusRemaining, color: gaugeColor(for: usage.opusRemaining))
+                ModelBar(name: "Sonnet", value: usage.sonnetRemaining, color: gaugeColor(for: usage.sonnetRemaining))
+            }
+            .frame(maxHeight: .infinity, alignment: .center)
+        }
+        .frame(height: cardHeight)
+    }
+
+    // MARK: - Components
+
+    private func resetRow(label: String, date: Date?) -> some View {
         HStack {
-            if usageService.isStale {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.yellow)
-                    .font(.caption)
-            }
-            Text(lastUpdatedText)
-                .font(.caption)
-                .foregroundColor(usageService.isStale ? .yellow : .secondary)
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundColor(.white)
             Spacer()
-            Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
-                .font(.caption2)
-                .foregroundColor(.secondary)
+            if let date = date {
+                Text(formatCountdown(date))
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(.white)
+            } else {
+                Text("--")
+                    .font(.system(size: 10))
+                    .foregroundColor(Color(white: 0.5))
+            }
         }
+    }
+
+    private func gaugeColor(for value: Double) -> Color {
+        if value < 20 { return .red }
+        if value < 50 { return .orange }
+        return .green
     }
 
     // MARK: - States
@@ -138,6 +128,7 @@ struct UsagePopoverView: View {
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, minHeight: 100)
+        .padding(16)
     }
 
     private var unauthenticatedContent: some View {
@@ -148,12 +139,11 @@ struct UsagePopoverView: View {
             Text("Sign in to see your Claude usage")
                 .font(.subheadline)
                 .multilineTextAlignment(.center)
-            Button("Sign In") {
-                onSignIn()
-            }
-            .buttonStyle(.borderedProminent)
+            Button("Sign In") { onSignIn() }
+                .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, minHeight: 120)
+        .padding(16)
     }
 
     private var errorContent: some View {
@@ -168,6 +158,7 @@ struct UsagePopoverView: View {
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, minHeight: 100)
+        .padding(16)
     }
 
     // MARK: - Formatting
@@ -177,31 +168,116 @@ struct UsagePopoverView: View {
         let seconds = Int(Date().timeIntervalSince(lastFetch))
         if seconds < 60 { return "Updated just now" }
         let minutes = seconds / 60
-        if minutes == 1 { return "Updated 1 min ago" }
-        return "Updated \(minutes) min ago"
+        if minutes == 1 { return "Updated 1 minute ago" }
+        return "Updated \(minutes) minutes ago"
     }
 
-    private static let resetDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMM d 'at' h:mm a"
-        return formatter
-    }()
-
-    private func formatResetDate(_ date: Date) -> String {
-        Self.resetDateFormatter.string(from: date)
-    }
-
-    private func formatResetCountdown(_ date: Date) -> String {
+    private func formatCountdown(_ date: Date) -> String {
         let remaining = date.timeIntervalSinceNow
-        guard remaining > 0 else { return "soon" }
+        guard remaining > 0 else { return "00m 00s" }
 
-        let hours = Int(remaining / 3600)
-        let minutes = Int(remaining / 60) % 60
+        let total = Int(remaining)
+        let d = total / 86400
+        let h = (total % 86400) / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
 
-        if hours > 0 {
-            return "in \(hours)h \(minutes)m"
+        if d > 0 {
+            return String(format: "%dd %02dh", d, h)
+        } else if h > 0 {
+            return String(format: "%dh %02dm", h, m)
         } else {
-            return "in \(max(1, minutes))m"
+            return String(format: "%dm %02ds", m, s)
+        }
+    }
+}
+
+// MARK: - Card Container
+
+private struct UsageCard<Content: View>: View {
+    let title: String
+    let content: Content
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.white)
+            content
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity)
+        .background(Color(white: 0.15))
+        .cornerRadius(12)
+    }
+}
+
+// MARK: - Arc Gauge
+
+private struct ArcGauge: View {
+    let value: Double
+    let color: Color
+
+    var body: some View {
+        ZStack {
+            ArcShape()
+                .stroke(Color(white: 0.25), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+            ArcShape()
+                .trim(from: 0, to: value / 100)
+                .stroke(color, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+            Text(String(format: "%.0f%%", value))
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundColor(.white)
+                .offset(y: 2)
+        }
+    }
+}
+
+private struct ArcShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let center = CGPoint(x: rect.midX, y: rect.midY + 6)
+        let radius = min(rect.width, rect.height) / 2 - 3
+        path.addArc(center: center, radius: radius,
+                    startAngle: .degrees(135), endAngle: .degrees(405),
+                    clockwise: false)
+        return path
+    }
+}
+
+// MARK: - Model Bar
+
+private struct ModelBar: View {
+    let name: String
+    let value: Double
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(name)
+                    .font(.system(size: 10))
+                    .foregroundColor(Color(white: 0.6))
+                Spacer()
+                Text(String(format: "%.0f%%", value))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.white)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(white: 0.25))
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(color)
+                        .frame(width: max(0, geo.size.width * value / 100))
+                }
+            }
+            .frame(height: 4)
         }
     }
 }

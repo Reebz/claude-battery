@@ -1,6 +1,6 @@
 import AppKit
 import Foundation
-import UserNotifications
+@preconcurrency import UserNotifications
 import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app", category: "Usage")
@@ -18,9 +18,9 @@ class UsageService: NSObject, ObservableObject {
         static let backoffInterval2: TimeInterval = 600
         static let maxBackoffInterval: TimeInterval = 1800
         static let staleFailureThreshold = 3
+        static let backoffThreshold2 = 6
         static let errorFailureThreshold = 10
         static let defaultNotificationThreshold: Double = 20.0
-        static let sessionExpirationKey = "sessionKeyExpiration"
     }
 
     var isStale: Bool {
@@ -30,7 +30,7 @@ class UsageService: NSObject, ObservableObject {
 
     var pollInterval: TimeInterval {
         if consecutiveFailures < Constants.staleFailureThreshold { return Constants.baseInterval }
-        if consecutiveFailures < 6 { return Constants.backoffInterval1 }
+        if consecutiveFailures < Constants.backoffThreshold2 { return Constants.backoffInterval1 }
         if consecutiveFailures < Constants.errorFailureThreshold { return Constants.backoffInterval2 }
         return Constants.maxBackoffInterval
     }
@@ -47,15 +47,6 @@ class UsageService: NSObject, ObservableObject {
         }
         set { UserDefaults.standard.set(newValue, forKey: "notificationThreshold") }
     }
-
-    private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.waitsForConnectivity = true
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
-        config.httpShouldSetCookies = false
-        return URLSession(configuration: config)
-    }()
 
     init(keychain: KeychainService) {
         self.keychain = keychain
@@ -103,20 +94,14 @@ class UsageService: NSObject, ObservableObject {
 
         guard let sessionKey = keychain.read(forKey: KeychainService.Keys.sessionKey),
               let orgId = keychain.read(forKey: KeychainService.Keys.organizationId) else {
+            logger.warning("Poll skipped — missing credentials")
             return
         }
 
-        // Check if session cookie has expired
-        let expiration = UserDefaults.standard.object(forKey: Constants.sessionExpirationKey) as? Date
+        let expiration = UserDefaults.standard.object(forKey: "sessionKeyExpiration") as? Date
         if let expiration, expiration < Date() {
             logger.info("Session cookie expired, triggering re-auth")
             onAuthFailure?()
-            return
-        }
-
-        // Validate orgId is a UUID
-        guard orgId.range(of: "^[a-f0-9\\-]{36}$", options: .regularExpression) != nil else {
-            logger.error("Invalid orgId format in keychain")
             return
         }
 
@@ -126,7 +111,7 @@ class UsageService: NSObject, ObservableObject {
         }
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await ClaudeAPI.session.data(for: request)
 
             guard let httpResponse = response as? HTTPURLResponse else {
                 consecutiveFailures += 1
@@ -147,8 +132,10 @@ class UsageService: NSObject, ObservableObject {
                 return
             }
 
+            #if DEBUG
             let rawBody = String(data: data, encoding: .utf8) ?? "(non-utf8)"
             logger.info("Usage API response (\(data.count) bytes): \(rawBody.prefix(1000))")
+            #endif
 
             let decoder = JSONDecoder()
             decoder.keyDecodingStrategy = .convertFromSnakeCase
@@ -162,24 +149,9 @@ class UsageService: NSObject, ObservableObject {
             if let weeklyRemaining = latestUsage?.weeklyRemaining {
                 checkAndNotify(remaining: weeklyRemaining, threshold: notificationThreshold)
             }
-        } catch let decodingError as DecodingError {
-            consecutiveFailures += 1
-            // Log full decoding error details
-            switch decodingError {
-            case .keyNotFound(let key, let context):
-                logger.error("Decoding: missing key '\(key.stringValue)' at \(context.codingPath.map(\.stringValue).joined(separator: "."))")
-            case .typeMismatch(let type, let context):
-                logger.error("Decoding: type mismatch for \(String(describing: type)) at \(context.codingPath.map(\.stringValue).joined(separator: "."))")
-            case .valueNotFound(let type, let context):
-                logger.error("Decoding: value not found for \(String(describing: type)) at \(context.codingPath.map(\.stringValue).joined(separator: "."))")
-            case .dataCorrupted(let context):
-                logger.error("Decoding: data corrupted at \(context.codingPath.map(\.stringValue).joined(separator: ".")): \(context.debugDescription)")
-            @unknown default:
-                logger.error("Decoding: unknown error: \(decodingError.localizedDescription)")
-            }
         } catch {
             consecutiveFailures += 1
-            logger.error("Poll failed: \(error.localizedDescription)")
+            logger.error("Poll failed: \(error)")
         }
     }
 
@@ -188,6 +160,8 @@ class UsageService: NSObject, ObservableObject {
     // MARK: - Notifications
 
     private func checkAndNotify(remaining: Double, threshold: Double) {
+        guard UserDefaults.standard.bool(forKey: "notificationsEnabled") else { return }
+
         if remaining < threshold && !didNotifyBelowThreshold {
             didNotifyBelowThreshold = true
             scheduleNotification(remaining: remaining)
@@ -197,21 +171,29 @@ class UsageService: NSObject, ObservableObject {
     }
 
     private func scheduleNotification(remaining: Double) {
-        let content = UNMutableNotificationContent()
-        content.title = "Claude Usage Low"
-        content.body = String(format: "Weekly quota is at %.0f%% remaining.", remaining)
-        content.sound = .default
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            guard settings.authorizationStatus == .authorized else {
+                logger.info("Notifications not authorized (status: \(String(describing: settings.authorizationStatus)))")
+                return
+            }
 
-        let request = UNNotificationRequest(
-            identifier: "low-usage",
-            content: content,
-            trigger: nil
-        )
-        UNUserNotificationCenter.current().add(request)
-    }
+            let content = UNMutableNotificationContent()
+            content.title = "Claude Usage Low"
+            content.body = String(format: "Weekly quota is at %.0f%% remaining.", remaining)
+            content.sound = .default
 
-    func requestNotificationPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+            let request = UNNotificationRequest(
+                identifier: "low-usage",
+                content: content,
+                trigger: nil
+            )
+            center.add(request) { error in
+                if let error {
+                    logger.error("Failed to schedule notification: \(error.localizedDescription)")
+                }
+            }
+        }
     }
 
     // MARK: - Wake
@@ -244,34 +226,6 @@ struct UsageResponse: Codable {
     let sevenDay: UsageTier?
     let sevenDayOpus: UsageTier?
     let sevenDaySonnet: UsageTier?
-
-    // Accept any extra keys from the API
-    private struct DynamicKey: CodingKey {
-        var stringValue: String
-        var intValue: Int?
-        init?(stringValue: String) { self.stringValue = stringValue }
-        init?(intValue: Int) { return nil }
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: DynamicKey.self)
-
-        // Log all top-level keys for debugging
-        let allKeys = container.allKeys.map(\.stringValue)
-        let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app", category: "Usage")
-        logger.info("API response keys: \(allKeys.joined(separator: ", "))")
-
-        // Decode from a standard keyed container using snake_case conversion
-        let standard = try decoder.container(keyedBy: CodingKeys.self)
-        fiveHour = try? standard.decode(UsageTier.self, forKey: .fiveHour)
-        sevenDay = try? standard.decode(UsageTier.self, forKey: .sevenDay)
-        sevenDayOpus = try? standard.decode(UsageTier.self, forKey: .sevenDayOpus)
-        sevenDaySonnet = try? standard.decode(UsageTier.self, forKey: .sevenDaySonnet)
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case fiveHour, sevenDay, sevenDayOpus, sevenDaySonnet
-    }
 }
 
 struct UsageTier: Codable {
@@ -285,7 +239,6 @@ struct UsageTier: Codable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         utilization = try? container.decode(Double.self, forKey: .utilization)
-        // Try Date first, fall back to nil if parsing fails
         resetsAt = try? container.decode(Date.self, forKey: .resetsAt)
     }
 }

@@ -18,7 +18,6 @@ final class KeychainService {
 
     func save(_ value: String, forKey key: String) {
         defaults.set(value, forKey: prefix + key)
-        logger.info("Saved \(key)")
     }
 
     func read(forKey key: String) -> String? {
@@ -35,10 +34,19 @@ final class KeychainService {
     }
 }
 
-// MARK: - Shared API Request Builder
+// MARK: - API Configuration
 
 enum ClaudeAPI {
     static let baseURL = "https://claude.ai"
+
+    static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.httpShouldSetCookies = false
+        config.waitsForConnectivity = true
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 60
+        return URLSession(configuration: config)
+    }()
 
     static func makeRequest(path: String, sessionKey: String) -> URLRequest? {
         guard let url = URL(string: "\(baseURL)\(path)") else { return nil }

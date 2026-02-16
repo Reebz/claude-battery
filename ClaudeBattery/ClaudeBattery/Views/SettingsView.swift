@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import ServiceManagement
 import UserNotifications
@@ -6,8 +7,8 @@ struct SettingsView: View {
     let signOut: () -> Void
 
     @State private var launchAtLogin = false
-    @State private var notificationsEnabled = false
-    @State private var notificationThreshold: Double = 20
+    @AppStorage("notificationsEnabled") private var notificationsEnabled = false
+    @AppStorage("notificationThreshold") private var notificationThreshold: Double = 20
 
     var body: some View {
         Form {
@@ -33,20 +34,8 @@ struct SettingsView: View {
                 Toggle("Low usage notification", isOn: $notificationsEnabled)
                     .onChange(of: notificationsEnabled) { newValue in
                         if newValue {
-                            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
-                                if !granted {
-                                    Task { @MainActor in
-                                        notificationsEnabled = false
-                                    }
-                                }
-                            }
+                            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
                         }
-                        UserDefaults.standard.set(newValue, forKey: "notificationsEnabled")
-                    }
-                    .onAppear {
-                        notificationsEnabled = UserDefaults.standard.bool(forKey: "notificationsEnabled")
-                        notificationThreshold = UserDefaults.standard.double(forKey: "notificationThreshold")
-                        if notificationThreshold == 0 { notificationThreshold = 20 }
                     }
 
                 if notificationsEnabled {
@@ -55,9 +44,6 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                         Slider(value: $notificationThreshold, in: 5...50, step: 5)
-                            .onChange(of: notificationThreshold) { newValue in
-                                UserDefaults.standard.set(newValue, forKey: "notificationThreshold")
-                            }
                     }
                 }
             }
@@ -68,8 +54,35 @@ struct SettingsView: View {
                 }
                 .foregroundColor(.red)
             }
+
+            Section {
+                Button(action: {
+                    if let url = URL(string: "https://www.buymeacoffee.com/reebz") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }) {
+                    HStack(spacing: 8) {
+                        Spacer()
+                        Image(systemName: "cup.and.saucer.fill")
+                            .foregroundColor(.black)
+                        Text("Buy me a coffee!")
+                            .font(.custom("Cookie-Regular", size: 20))
+                            .foregroundColor(.black)
+                        Spacer()
+                    }
+                    .padding(.vertical, 10)
+                    .padding(.horizontal, 16)
+                    .background(Color(red: 1.0, green: 0.867, blue: 0.0))
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(.black, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 350, height: 280)
+        .frame(width: 350, height: 380)
     }
 }
