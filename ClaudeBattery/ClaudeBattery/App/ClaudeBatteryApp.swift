@@ -34,7 +34,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         menuBarController = MenuBarController(
             authManager: authManager,
-            usageService: usageService
+            usageService: usageService,
+            onSignOut: { [weak self] in self?.signOut() }
         )
 
         // Set notification delegate early
