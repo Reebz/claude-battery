@@ -1,10 +1,10 @@
 
 
-# Claude Battery 
+# <img src="https://iili.io/qdnWVN1.png" width="80" height="72"> Claude Battery 
 
 Your Claude usage at a glance. A macOS menu bar widget that shows your Claude session and weekly limits... as a battery.
 
-
+<img src ="https://iili.io/qdnW1SV.png" width="180" height="80"> 
 
 
 ## Installation
@@ -31,6 +31,7 @@ Lastly, you can Right-click the menu bar icon for Settings, Notification customi
 - Per-model breakdown and weekly reset countdown timers in the popover (left-click) for when you want the detail
 - Lightweight and fast. Checks for usage every 2 mins in most scenarios
 
+<img src="https://iili.io/qdnWGHB.png" width="300" height="300">
 
 ## Why a battery?
 
@@ -47,8 +48,8 @@ And lastly, ["Invert, always invert".](https://www.stripe.press/poor-charlies-al
 
 ## Support
 
-If you find Claude Battery useful, consider [buying me a coffee](https://buymeacoffee.com/reebz).
-
+If you find Claude Battery useful, consider [buying me a coffee](https://buymeacoffee.com/reebz).<br>
+<a href="https://www.buymeacoffee.com/reebz" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
 
 ---
