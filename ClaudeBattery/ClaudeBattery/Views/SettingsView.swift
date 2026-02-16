@@ -4,7 +4,10 @@ import ServiceManagement
 import UserNotifications
 
 struct SettingsView: View {
+    let isAuthenticated: Bool
     let signOut: () -> Void
+    let signIn: () -> Void
+    let closeWindow: () -> Void
 
     @State private var launchAtLogin = false
     @AppStorage("notificationsEnabled") private var notificationsEnabled = false
@@ -49,10 +52,23 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Sign Out") {
-                    signOut()
+                HStack {
+                    Spacer()
+                    if isAuthenticated {
+                        Button("Sign Out") {
+                            signOut()
+                            closeWindow()
+                        }
+                        .foregroundColor(.red)
+                    } else {
+                        Button("Sign In") {
+                            signIn()
+                            closeWindow()
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    Spacer()
                 }
-                .foregroundColor(.red)
             }
 
             Section {

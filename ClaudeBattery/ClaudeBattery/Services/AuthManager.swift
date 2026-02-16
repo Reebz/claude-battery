@@ -54,6 +54,7 @@ class AuthManager: NSObject, ObservableObject {
         )
         window.contentView = webView
         window.title = "Sign in to Claude"
+        window.level = .floating
         window.center()
         window.delegate = self
 
