@@ -47,7 +47,7 @@ And lastly, ["Invert, always invert".](https://www.stripe.press/poor-charlies-al
 
 ## Support
 
-If you find Claude Battery useful, consider buying me a coffee.
+If you find Claude Battery useful, consider [buying me a coffee](https://buymeacoffee.com/reebz).
 
 
 
