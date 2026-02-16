@@ -1,16 +1,18 @@
-# <img src="http://private-user-images.githubusercontent.com/1386738/550448162-c9dc4158-2d40-4ad3-818f-6c256cc63a5c.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzEyNDY0MjQsIm5iZiI6MTc3MTI0NjEyNCwicGF0aCI6Ii8xMzg2NzM4LzU1MDQ0ODE2Mi1jOWRjNDE1OC0yZDQwLTRhZDMtODE4Zi02YzI1NmNjNjNhNWMucG5nP1gtQW16LUFsZ29yaXRobT1BV1M0LUhNQUMtU0hBMjU2JlgtQW16LUNyZWRlbnRpYWw9QUtJQVZDT0RZTFNBNTNQUUs0WkElMkYyMDI2MDIxNiUyRnVzLWVhc3QtMSUyRnMzJTJGYXdzNF9yZXF1ZXN0JlgtQW16LURhdGU9MjAyNjAyMTZUMTI0ODQ0WiZYLUFtei1FeHBpcmVzPTMwMCZYLUFtei1TaWduYXR1cmU9ZTBiMDNlNDQ0ZTlmMmQ5ZmQyYTNlMWU5NzFkMmJlZWIxYzJkYTBjZWVhOGIxNmFiZWYyYTdkMzQ4ZDA0ODRiMiZYLUFtei1TaWduZWRIZWFkZXJzPWhvc3QifQ.wgGTcr_OSKcN5DVknQFNBv-0qJzwOqSsdbziKUpOsnI" width="100" height="90"> Claude Battery
+<img src="http://private-user-images.githubusercontent.com/1386738/550448162-c9dc4158-2d40-4ad3-818f-6c256cc63a5c.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzEyNDY0MjQsIm5iZiI6MTc3MTI0NjEyNCwicGF0aCI6Ii8xMzg2NzM4LzU1MDQ0ODE2Mi1jOWRjNDE1OC0yZDQwLTRhZDMtODE4Zi02YzI1NmNjNjNhNWMucG5nP1gtQW16LUFsZ29yaXRobT1BV1M0LUhNQUMtU0hBMjU2JlgtQW16LUNyZWRlbnRpYWw9QUtJQVZDT0RZTFNBNTNQUUs0WkElMkYyMDI2MDIxNiUyRnVzLWVhc3QtMSUyRnMzJTJGYXdzNF9yZXF1ZXN0JlgtQW16LURhdGU9MjAyNjAyMTZUMTI0ODQ0WiZYLUFtei1FeHBpcmVzPTMwMCZYLUFtei1TaWduYXR1cmU9ZTBiMDNlNDQ0ZTlmMmQ5ZmQyYTNlMWU5NzFkMmJlZWIxYzJkYTBjZWVhOGIxNmFiZWYyYTdkMzQ4ZDA0ODRiMiZYLUFtei1TaWduZWRIZWFkZXJzPWhvc3QifQ.wgGTcr_OSKcN5DVknQFNBv-0qJzwOqSsdbziKUpOsnI" width="80" height="72">
 
-Your Claude usage at a glance. A macOS menu bar widget that shows how much of your weekly and session quotas remain... as a battery.
+# Claude Battery 
+
+Your Claude usage at a glance. A macOS menu bar widget that shows your Claude session and weekly limits... as a battery.
 
 <img src ="https://private-user-images.githubusercontent.com/1386738/550439208-a32b7a07-161b-4f6c-86ff-08a751c58125.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzEyNDYyNzIsIm5iZiI6MTc3MTI0NTk3MiwicGF0aCI6Ii8xMzg2NzM4LzU1MDQzOTIwOC1hMzJiN2EwNy0xNjFiLTRmNmMtODZmZi0wOGE3NTFjNTgxMjUucG5nP1gtQW16LUFsZ29yaXRobT1BV1M0LUhNQUMtU0hBMjU2JlgtQW16LUNyZWRlbnRpYWw9QUtJQVZDT0RZTFNBNTNQUUs0WkElMkYyMDI2MDIxNiUyRnVzLWVhc3QtMSUyRnMzJTJGYXdzNF9yZXF1ZXN0JlgtQW16LURhdGU9MjAyNjAyMTZUMTI0NjEyWiZYLUFtei1FeHBpcmVzPTMwMCZYLUFtei1TaWduYXR1cmU9YTk1YWQ5MzAyODY0OGM2MjczZDU4ZDhlZmZkOTQyMzVlYWM5NDQwZWU5Nzk3NmYxOGFhNzg3OTI2MGE3MTUwZiZYLUFtei1TaWduZWRIZWFkZXJzPWhvc3QifQ.XUO2n97xIsXLAH86ghmEaDPJ9o0-hQiIJdWK7Y2y0zU" width="180" height="80"> 
 
 
-## Installation
+## ⬇️  Installation
 
-[Download HERE](https://github.com/Reebz/claude-battery/releases/download/stable/claude-battery_v1.dmg), or manually find the latest `.dmg` file from the downloads folder, open it, and drag Claude Battery to your Applications folder. 
+[Download here](https://github.com/Reebz/claude-battery/releases/download/stable/claude-battery_v1.dmg), or manually find the latest `.dmg` file from the downloads folder, open it, and drag Claude Battery to your Applications folder. 
 
 
-## How To Use
+## 👆 How To Use
 
 1. Launch Claude Battery from Applications
 2. Left-click the battery icon in the menu bar to sign in
@@ -22,7 +24,7 @@ Lastly, you can Right-click the menu bar icon for Settings, Notification customi
 ---
 
 
-## Why a battery?
+## ❓ Why a battery?
 
 A battery is something everyone already understands. Full means you're good. Half means pace yourself. No documentation required.
 
@@ -35,7 +37,7 @@ There are other good usage widgets out there... great ones in fact. Claude Batte
 And lastly, ["Invert, always invert".](https://www.stripe.press/poor-charlies-almanack/talk-four?progress=14.36%#:~:text=The%20third%20helpful,an%20irrational%20number.)
 
 
-## Features
+## 🧩  Features
 
 - 2x battery icons in your menu bar with fill level and percentage (first is Session usage, second is Weekly)
 - Battery icon turns red below 20% so you won't get caught off guard (you'll also get a notification)
@@ -50,7 +52,7 @@ And lastly, ["Invert, always invert".](https://www.stripe.press/poor-charlies-al
 <img src ="https://private-user-images.githubusercontent.com/1386738/550439552-22baf9ef-ed94-4341-a56f-33097ba094f8.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3NzEyNDYyNzIsIm5iZiI6MTc3MTI0NTk3MiwicGF0aCI6Ii8xMzg2NzM4LzU1MDQzOTU1Mi0yMmJhZjllZi1lZDk0LTQzNDEtYTU2Zi0zMzA5N2JhMDk0ZjgucG5nP1gtQW16LUFsZ29yaXRobT1BV1M0LUhNQUMtU0hBMjU2JlgtQW16LUNyZWRlbnRpYWw9QUtJQVZDT0RZTFNBNTNQUUs0WkElMkYyMDI2MDIxNiUyRnVzLWVhc3QtMSUyRnMzJTJGYXdzNF9yZXF1ZXN0JlgtQW16LURhdGU9MjAyNjAyMTZUMTI0NjEyWiZYLUFtei1FeHBpcmVzPTMwMCZYLUFtei1TaWduYXR1cmU9NTQ1YmIzNmJjZGYyOWY0NjFlNWQyYTljMDQ3MmQ1OWIzNjM3NjRiZDViNGVkYTdlNzg1NzI5ZDU4ZjUyMzNiNSZYLUFtei1TaWduZWRIZWFkZXJzPWhvc3QifQ.pvdWeID16ZV8C8FvmeTus1RYd2H5taNICXvbSHcnHL4" width="300" height="300">
 
 
-## Support
+## 🤝  Support
 
 If you find Claude Battery useful, consider buying me a coffee.
 
@@ -59,10 +61,10 @@ If you find Claude Battery useful, consider buying me a coffee.
 ---
 
 
-## Credits
+## 🙏  Credits
 
 After deciding on the approach and general design direction, as I was searching for UI inspiration I came across this MacBook app that inspired aspects of the popover visualisations: [Watts](https://apps.apple.com/us/app/watts/id422559334?mt=12) on the Mac App Store.
 
-## License
+## 📄  License
 
 [MIT](LICENSE)
