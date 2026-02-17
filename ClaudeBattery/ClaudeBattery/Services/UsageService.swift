@@ -36,20 +36,14 @@ class UsageService: NSObject, ObservableObject {
     }
 
     private let keychain: KeychainService
+    private let accountStore: AccountStore
     private var timer: Timer?
     private var isPolling = false
-    private var didNotifyBelowThreshold = false
+    private var currentPollTask: Task<Void, Never>?
 
-    var notificationThreshold: Double {
-        get {
-            let value = UserDefaults.standard.double(forKey: "notificationThreshold")
-            return value.isZero ? Constants.defaultNotificationThreshold : value
-        }
-        set { UserDefaults.standard.set(newValue, forKey: "notificationThreshold") }
-    }
-
-    init(keychain: KeychainService) {
+    init(keychain: KeychainService, accountStore: AccountStore) {
         self.keychain = keychain
+        self.accountStore = accountStore
         super.init()
 
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -67,13 +61,24 @@ class UsageService: NSObject, ObservableObject {
     // MARK: - Polling
 
     func startPolling() {
-        Task { await pollUsage() }
+        currentPollTask?.cancel()
+        currentPollTask = Task { await pollUsage() }
         scheduleNextPoll()
     }
 
     func stopPolling() {
         timer?.invalidate()
         timer = nil
+        currentPollTask?.cancel()
+        currentPollTask = nil
+    }
+
+    func switchAccount() {
+        stopPolling()
+        latestUsage = nil
+        lastSuccessfulFetch = nil
+        consecutiveFailures = 0
+        startPolling()
     }
 
     private func scheduleNextPoll() {
@@ -92,9 +97,8 @@ class UsageService: NSObject, ObservableObject {
         isPolling = true
         defer { isPolling = false }
 
-        guard let sessionKey = keychain.read(forKey: KeychainService.Keys.sessionKey),
-              let orgId = keychain.read(forKey: KeychainService.Keys.organizationId) else {
-            logger.warning("Poll skipped — missing credentials")
+        guard let account = accountStore.activeAccount else {
+            logger.warning("Poll skipped — no active account")
             return
         }
 
@@ -105,13 +109,15 @@ class UsageService: NSObject, ObservableObject {
             return
         }
 
-        guard let request = ClaudeAPI.makeRequest(path: "/api/organizations/\(orgId)/usage", sessionKey: sessionKey) else {
+        guard let request = ClaudeAPI.makeRequest(path: "/api/organizations/\(account.organizationId)/usage", sessionKey: account.sessionKey) else {
             logger.error("Failed to construct usage API URL")
             return
         }
 
         do {
             let (data, response) = try await ClaudeAPI.session.data(for: request)
+
+            guard !Task.isCancelled else { return }
 
             guard let httpResponse = response as? HTTPURLResponse else {
                 consecutiveFailures += 1
@@ -120,7 +126,7 @@ class UsageService: NSObject, ObservableObject {
             }
 
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
-                logger.info("Auth failure (HTTP \(httpResponse.statusCode))")
+                logger.info("Auth failure (HTTP \(httpResponse.statusCode)) for \(account.displayName)")
                 onAuthFailure?()
                 return
             }
@@ -142,16 +148,20 @@ class UsageService: NSObject, ObservableObject {
             decoder.dateDecodingStrategy = .iso8601
             let usage = try decoder.decode(UsageResponse.self, from: data)
 
+            guard !Task.isCancelled else { return }
+
             latestUsage = UsageData(from: usage)
             lastSuccessfulFetch = Date()
             consecutiveFailures = 0
 
             if let weeklyRemaining = latestUsage?.weeklyRemaining {
-                checkAndNotify(remaining: weeklyRemaining, threshold: notificationThreshold)
+                checkAndNotify(account: account, remaining: weeklyRemaining)
             }
         } catch {
-            consecutiveFailures += 1
-            logger.error("Poll failed: \(error)")
+            if !Task.isCancelled {
+                consecutiveFailures += 1
+                logger.error("Poll failed: \(error)")
+            }
         }
     }
 
@@ -159,18 +169,20 @@ class UsageService: NSObject, ObservableObject {
 
     // MARK: - Notifications
 
-    private func checkAndNotify(remaining: Double, threshold: Double) {
+    private func checkAndNotify(account: Account, remaining: Double) {
         guard UserDefaults.standard.bool(forKey: "notificationsEnabled") else { return }
 
-        if remaining < threshold && !didNotifyBelowThreshold {
-            didNotifyBelowThreshold = true
-            scheduleNotification(remaining: remaining)
+        let threshold = account.notificationThreshold
+
+        if remaining < threshold && !account.didNotifyBelowThreshold {
+            accountStore.updateDidNotify(account.id, true)
+            scheduleNotification(account: account, remaining: remaining)
         } else if remaining >= threshold {
-            didNotifyBelowThreshold = false
+            accountStore.updateDidNotify(account.id, false)
         }
     }
 
-    private func scheduleNotification(remaining: Double) {
+    private func scheduleNotification(account: Account, remaining: Double) {
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
             guard settings.authorizationStatus == .authorized else {
@@ -179,12 +191,12 @@ class UsageService: NSObject, ObservableObject {
             }
 
             let content = UNMutableNotificationContent()
-            content.title = "Claude Usage Low"
+            content.title = "Claude Usage Low — \(account.displayName)"
             content.body = String(format: "Weekly quota is at %.0f%% remaining.", remaining)
             content.sound = .default
 
             let request = UNNotificationRequest(
-                identifier: "low-usage",
+                identifier: "low-usage-\(account.id.uuidString)",
                 content: content,
                 trigger: nil
             )

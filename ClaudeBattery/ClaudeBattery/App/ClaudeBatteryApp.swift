@@ -9,9 +9,8 @@ struct ClaudeBatteryApp: App {
     var body: some Scene {
         Settings {
             SettingsView(
-                isAuthenticated: appDelegate.authManager?.isAuthenticated ?? false,
-                signOut: { [weak appDelegate] in appDelegate?.signOut() },
-                signIn: { [weak appDelegate] in appDelegate?.authManager?.presentLogin() },
+                accountStore: appDelegate.accountStore,
+                authManager: appDelegate.authManager,
                 closeWindow: { NSApp.keyWindow?.close() }
             )
         }
@@ -21,6 +20,7 @@ struct ClaudeBatteryApp: App {
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var keychain: KeychainService!
+    var accountStore: AccountStore!
     var authManager: AuthManager!
     private var usageService: UsageService!
     private var menuBarController: MenuBarController!
@@ -28,8 +28,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         keychain = KeychainService()
-        authManager = AuthManager(keychain: keychain)
-        usageService = UsageService(keychain: keychain)
+        accountStore = AccountStore(keychain: keychain)
+        authManager = AuthManager(keychain: keychain, accountStore: accountStore)
+        usageService = UsageService(keychain: keychain, accountStore: accountStore)
 
         // Wire auth failure callback
         usageService.onAuthFailure = { [weak self] in
@@ -38,36 +39,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menuBarController = MenuBarController(
+            accountStore: accountStore,
             authManager: authManager,
-            usageService: usageService,
-            onSignOut: { [weak self] in self?.signOut() }
+            usageService: usageService
         )
 
         // Set notification delegate early
         UNUserNotificationCenter.current().delegate = usageService
 
-        // Start polling if already authenticated
-        if authManager.isAuthenticated {
+        // Start polling if we have an active account
+        if accountStore.activeAccount != nil {
             usageService.startPolling()
         }
 
-        // Observe auth state changes to start/stop polling
-        authManager.$isAuthenticated
+        // Observe active account changes to start/stop polling
+        accountStore.$activeAccountId
             .dropFirst()
             .receive(on: RunLoop.main)
-            .sink { [weak self] isAuthenticated in
+            .sink { [weak self] activeId in
                 guard let self else { return }
-                if isAuthenticated {
-                    self.usageService.startPolling()
+                if activeId != nil {
+                    self.usageService.switchAccount()
                 } else {
                     self.usageService.stopPolling()
                 }
             }
             .store(in: &cancellables)
-    }
-
-    func signOut() {
-        usageService.stopPolling()
-        authManager.signOut()
     }
 }
