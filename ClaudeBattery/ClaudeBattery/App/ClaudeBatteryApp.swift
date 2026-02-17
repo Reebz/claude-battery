@@ -8,11 +8,14 @@ struct ClaudeBatteryApp: App {
 
     var body: some Scene {
         Settings {
-            SettingsView(
-                accountStore: appDelegate.accountStore,
-                authManager: appDelegate.authManager,
-                closeWindow: { NSApp.keyWindow?.close() }
-            )
+            if let accountStore = appDelegate.accountStore,
+               let authManager = appDelegate.authManager {
+                SettingsView(
+                    accountStore: accountStore,
+                    authManager: authManager,
+                    closeWindow: { NSApp.keyWindow?.close() }
+                )
+            }
         }
     }
 }
