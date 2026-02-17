@@ -91,7 +91,21 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 350, height: accountStore.accounts.count > 1 ? 440 : 380)
+        .frame(width: 350, height: settingsHeight)
+    }
+
+    private var settingsHeight: CGFloat {
+        // Base height covers toggles + coffee button + section padding
+        let base: CGFloat = 310
+        // Each account row: ~40pt, plus ~45pt for threshold slider when notifications on
+        let perAccount: CGFloat = notificationsEnabled ? 85 : 40
+        let accountCount = CGFloat(max(accountStore.accounts.count, 1))
+        // Add Account button + section header
+        let accountSection: CGFloat = 60 + (accountCount * perAccount)
+        let ideal = base + accountSection
+        // Cap at 90% of screen height so it never overflows
+        let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
+        return min(ideal, screenHeight * 0.9)
     }
 
     @ViewBuilder
