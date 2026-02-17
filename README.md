@@ -9,7 +9,7 @@ Your Claude usage at a glance. A macOS menu bar widget that shows your Claude se
 
 ## Installation
 
-[Download here](https://github.com/Reebz/claude-battery/releases/download/stable/claude-battery_v1.dmg), or manually find the latest `.dmg` file from the downloads folder, open it, and drag Claude Battery to your Applications folder. 
+[Download here](https://github.com/Reebz/claude-battery/releases/download/v1.1/claude-battery_v1.1.dmg), or manually find the latest `.dmg` file from the downloads folder, open it, and drag Claude Battery to your Applications folder. 
 
 ## How To Use
 
@@ -21,17 +21,23 @@ Your Claude usage at a glance. A macOS menu bar widget that shows your Claude se
 
 Lastly, you can Right-click the menu bar icon for Settings, Notification customization, and to Quit.
 
+## What's New in v1.1
+
+Multi-Account Sign-In
+  - Sign into up to 5 separate Claude.ai accounts (work, personal, side projects)
+  - Switch between accounts instantly from the popover — no need to sign out and back in
+  - Click the pencil icon on any account in the popover (left-click) to set a custom nickname
 
 ## Features
 
-- 2x battery icons in your menu bar with fill level and percentage (first is Session usage, second is Weekly)
+- Two battery icons in your menu bar with fill level and percentage (first is Session usage, second is Weekly)
 - Battery icon turns red below 20% so you won't get caught off guard (you'll also get a notification)
 - Notification can be set to your preferred battery percentage level (right-click for Settings)
 - Also in Settings, you can turn on starting Claude Battery when you login 
 - Per-model breakdown and weekly reset countdown timers in the popover (left-click) for when you want the detail
 - Lightweight and fast. Checks for usage every 2 mins in most scenarios
 
-<img src="https://iili.io/qdnWGHB.png" width="300" height="300">
+<img src="https://iili.io/qdwFrAJ.md.png">
 
 ## Why a battery?
 
