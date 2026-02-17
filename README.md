@@ -11,13 +11,13 @@ Your Claude usage at a glance. A macOS menu bar widget that shows your Claude se
 
 [Download here](https://github.com/Reebz/claude-battery/releases/download/stable/claude-battery_v1.dmg), or manually find the latest `.dmg` file from the downloads folder, open it, and drag Claude Battery to your Applications folder. 
 
-
 ## How To Use
 
-1. Launch Claude Battery from Applications
-2. Left-click the battery icon in the menu bar to sign in
-3. Sign-in with your claude.ai account (you may be asked to use a 6- digit code)
-4. That's it — usage updates automatically in the background. Left-click the battery icon for more details.
+1. Launch (by using right-click and open) Claude Battery from Applications
+   >Apple may give a warning about opening a downloaded app. To launch, right-click and open.
+3. Left-click the battery icon in the menu bar to sign in
+4. Sign-in with your claude.ai account (you may be asked to use a 6- digit code)
+5. That's it — usage updates automatically in the background. Left-click the battery icon for more details.
 
 Lastly, you can Right-click the menu bar icon for Settings, Notification customization, and to Quit.
 
