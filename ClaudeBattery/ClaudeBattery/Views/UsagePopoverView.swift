@@ -288,14 +288,23 @@ private struct AccountListSection: View {
                     editingAccountId = account.id
                 } label: {
                     Image(systemName: "pencil")
-                        .font(.system(size: 10))
-                        .foregroundColor(Color(white: 0.45))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color(white: 0.5))
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(isActive ? Color.white.opacity(0.08) : Color.clear)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(isActive ? Color.green.opacity(0.15) : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(isActive ? Color.green.opacity(0.3) : Color.clear, lineWidth: 1)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -314,19 +323,41 @@ private struct AccountListSection: View {
             .textFieldStyle(.plain)
             .font(.system(size: 11))
             .foregroundColor(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(Color(white: 0.22))
+            .cornerRadius(4)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(Color.blue.opacity(0.6), lineWidth: 1)
+            )
+
+            Button {
+                accountStore.updateNickname(account.id, editText)
+                editingAccountId = nil
+            } label: {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.green)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
 
             Button {
                 editingAccountId = nil
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(Color(white: 0.45))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(Color(white: 0.5))
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(Color.white.opacity(0.08))
+        .padding(.vertical, 5)
+        .background(Color(white: 0.2))
     }
 }
 
