@@ -7,9 +7,9 @@ class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private var cancellables = Set<AnyCancellable>()
+    private let accountStore: AccountStore
     private let authManager: AuthManager
     private let usageService: UsageService
-    private let onSignOut: () -> Void
     private var settingsWindowController: NSWindowController?
     private var appearanceObservation: NSKeyValueObservation?
 
@@ -68,10 +68,10 @@ class MenuBarController: NSObject {
         return image
     }
 
-    init(authManager: AuthManager, usageService: UsageService, onSignOut: @escaping () -> Void) {
+    init(accountStore: AccountStore, authManager: AuthManager, usageService: UsageService) {
+        self.accountStore = accountStore
         self.authManager = authManager
         self.usageService = usageService
-        self.onSignOut = onSignOut
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
@@ -81,7 +81,7 @@ class MenuBarController: NSObject {
         setupPopover()
         setupObservers()
 
-        updateIcon(nil, isAuthenticated: authManager.isAuthenticated)
+        updateIcon(nil, isAuthenticated: accountStore.isAuthenticated)
     }
 
     // MARK: - Setup
@@ -98,7 +98,7 @@ class MenuBarController: NSObject {
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(
             rootView: UsagePopoverView(
-                authManager: authManager,
+                accountStore: accountStore,
                 usageService: usageService,
                 onSignIn: { [weak self] in self?.authManager.presentLogin() }
             )
@@ -107,10 +107,10 @@ class MenuBarController: NSObject {
 
     private func setupObservers() {
         usageService.$latestUsage
-            .combineLatest(usageService.$consecutiveFailures, authManager.$isAuthenticated)
+            .combineLatest(usageService.$consecutiveFailures, accountStore.$activeAccountId)
             .receive(on: RunLoop.main)
-            .sink { [weak self] usage, _, isAuth in
-                self?.updateIcon(usage, isAuthenticated: isAuth)
+            .sink { [weak self] usage, _, activeId in
+                self?.updateIcon(usage, isAuthenticated: activeId != nil)
             }
             .store(in: &cancellables)
 
@@ -122,7 +122,7 @@ class MenuBarController: NSObject {
             guard change.oldValue?.name != change.newValue?.name else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.authManager.isAuthenticated)
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated)
             }
         }
     }
@@ -181,9 +181,8 @@ class MenuBarController: NSObject {
         }
 
         let settingsView = SettingsView(
-            isAuthenticated: authManager.isAuthenticated,
-            signOut: onSignOut,
-            signIn: { [weak self] in self?.authManager.presentLogin() },
+            accountStore: accountStore,
+            authManager: authManager,
             closeWindow: { [weak self] in
                 self?.settingsWindowController?.close()
             }

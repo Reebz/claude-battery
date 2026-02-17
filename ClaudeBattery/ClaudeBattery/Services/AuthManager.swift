@@ -7,24 +7,20 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.clau
 
 @MainActor
 class AuthManager: NSObject, ObservableObject {
-    @Published var isAuthenticated: Bool = false
-
     private let keychain: KeychainService
+    private let accountStore: AccountStore
     private var loginWebView: WKWebView?
     private var loginWindowController: NSWindowController?
     private var loginTimeoutTask: Task<Void, Never>?
     private var hasCapturedSession = false
+    private var pendingSessionKey: String?
 
     private static let sessionExpirationKey = "sessionKeyExpiration"
 
-    init(keychain: KeychainService) {
+    init(keychain: KeychainService, accountStore: AccountStore) {
         self.keychain = keychain
+        self.accountStore = accountStore
         super.init()
-
-        if keychain.read(forKey: KeychainService.Keys.sessionKey) != nil,
-           keychain.read(forKey: KeychainService.Keys.organizationId) != nil {
-            isAuthenticated = true
-        }
     }
 
     // MARK: - Login
@@ -79,8 +75,7 @@ class AuthManager: NSObject, ObservableObject {
         }
 
         hasCapturedSession = true
-
-        keychain.save(cookie.value, forKey: KeychainService.Keys.sessionKey)
+        pendingSessionKey = cookie.value
 
         if let expiresDate = cookie.expiresDate {
             UserDefaults.standard.set(expiresDate, forKey: Self.sessionExpirationKey)
@@ -110,7 +105,7 @@ class AuthManager: NSObject, ObservableObject {
     // MARK: - Org Discovery
 
     private func fetchOrganizationId() async {
-        guard let sessionKey = keychain.read(forKey: KeychainService.Keys.sessionKey) else { return }
+        guard let sessionKey = pendingSessionKey else { return }
 
         guard let request = ClaudeAPI.makeRequest(path: "/api/organizations", sessionKey: sessionKey) else {
             logger.error("Failed to construct organizations API URL")
@@ -130,7 +125,8 @@ class AuthManager: NSObject, ObservableObject {
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
                 let body = String(data: data, encoding: .utf8) ?? "(non-utf8)"
                 logger.warning("Auth failure during org discovery (HTTP \(httpResponse.statusCode)): \(body.prefix(500))")
-                handleAuthFailure()
+                pendingSessionKey = nil
+                hasCapturedSession = false
                 return
             }
 
@@ -143,39 +139,72 @@ class AuthManager: NSObject, ObservableObject {
 
             if orgs.isEmpty {
                 logger.info("No organizations found — user may not have Pro/Max subscription")
-                isAuthenticated = false
+                pendingSessionKey = nil
+                hasCapturedSession = false
                 return
             }
 
-            keychain.save(orgs[0].uuid, forKey: KeychainService.Keys.organizationId)
-            isAuthenticated = true
-            logger.info("Organization discovered successfully")
+            // Try to extract email from org response
+            let email = extractEmail(from: data) ?? "Account \(accountStore.accounts.count + 1)"
+
+            let account = Account(
+                email: email,
+                sessionKey: sessionKey,
+                organizationId: orgs[0].uuid
+            )
+
+            if accountStore.addAccount(account) {
+                accountStore.switchTo(account.id)
+                logger.info("Account added and activated: \(account.displayName)")
+            } else {
+                logger.warning("Failed to add account (duplicate or limit reached)")
+            }
+
+            pendingSessionKey = nil
         } catch {
             logger.error("Org discovery failed: \(error.localizedDescription)")
+            pendingSessionKey = nil
+            hasCapturedSession = false
         }
+    }
+
+    private func extractEmail(from data: Data) -> String? {
+        // Try to extract email from the organizations response
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              let first = json.first,
+              let email = first["email_address"] as? String, !email.isEmpty else {
+            return nil
+        }
+        return email
     }
 
     // MARK: - Sign Out
 
-    func signOut() {
-        clearCredentials()
+    func signOut(accountId: UUID) {
+        accountStore.removeAccount(accountId)
+        hasCapturedSession = false
         WKWebsiteDataStore.default().removeData(
             ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
             modifiedSince: .distantPast
         ) { }
-        logger.info("Signed out")
+        logger.info("Signed out account \(accountId.uuidString)")
+    }
+
+    func signOutAll() {
+        let ids = accountStore.accounts.map(\.id)
+        for id in ids { accountStore.removeAccount(id) }
+        hasCapturedSession = false
+        WKWebsiteDataStore.default().removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+            modifiedSince: .distantPast
+        ) { }
+        logger.info("Signed out all accounts")
     }
 
     func handleAuthFailure() {
-        clearCredentials()
-        logger.info("Auth failure — credentials cleared")
-    }
-
-    private func clearCredentials() {
+        // Mark the active account as failed — user switches manually
         hasCapturedSession = false
-        keychain.deleteAll()
-        UserDefaults.standard.removeObject(forKey: Self.sessionExpirationKey)
-        isAuthenticated = false
+        logger.info("Auth failure for active account")
     }
 
     // MARK: - Allowed Domains
