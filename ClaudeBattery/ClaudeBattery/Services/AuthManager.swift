@@ -169,13 +169,22 @@ class AuthManager: NSObject, ObservableObject {
     }
 
     private func extractEmail(from data: Data) -> String? {
-        // Try to extract email from the organizations response
+        // Try to extract email from the organizations response, checking multiple possible keys
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-              let first = json.first,
-              let email = first["email_address"] as? String, !email.isEmpty else {
-            return nil
+              let first = json.first else { return nil }
+
+        let emailKeys = ["email_address", "email", "billing_email", "primary_email"]
+        for key in emailKeys {
+            if let email = first[key] as? String, !email.isEmpty {
+                return email
+            }
         }
-        return email
+        // Try nested billing object
+        if let billing = first["billing"] as? [String: Any],
+           let email = billing["email"] as? String, !email.isEmpty {
+            return email
+        }
+        return nil
     }
 
     // MARK: - Sign Out
