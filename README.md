@@ -62,7 +62,8 @@ If you find Claude Battery useful, consider [buying me a coffee](https://buymeac
 
 ## Credits
 
-After deciding on the approach and general design direction, as I was searching for UI inspiration I came across this MacBook app that inspired aspects of the popover visualisations: [Watts](https://apps.apple.com/us/app/watts/id422559334?mt=12) on the Mac App Store.
+- Multi-account support: thank you to [@joeymnguyen](https://github.com/joeymnguyen) for the feature idea.
+- Popover UI: After deciding on the design direction, I found [Watts](https://apps.apple.com/us/app/watts/id422559334?mt=12) that served as inspiration 
 
 
 ## icense
