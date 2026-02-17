@@ -4,14 +4,13 @@ import ServiceManagement
 import UserNotifications
 
 struct SettingsView: View {
-    let isAuthenticated: Bool
-    let signOut: () -> Void
-    let signIn: () -> Void
+    @ObservedObject var accountStore: AccountStore
+    let authManager: AuthManager
     let closeWindow: () -> Void
 
     @State private var launchAtLogin = false
     @AppStorage("notificationsEnabled") private var notificationsEnabled = false
-    @AppStorage("notificationThreshold") private var notificationThreshold: Double = 20
+    @State private var confirmRemoveId: UUID?
 
     var body: some View {
         Form {
@@ -34,40 +33,33 @@ struct SettingsView: View {
             }
 
             Section {
-                Toggle("Low usage notification", isOn: $notificationsEnabled)
+                Toggle("Low usage notifications", isOn: $notificationsEnabled)
                     .onChange(of: notificationsEnabled) { newValue in
                         if newValue {
                             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
                         }
                     }
-
-                if notificationsEnabled {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Alert when weekly quota drops below \(Int(notificationThreshold))%")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Slider(value: $notificationThreshold, in: 5...50, step: 5)
-                    }
-                }
             }
 
-            Section {
-                HStack {
-                    Spacer()
-                    if isAuthenticated {
-                        Button("Sign Out") {
-                            signOut()
-                            closeWindow()
-                        }
-                        .foregroundColor(.red)
-                    } else {
-                        Button("Sign In") {
-                            signIn()
-                            closeWindow()
-                        }
-                        .buttonStyle(.borderedProminent)
+            // Account management section
+            Section(header: Text("Accounts")) {
+                if accountStore.accounts.isEmpty {
+                    HStack {
+                        Spacer()
+                        Text("No accounts")
+                            .foregroundColor(.secondary)
+                        Spacer()
                     }
-                    Spacer()
+                } else {
+                    ForEach(accountStore.accounts) { account in
+                        accountRow(account: account)
+                    }
+                }
+
+                if accountStore.canAddAccount {
+                    Button("Add Account") {
+                        authManager.presentLogin()
+                    }
                 }
             }
 
@@ -99,6 +91,66 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 350, height: 380)
+        .frame(width: 350, height: accountStore.accounts.count > 1 ? 440 : 380)
+    }
+
+    @ViewBuilder
+    private func accountRow(account: Account) -> some View {
+        let isActive = account.id == accountStore.activeAccountId
+
+        HStack {
+            Circle()
+                .fill(isActive ? Color.green : Color.gray)
+                .frame(width: 8, height: 8)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(account.displayName)
+                    .font(.body)
+                if account.nickname != nil {
+                    Text(account.email)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            if confirmRemoveId == account.id {
+                Button("Cancel") {
+                    confirmRemoveId = nil
+                }
+                .font(.caption)
+
+                Button("Confirm") {
+                    authManager.signOut(accountId: account.id)
+                    confirmRemoveId = nil
+                }
+                .font(.caption)
+                .foregroundColor(.red)
+            } else {
+                Button("Remove") {
+                    confirmRemoveId = account.id
+                }
+                .font(.caption)
+                .foregroundColor(.red)
+            }
+        }
+
+        if notificationsEnabled {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Alert below \(Int(account.notificationThreshold))%")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Slider(
+                    value: Binding(
+                        get: { account.notificationThreshold },
+                        set: { accountStore.updateThreshold(account.id, $0) }
+                    ),
+                    in: 5...50,
+                    step: 5
+                )
+            }
+            .padding(.leading, 16)
+        }
     }
 }

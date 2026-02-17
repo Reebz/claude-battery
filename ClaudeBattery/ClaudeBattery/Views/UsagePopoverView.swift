@@ -1,13 +1,13 @@
 import SwiftUI
 
 struct UsagePopoverView: View {
-    @ObservedObject var authManager: AuthManager
+    @ObservedObject var accountStore: AccountStore
     @ObservedObject var usageService: UsageService
     let onSignIn: () -> Void
 
     var body: some View {
         Group {
-            if !authManager.isAuthenticated {
+            if !accountStore.isAuthenticated {
                 unauthenticatedContent
             } else if let usage = usageService.latestUsage {
                 authenticatedContent(usage: usage)
@@ -36,13 +36,36 @@ struct UsagePopoverView: View {
                 modelsCard(usage: usage)
             }
 
+            // Account list (hidden when only 1 account)
+            if accountStore.accounts.count > 1 {
+                AccountListSection(
+                    accountStore: accountStore,
+                    onAddAccount: onSignIn
+                )
+            }
+
+            // "+Add Account" when only 1 account — show as subtle link
+            if accountStore.accounts.count == 1 && accountStore.canAddAccount {
+                Button(action: onSignIn) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10, weight: .medium))
+                        Text("Add Account")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundColor(Color(white: 0.5))
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 2)
+            }
+
             VStack(spacing: 2) {
                 Text(lastUpdatedText)
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Text("Right-click the battery icon in your menu bar for Settings.")
                     .font(.system(size: 9))
-                    .foregroundColor(Color(white: 0.45))
+                    .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
             }
             .padding(.top, 2)
@@ -189,6 +212,121 @@ struct UsagePopoverView: View {
         } else {
             return String(format: "%dm %02ds", m, s)
         }
+    }
+}
+
+// MARK: - Account List Section
+
+private struct AccountListSection: View {
+    @ObservedObject var accountStore: AccountStore
+    let onAddAccount: () -> Void
+    @State private var editingAccountId: UUID?
+    @State private var editText: String = ""
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(accountStore.accounts) { account in
+                let isActive = account.id == accountStore.activeAccountId
+
+                if editingAccountId == account.id {
+                    editRow(account: account, isActive: isActive)
+                } else {
+                    accountRow(account: account, isActive: isActive)
+                }
+
+                if account.id != accountStore.accounts.last?.id {
+                    Divider()
+                        .background(Color(white: 0.25))
+                }
+            }
+
+            // "+Add Account" row at the bottom
+            if accountStore.canAddAccount {
+                Divider()
+                    .background(Color(white: 0.25))
+
+                Button(action: onAddAccount) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.green)
+                        Text("Add Account")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Color(white: 0.7))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .background(Color(white: 0.15))
+        .cornerRadius(8)
+    }
+
+    private func accountRow(account: Account, isActive: Bool) -> some View {
+        Button {
+            accountStore.switchTo(account.id)
+        } label: {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(isActive ? Color.green : Color(white: 0.4))
+                    .frame(width: 7, height: 7)
+
+                Text(account.displayName)
+                    .font(.system(size: 11))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                Spacer()
+
+                Button {
+                    editText = account.nickname ?? account.email
+                    editingAccountId = account.id
+                } label: {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(white: 0.45))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(isActive ? Color.white.opacity(0.08) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func editRow(account: Account, isActive: Bool) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(isActive ? Color.green : Color(white: 0.4))
+                .frame(width: 7, height: 7)
+
+            TextField("Nickname", text: $editText, onCommit: {
+                accountStore.updateNickname(account.id, editText)
+                editingAccountId = nil
+            })
+            .textFieldStyle(.plain)
+            .font(.system(size: 11))
+            .foregroundColor(.white)
+
+            Button {
+                editingAccountId = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(Color(white: 0.45))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.white.opacity(0.08))
     }
 }
 
