@@ -66,6 +66,6 @@ If you find Claude Battery useful, consider [buying me a coffee](https://buymeac
 - Popover UI: After deciding on the design direction, I found [Watts](https://apps.apple.com/us/app/watts/id422559334?mt=12) that served as inspiration 
 
 
-## icense
+## License
 
 [MIT](LICENSE)
