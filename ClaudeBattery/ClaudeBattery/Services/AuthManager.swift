@@ -14,8 +14,7 @@ class AuthManager: NSObject, ObservableObject {
     private var loginTimeoutTask: Task<Void, Never>?
     private var hasCapturedSession = false
     private var pendingSessionKey: String?
-
-    private static let sessionExpirationKey = "sessionKeyExpiration"
+    private var pendingExpiration: Date?
 
     init(keychain: KeychainService, accountStore: AccountStore) {
         self.keychain = keychain
@@ -76,10 +75,7 @@ class AuthManager: NSObject, ObservableObject {
 
         hasCapturedSession = true
         pendingSessionKey = cookie.value
-
-        if let expiresDate = cookie.expiresDate {
-            UserDefaults.standard.set(expiresDate, forKey: Self.sessionExpirationKey)
-        }
+        pendingExpiration = cookie.expiresDate
 
         logger.info("Session cookie captured")
 
@@ -126,6 +122,7 @@ class AuthManager: NSObject, ObservableObject {
                 let body = String(data: data, encoding: .utf8) ?? "(non-utf8)"
                 logger.warning("Auth failure during org discovery (HTTP \(httpResponse.statusCode)): \(body.prefix(500))")
                 pendingSessionKey = nil
+                pendingExpiration = nil
                 hasCapturedSession = false
                 return
             }
@@ -140,6 +137,7 @@ class AuthManager: NSObject, ObservableObject {
             if orgs.isEmpty {
                 logger.info("No organizations found — user may not have Pro/Max subscription")
                 pendingSessionKey = nil
+                pendingExpiration = nil
                 hasCapturedSession = false
                 return
             }
@@ -150,20 +148,28 @@ class AuthManager: NSObject, ObservableObject {
             let account = Account(
                 email: email,
                 sessionKey: sessionKey,
-                organizationId: orgs[0].uuid
+                organizationId: orgs[0].uuid,
+                sessionKeyExpiration: pendingExpiration
             )
 
             if accountStore.addAccount(account) {
                 accountStore.switchTo(account.id)
                 logger.info("Account added and activated: \(account.displayName)")
+            } else if let existing = accountStore.accounts.first(where: { $0.organizationId == orgs[0].uuid }) {
+                // Re-authentication: update session key on existing account
+                accountStore.updateSessionKey(existing.id, sessionKey, expiration: pendingExpiration)
+                accountStore.switchTo(existing.id)
+                logger.info("Re-authenticated existing account: \(existing.displayName)")
             } else {
-                logger.warning("Failed to add account (duplicate or limit reached)")
+                logger.warning("Failed to add account (limit reached)")
             }
 
             pendingSessionKey = nil
+            pendingExpiration = nil
         } catch {
             logger.error("Org discovery failed: \(error.localizedDescription)")
             pendingSessionKey = nil
+            pendingExpiration = nil
             hasCapturedSession = false
         }
     }
