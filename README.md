@@ -66,6 +66,20 @@ If you find Claude Battery useful, consider [buying me a coffee](https://buymeac
 - Popover UI: After deciding on the design direction, I found [Watts](https://apps.apple.com/us/app/watts/id422559334?mt=12) that served as inspiration 
 
 
+## Claude Battery Privacy Policy
+
+Claude Battery does not collect, store, or transmit personal data.
+
+The app:
+   - Does not include analytics
+   - Does not include tracking
+   - Does not share data with third parties
+   - Does not store user data on external servers
+
+Claude Battery only retrieves usage information associated with the user’s Claude account. All communication occurs between the user’s device and claude.ai.
+
+No data is retained by the developer.
+
 ## License
 
 [MIT](LICENSE)
