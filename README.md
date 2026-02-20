@@ -9,7 +9,7 @@ Your Claude usage at a glance. A macOS menu bar widget that shows your Claude se
 
 ## Installation
 
-[Download here](https://github.com/Reebz/claude-battery/releases/download/v1.1/claude-battery_v1.1.dmg), or manually find the latest `.dmg` file from the downloads folder, open it, and drag Claude Battery to your Applications folder. 
+[Download here](https://github.com/Reebz/claude-battery/releases/download/v1.11/claude-battery_v1.11.dmg), or manually find the latest `.dmg` file from the downloads folder, open it, and drag Claude Battery to your Applications folder. 
 
 ## How To Use
 
