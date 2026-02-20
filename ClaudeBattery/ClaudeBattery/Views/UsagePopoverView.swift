@@ -11,6 +11,8 @@ struct UsagePopoverView: View {
                 unauthenticatedContent
             } else if let usage = usageService.latestUsage {
                 authenticatedContent(usage: usage)
+            } else if usageService.authFailed {
+                reauthContent
             } else if usageService.consecutiveFailures >= 10 {
                 errorContent
             } else {
@@ -163,6 +165,24 @@ struct UsagePopoverView: View {
                 .font(.subheadline)
                 .multilineTextAlignment(.center)
             Button("Sign In") { onSignIn() }
+                .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, minHeight: 120)
+        .padding(16)
+    }
+
+    private var reauthContent: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "key.slash")
+                .font(.system(size: 32))
+                .foregroundColor(.secondary)
+            Text("Session expired")
+                .font(.subheadline)
+            Text("Please sign in again to continue.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            Button("Sign In Again") { onSignIn() }
                 .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, minHeight: 120)

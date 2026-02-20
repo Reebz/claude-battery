@@ -83,6 +83,13 @@ class AccountStore: ObservableObject {
         logger.info("Switched to account \(id.uuidString)")
     }
 
+    func updateSessionKey(_ id: UUID, _ sessionKey: String, expiration: Date? = nil) {
+        guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
+        accounts[index].sessionKey = sessionKey
+        accounts[index].sessionKeyExpiration = expiration
+        persist()
+    }
+
     func updateNickname(_ id: UUID, _ nickname: String) {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = String(nickname.trimmingCharacters(in: .whitespaces).prefix(30))

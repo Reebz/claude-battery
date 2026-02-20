@@ -10,6 +10,7 @@ class UsageService: NSObject, ObservableObject {
     @Published var latestUsage: UsageData?
     @Published var lastSuccessfulFetch: Date?
     @Published private(set) var consecutiveFailures: Int = 0
+    @Published private(set) var authFailed: Bool = false
 
     private enum Constants {
         static let staleThresholdSeconds: TimeInterval = 660
@@ -78,6 +79,7 @@ class UsageService: NSObject, ObservableObject {
         latestUsage = nil
         lastSuccessfulFetch = nil
         consecutiveFailures = 0
+        authFailed = false
         startPolling()
     }
 
@@ -102,14 +104,16 @@ class UsageService: NSObject, ObservableObject {
             return
         }
 
-        let expiration = UserDefaults.standard.object(forKey: "sessionKeyExpiration") as? Date
-        if let expiration, expiration < Date() {
+        if let expiration = account.sessionKeyExpiration, expiration < Date() {
+            consecutiveFailures += 1
+            authFailed = true
             logger.info("Session cookie expired, triggering re-auth")
             onAuthFailure?()
             return
         }
 
         guard let request = ClaudeAPI.makeRequest(path: "/api/organizations/\(account.organizationId)/usage", sessionKey: account.sessionKey) else {
+            consecutiveFailures += 1
             logger.error("Failed to construct usage API URL")
             return
         }
@@ -126,6 +130,8 @@ class UsageService: NSObject, ObservableObject {
             }
 
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                consecutiveFailures += 1
+                authFailed = true
                 logger.info("Auth failure (HTTP \(httpResponse.statusCode)) for \(account.displayName)")
                 onAuthFailure?()
                 return
@@ -153,6 +159,7 @@ class UsageService: NSObject, ObservableObject {
             latestUsage = UsageData(from: usage)
             lastSuccessfulFetch = Date()
             consecutiveFailures = 0
+            authFailed = false
 
             if let weeklyRemaining = latestUsage?.weeklyRemaining {
                 checkAndNotify(account: account, remaining: weeklyRemaining)
@@ -211,11 +218,9 @@ class UsageService: NSObject, ObservableObject {
     // MARK: - Wake
 
     @objc private func handleWake() {
-        timer?.invalidate()
-        Task {
-            await pollUsage()
-            scheduleNextPoll()
-        }
+        guard accountStore.activeAccount != nil, !authFailed else { return }
+        stopPolling()
+        startPolling()
     }
 }
 
