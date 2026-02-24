@@ -13,8 +13,10 @@ enum ClaudeAPI {
     static let safariUserAgentSuffix = "\(safariVersionToken) Safari/605.1.15"
 
     static let session: URLSession = {
-        let config = URLSessionConfiguration.default
+        let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false
+        config.httpCookieStorage = nil
+        config.urlCredentialStorage = nil
         config.waitsForConnectivity = true
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 60
