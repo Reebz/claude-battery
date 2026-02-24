@@ -35,7 +35,7 @@ struct Account: Codable, Identifiable, Equatable {
 
 // MARK: - Storage
 
-final class KeychainService {
+final class StorageService {
     private let defaults = UserDefaults.standard
     private let prefix: String
 
@@ -137,35 +137,5 @@ final class KeychainService {
         delete(forKey: Keys.organizationId)
         defaults.set(true, forKey: prefix + Keys.migrated)
         logger.info("Migrated single account to multi-account format")
-    }
-}
-
-// MARK: - API Configuration
-
-enum ClaudeAPI {
-    static let baseURL = "https://claude.ai"
-
-    static let session: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.httpShouldSetCookies = false
-        config.waitsForConnectivity = true
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
-        return URLSession(configuration: config)
-    }()
-
-    static func makeRequest(path: String, sessionKey: String) -> URLRequest? {
-        guard let url = URL(string: "\(baseURL)\(path)") else { return nil }
-        var request = URLRequest(url: url)
-        request.setValue("sessionKey=\(sessionKey)", forHTTPHeaderField: "Cookie")
-        request.setValue("web_claude_ai", forHTTPHeaderField: "anthropic-client-platform")
-        request.setValue("1.0.0", forHTTPHeaderField: "anthropic-client-version")
-        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
-        request.setValue("empty", forHTTPHeaderField: "sec-fetch-dest")
-        request.setValue("cors", forHTTPHeaderField: "sec-fetch-mode")
-        request.setValue("same-origin", forHTTPHeaderField: "sec-fetch-site")
-        request.setValue(baseURL, forHTTPHeaderField: "origin")
-        request.setValue("\(baseURL)/settings/usage", forHTTPHeaderField: "referer")
-        return request
     }
 }
