@@ -7,7 +7,7 @@ private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.clau
 
 @MainActor
 class AuthManager: NSObject, ObservableObject {
-    private let keychain: KeychainService
+    private let storage: StorageService
     private let accountStore: AccountStore
     private var loginWebView: WKWebView?
     private var loginWindowController: NSWindowController?
@@ -16,8 +16,8 @@ class AuthManager: NSObject, ObservableObject {
     private var pendingSessionKey: String?
     private var pendingExpiration: Date?
 
-    init(keychain: KeychainService, accountStore: AccountStore) {
-        self.keychain = keychain
+    init(storage: StorageService, accountStore: AccountStore) {
+        self.storage = storage
         self.accountStore = accountStore
         super.init()
     }
@@ -32,7 +32,8 @@ class AuthManager: NSObject, ObservableObject {
         }
 
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()
+        config.websiteDataStore = .nonPersistent()
+        config.applicationNameForUserAgent = ClaudeAPI.safariUserAgentSuffix
 
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 640), configuration: config)
         webView.navigationDelegate = self
@@ -63,13 +64,18 @@ class AuthManager: NSObject, ObservableObject {
         }
     }
 
+    private static func isSessionCookie(_ cookie: HTTPCookie) -> Bool {
+        cookie.name == "sessionKey" &&
+        (cookie.domain == "claude.ai" || cookie.domain == ".claude.ai")
+    }
+
     private func handleCookieCaptured(_ cookie: HTTPCookie) {
         guard !hasCapturedSession else { return }
 
-        guard cookie.domain == "claude.ai" || cookie.domain == ".claude.ai",
+        guard Self.isSessionCookie(cookie),
               cookie.isSecure,
               cookie.path == "/" else {
-            logger.info("Cookie rejected — domain=\(cookie.domain)")
+            logger.debug("Cookie rejected — name=\(cookie.name) domain=\(cookie.domain)")
             return
         }
 
@@ -84,18 +90,11 @@ class AuthManager: NSObject, ObservableObject {
 
         loginWebView?.stopLoading()
         loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
+        loginWebView = nil
+        loginWindowController?.close()
+        loginWindowController = nil
 
-        WKWebsiteDataStore.default().removeData(
-            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
-            modifiedSince: .distantPast
-        ) { [weak self] in
-            Task { @MainActor in
-                self?.loginWebView = nil
-                self?.loginWindowController?.close()
-                self?.loginWindowController = nil
-                await self?.fetchOrganizationId()
-            }
-        }
+        Task { await fetchOrganizationId() }
     }
 
     // MARK: - Org Discovery
@@ -225,12 +224,17 @@ class AuthManager: NSObject, ObservableObject {
     // MARK: - Allowed Domains
 
     private func isAllowedDomain(_ host: String) -> Bool {
+        // hasSuffix is acceptable here — false positives only show content, not leak credentials.
         host == "claude.ai" ||
         host.hasSuffix(".claude.ai") ||
         host.hasSuffix(".anthropic.com") ||
         host == "accounts.google.com" ||
+        host.hasSuffix(".accounts.google.com") ||
         host == "appleid.apple.com" ||
-        host.hasSuffix(".challenges.cloudflare.com")
+        host.hasSuffix(".appleid.apple.com") ||
+        host.hasSuffix(".icloud.com") ||
+        host.hasSuffix(".challenges.cloudflare.com") ||
+        host == "cf-chl-widget.cloudflare.com"
     }
 }
 
@@ -244,6 +248,7 @@ extension AuthManager: WKNavigationDelegate {
         }
 
         if isAllowedDomain(host) {
+            logger.debug("Navigation allowed: \(host)")
             decisionHandler(.allow)
         } else {
             logger.info("Blocked navigation to disallowed domain: \(host)")
@@ -258,9 +263,7 @@ extension AuthManager: WKNavigationDelegate {
 
         Task {
             let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
-            if let sessionCookie = cookies.first(where: {
-                $0.name == "sessionKey" && ($0.domain == "claude.ai" || $0.domain == ".claude.ai")
-            }) {
+            if let sessionCookie = cookies.first(where: Self.isSessionCookie) {
                 handleCookieCaptured(sessionCookie)
                 return
             }
@@ -285,11 +288,10 @@ extension AuthManager: WKNavigationDelegate {
 extension AuthManager: WKHTTPCookieStoreObserver {
     nonisolated func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
         Task { @MainActor [weak self] in
+            guard let self, !self.hasCapturedSession else { return }
             let cookies = await cookieStore.allCookies()
-            if let sessionCookie = cookies.first(where: {
-                $0.name == "sessionKey" && ($0.domain == "claude.ai" || $0.domain == ".claude.ai")
-            }) {
-                self?.handleCookieCaptured(sessionCookie)
+            if let sessionCookie = cookies.first(where: Self.isSessionCookie) {
+                self.handleCookieCaptured(sessionCookie)
             }
         }
     }

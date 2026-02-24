@@ -24,17 +24,17 @@ class AccountStore: ObservableObject {
         accounts.count < Self.maxAccounts
     }
 
-    private let keychain: KeychainService
+    private let storage: StorageService
 
-    init(keychain: KeychainService) {
-        self.keychain = keychain
-        self.accounts = keychain.readAccounts()
-        self.activeAccountId = keychain.getActiveAccountId()
+    init(storage: StorageService) {
+        self.storage = storage
+        self.accounts = storage.readAccounts()
+        self.activeAccountId = storage.getActiveAccountId()
 
         // If we have accounts but no active one, select the first
         if activeAccountId == nil, let first = accounts.first {
             activeAccountId = first.id
-            keychain.setActiveAccountId(first.id)
+            storage.setActiveAccountId(first.id)
         }
     }
 
@@ -69,7 +69,7 @@ class AccountStore: ObservableObject {
 
         if activeAccountId == id {
             activeAccountId = accounts.first?.id
-            keychain.setActiveAccountId(activeAccountId)
+            storage.setActiveAccountId(activeAccountId)
         }
 
         persist()
@@ -79,7 +79,7 @@ class AccountStore: ObservableObject {
     func switchTo(_ id: UUID) {
         guard accounts.contains(where: { $0.id == id }) else { return }
         activeAccountId = id
-        keychain.setActiveAccountId(id)
+        storage.setActiveAccountId(id)
         logger.info("Switched to account \(id.uuidString)")
     }
 
@@ -112,6 +112,6 @@ class AccountStore: ObservableObject {
     // MARK: - Persistence
 
     private func persist() {
-        keychain.saveAccounts(accounts)
+        storage.saveAccounts(accounts)
     }
 }

@@ -36,14 +36,14 @@ class UsageService: NSObject, ObservableObject {
         return Constants.maxBackoffInterval
     }
 
-    private let keychain: KeychainService
+    private let storage: StorageService
     private let accountStore: AccountStore
     private var timer: Timer?
     private var isPolling = false
     private var currentPollTask: Task<Void, Never>?
 
-    init(keychain: KeychainService, accountStore: AccountStore) {
-        self.keychain = keychain
+    init(storage: StorageService, accountStore: AccountStore) {
+        self.storage = storage
         self.accountStore = accountStore
         super.init()
 
@@ -75,20 +75,36 @@ class UsageService: NSObject, ObservableObject {
     }
 
     func switchAccount() {
-        stopPolling()
         latestUsage = nil
         lastSuccessfulFetch = nil
         consecutiveFailures = 0
         authFailed = false
-        startPolling()
+        restartPolling()
+    }
+
+    /// Chains a new poll after the previous task completes its `defer { isPolling = false }`,
+    /// preventing the race where a new poll is silently dropped by the isPolling guard.
+    private func restartPolling() {
+        let previousTask = currentPollTask
+        stopPolling()
+        currentPollTask = Task {
+            _ = await previousTask?.value
+            guard !Task.isCancelled else { return }
+            await pollUsage()
+        }
+        scheduleNextPoll()
     }
 
     private func scheduleNextPoll() {
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: false) { [weak self] _ in
             Task { @MainActor in
-                await self?.pollUsage()
-                self?.scheduleNextPoll()
+                guard let self else { return }
+                self.currentPollTask = Task {
+                    await self.pollUsage()
+                }
+                _ = await self.currentPollTask?.value
+                self.scheduleNextPoll()
             }
         }
         timer?.tolerance = 30
@@ -132,7 +148,7 @@ class UsageService: NSObject, ObservableObject {
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
                 consecutiveFailures += 1
                 authFailed = true
-                logger.info("Auth failure (HTTP \(httpResponse.statusCode)) for \(account.displayName)")
+                logger.warning("Auth failure (HTTP \(httpResponse.statusCode)) for \(account.displayName)")
                 onAuthFailure?()
                 return
             }
@@ -219,8 +235,7 @@ class UsageService: NSObject, ObservableObject {
 
     @objc private func handleWake() {
         guard accountStore.activeAccount != nil, !authFailed else { return }
-        stopPolling()
-        startPolling()
+        restartPolling()
     }
 }
 
