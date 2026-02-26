@@ -22,7 +22,7 @@ struct ClaudeBatteryApp: App {
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
-    private var keychain: KeychainService!
+    private var storage: StorageService!
     var accountStore: AccountStore!
     var authManager: AuthManager!
     private var usageService: UsageService!
@@ -30,10 +30,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        keychain = KeychainService()
-        accountStore = AccountStore(keychain: keychain)
-        authManager = AuthManager(keychain: keychain, accountStore: accountStore)
-        usageService = UsageService(keychain: keychain, accountStore: accountStore)
+        storage = StorageService()
+        accountStore = AccountStore(storage: storage)
+        authManager = AuthManager(storage: storage, accountStore: accountStore)
+        usageService = UsageService(storage: storage, accountStore: accountStore)
 
         // Wire auth failure callback
         usageService.onAuthFailure = { [weak self] in
