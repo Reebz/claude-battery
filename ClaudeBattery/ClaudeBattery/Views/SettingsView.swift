@@ -10,10 +10,20 @@ struct SettingsView: View {
 
     @State private var launchAtLogin = false
     @AppStorage("notificationsEnabled") private var notificationsEnabled = false
+    @AppStorage("iconStyle") private var iconStyle: String = IconStyle.dualHorizontal.rawValue
     @State private var confirmRemoveId: UUID?
 
     var body: some View {
         Form {
+            Section("Icon Style") {
+                Picker("Menu bar icon", selection: $iconStyle) {
+                    ForEach(IconStyle.allCases, id: \.self) { style in
+                        Text(style.rawValue).tag(style.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
             Section {
                 Toggle("Launch at login", isOn: $launchAtLogin)
                     .onAppear {
@@ -96,7 +106,7 @@ struct SettingsView: View {
 
     private var settingsHeight: CGFloat {
         // Base height covers toggles + coffee button + section padding
-        let base: CGFloat = 310
+        let base: CGFloat = 370
         // Each account row: ~40pt, plus ~45pt for threshold slider when notifications on
         let perAccount: CGFloat = notificationsEnabled ? 85 : 40
         let accountCount = CGFloat(max(accountStore.accounts.count, 1))
