@@ -27,13 +27,22 @@ struct UsagePopoverView: View {
 
     @ViewBuilder
     private func authenticatedContent(usage: UsageData) -> some View {
+        let columns = [
+            GridItem(.flexible(), spacing: 8),
+            GridItem(.flexible(), spacing: 8)
+        ]
+
         VStack(spacing: 8) {
-            LazyVGrid(columns: [
-                GridItem(.flexible(), spacing: 8),
-                GridItem(.flexible(), spacing: 8)
-            ], spacing: 8) {
+            LazyVGrid(columns: columns, spacing: 8) {
                 sessionCard(usage: usage)
                 weeklyCard(usage: usage)
+            }
+
+            if let extraUsage = usage.extraUsage {
+                extraUsageBar(extraUsage: extraUsage)
+            }
+
+            LazyVGrid(columns: columns, spacing: 8) {
                 resetsCard(usage: usage)
                 modelsCard(usage: usage)
             }
@@ -141,6 +150,48 @@ struct UsagePopoverView: View {
         if value < 20 { return .red }
         if value < 50 { return .orange }
         return .green
+    }
+
+    private func spendColor(for percent: Double) -> Color {
+        if percent >= 80 { return .red }
+        if percent >= 50 { return .orange }
+        return .green
+    }
+
+    private func extraUsageBar(extraUsage: ExtraUsageData) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Extra Usage")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(Color(white: 0.6))
+                Spacer()
+                Text("\(formatCurrency(extraUsage.spent)) / \(formatCurrency(extraUsage.limit))")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.white)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color(white: 0.25))
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(spendColor(for: extraUsage.percentage))
+                        .frame(width: max(0, geo.size.width * extraUsage.percentage / 100))
+                }
+            }
+            .frame(height: 4)
+        }
+        .padding(10)
+        .background(Color(white: 0.15))
+        .cornerRadius(12)
+    }
+
+    private func formatCurrency(_ value: Double) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.locale = Locale.current
+        formatter.maximumFractionDigits = 2
+        formatter.minimumFractionDigits = 2
+        return formatter.string(from: NSNumber(value: value)) ?? String(format: "$%.2f", value)
     }
 
     // MARK: - States

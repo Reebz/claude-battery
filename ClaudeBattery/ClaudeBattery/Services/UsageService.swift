@@ -258,6 +258,26 @@ struct UsageResponse: Codable {
     let sevenDay: UsageTier?
     let sevenDayOpus: UsageTier?
     let sevenDaySonnet: UsageTier?
+    let extraUsage: ExtraUsageTier?
+}
+
+struct ExtraUsageTier: Codable {
+    let isEnabled: Bool?
+    let monthlyLimit: Double?
+    let usedCredits: Double?
+    let utilization: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case isEnabled, monthlyLimit, usedCredits, utilization
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        isEnabled = try? container.decode(Bool.self, forKey: .isEnabled)
+        monthlyLimit = try? container.decode(Double.self, forKey: .monthlyLimit)
+        usedCredits = try? container.decode(Double.self, forKey: .usedCredits)
+        utilization = try? container.decode(Double.self, forKey: .utilization)
+    }
 }
 
 struct UsageTier: Codable {
@@ -275,6 +295,23 @@ struct UsageTier: Codable {
     }
 }
 
+struct ExtraUsageData {
+    let spent: Double
+    let limit: Double
+    let percentage: Double
+
+    init?(from tier: ExtraUsageTier?) {
+        guard let tier, tier.isEnabled == true,
+              let spent = tier.usedCredits,
+              let limit = tier.monthlyLimit,
+              limit > 0 else { return nil }
+
+        self.spent = spent
+        self.limit = limit
+        self.percentage = min(100, max(0, spent / limit * 100))
+    }
+}
+
 struct UsageData {
     let weeklyRemaining: Double
     let weeklyResetDate: Date?
@@ -284,6 +321,7 @@ struct UsageData {
     let opusResetDate: Date?
     let sonnetRemaining: Double
     let sonnetResetDate: Date?
+    let extraUsage: ExtraUsageData?
 
     init(from response: UsageResponse) {
         weeklyRemaining = max(0, min(100, 100 - (response.sevenDay?.utilization ?? 0)))
@@ -294,5 +332,6 @@ struct UsageData {
         opusResetDate = response.sevenDayOpus?.resetsAt
         sonnetRemaining = max(0, min(100, 100 - (response.sevenDaySonnet?.utilization ?? 0)))
         sonnetResetDate = response.sevenDaySonnet?.resetsAt
+        extraUsage = ExtraUsageData(from: response.extraUsage)
     }
 }
