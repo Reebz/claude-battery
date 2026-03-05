@@ -1,7 +1,7 @@
 
 # <img src="https://iili.io/qdnWVN1.png" width="80" height="72"> Claude Battery
 
-Your Claude usage at a glance. A macOS menu bar widget that shows your Claude session and weekly limits... as a battery.
+Your Claude usage at a glance. A macOS menu bar widget that shows your Claude session and weekly limits... as a battery. [Download here](https://github.com/Reebz/claude-battery/releases/download/v1.4/claude-battery_v1.4.dmg).
 
 <img src ="https://iili.io/qdnW1SV.png" width="180" height="80">
 
