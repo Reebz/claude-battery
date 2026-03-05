@@ -36,6 +36,7 @@ Right-click the menu bar icon for Settings, Notification customization, and to Q
 **Menu Bar**
 - Two battery icons with fill level and percentage -- Session (5-hour) and Weekly (7-day)
 - Battery icon turns red below 20% so you won't get caught off guard
+- 5 selectable icon styles: Dual Horizontal (default), Minimal, Dual Arc Gauge, Text Only, Stacked Bars
 
 **Popover (left-click)**
 - Session and Weekly usage arc gauges with colour-coded fill
