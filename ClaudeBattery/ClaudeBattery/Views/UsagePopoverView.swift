@@ -155,43 +155,52 @@ struct UsagePopoverView: View {
     private func spendColor(for percent: Double) -> Color {
         if percent >= 80 { return .red }
         if percent >= 50 { return .orange }
-        return .green
+        return .cyan
     }
 
-    private func extraUsageBar(extraUsage: ExtraUsageData) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Extra Usage")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(Color(white: 0.6))
-                Spacer()
-                Text("\(formatCurrency(extraUsage.spent)) / \(formatCurrency(extraUsage.limit))")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.white)
-            }
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color(white: 0.25))
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(spendColor(for: extraUsage.percentage))
-                        .frame(width: max(0, geo.size.width * extraUsage.percentage / 100))
-                }
-            }
-            .frame(height: 4)
-        }
-        .padding(10)
-        .background(Color(white: 0.15))
-        .cornerRadius(12)
-    }
-
-    private func formatCurrency(_ value: Double) -> String {
+    private static let currencyFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .currency
         formatter.locale = Locale.current
         formatter.maximumFractionDigits = 2
         formatter.minimumFractionDigits = 2
-        return formatter.string(from: NSNumber(value: value)) ?? String(format: "$%.2f", value)
+        return formatter
+    }()
+
+    private func formatCurrency(_ value: Double) -> String {
+        Self.currencyFormatter.string(from: NSNumber(value: value)) ?? String(format: "$%.2f", value)
+    }
+
+    private func extraUsageBar(extraUsage: ExtraUsageData) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Extra Usage")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Color(white: 0.6))
+                Spacer()
+                HStack(spacing: 0) {
+                    Text(formatCurrency(extraUsage.spent))
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundColor(.white)
+                    Text(" / \(formatCurrency(extraUsage.limit))")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundColor(Color(white: 0.45))
+                }
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color(white: 0.25))
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(spendColor(for: extraUsage.percentage))
+                        .frame(width: max(0, geo.size.width * extraUsage.percentage / 100))
+                }
+            }
+            .frame(height: 6)
+        }
+        .padding(10)
+        .background(Color(white: 0.15))
+        .cornerRadius(12)
     }
 
     // MARK: - States
