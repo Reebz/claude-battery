@@ -26,6 +26,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var accountStore: AccountStore!
     var authManager: AuthManager!
     private var usageService: UsageService!
+    private var updateChecker: UpdateChecker!
     private var menuBarController: MenuBarController!
     private var cancellables = Set<AnyCancellable>()
 
@@ -41,10 +42,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.authManager.handleAuthFailure()
         }
 
+        updateChecker = UpdateChecker()
+        updateChecker.startChecking()
+
         menuBarController = MenuBarController(
             accountStore: accountStore,
             authManager: authManager,
-            usageService: usageService
+            usageService: usageService,
+            updateChecker: updateChecker
         )
 
         // Set notification delegate early
