@@ -1,7 +1,7 @@
 
 # <img src="https://iili.io/qdnWVN1.png" width="80" height="72"> Claude Battery
 
-Your Claude usage at a glance. A macOS menu bar widget that shows your Claude session and weekly limits... as a battery. [Download here](https://github.com/Reebz/claude-battery/releases/download/v1.4/claude-battery_v1.4.dmg).
+Your Claude usage at a glance. A macOS menu bar widget that shows your Claude session and weekly limits... as a battery. [Download here](https://github.com/Reebz/claude-battery/releases/download/v1.41/claude-battery_v1.41.dmg).
 
 <img src ="https://iili.io/qdnW1SV.png" width="180" height="80">
 
@@ -19,7 +19,7 @@ And lastly, ["Invert, always invert".](https://www.stripe.press/poor-charlies-al
 
 ## Installation
 
-[Download here](https://github.com/Reebz/claude-battery/releases/download/v1.4/claude-battery_v1.4.dmg), or manually find the latest `.dmg` file from the downloads folder, open it, and drag Claude Battery to your Applications folder.
+[Download here](https://github.com/Reebz/claude-battery/releases/download/v1.41/claude-battery_v1.41.dmg), or manually find the latest `.dmg` file from the downloads folder, open it, and drag Claude Battery to your Applications folder.
 
 ## How To Use
 
