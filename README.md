@@ -114,6 +114,7 @@ If you find Claude Battery useful, consider [buying me a coffee](https://buymeac
 
 ## Credits
 
+- Extra usage spend in local currency: thank you to [@theleoborges](https://github.com/theleoborges) for the feature idea.
 - Multi-account support: thank you to [@joeymnguyen](https://github.com/joeymnguyen) for the feature idea.
 - Popover UI: After deciding on the design direction, I found [Watts](https://apps.apple.com/us/app/watts/id422559334?mt=12) that served as inspiration
 
