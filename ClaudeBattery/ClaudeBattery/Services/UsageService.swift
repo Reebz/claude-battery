@@ -302,13 +302,13 @@ struct ExtraUsageData {
 
     init?(from tier: ExtraUsageTier?) {
         guard let tier, tier.isEnabled == true,
-              let spent = tier.usedCredits,
-              let limit = tier.monthlyLimit,
-              limit > 0 else { return nil }
+              let spentCents = tier.usedCredits,
+              let limitCents = tier.monthlyLimit,
+              limitCents > 0 else { return nil }
 
-        self.spent = spent
-        self.limit = limit
-        self.percentage = min(100, max(0, spent / limit * 100))
+        self.spent = spentCents / 100.0
+        self.limit = limitCents / 100.0
+        self.percentage = min(100, max(0, spentCents / limitCents * 100))
     }
 }
 
