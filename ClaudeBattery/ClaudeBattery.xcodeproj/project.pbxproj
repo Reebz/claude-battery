@@ -18,6 +18,13 @@
 		A10000090000000000000009 /* AccountStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000090000000000000010 /* AccountStore.swift */; };
 		A1000000000000000000000A /* ClaudeAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* ClaudeAPI.swift */; };
 		A1000000000000000000000B /* UpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* UpdateChecker.swift */; };
+		B10000010000000000000001 /* IconStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000010000000000000001 /* IconStyle.swift */; };
+		B10000020000000000000002 /* IconRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000020000000000000002 /* IconRenderer.swift */; };
+		B10000030000000000000003 /* DualHorizontalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000030000000000000003 /* DualHorizontalRenderer.swift */; };
+		B10000040000000000000004 /* MinimalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000040000000000000004 /* MinimalRenderer.swift */; };
+		B10000050000000000000005 /* DualArcGaugeRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000050000000000000005 /* DualArcGaugeRenderer.swift */; };
+		B10000060000000000000006 /* TextOnlyRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000060000000000000006 /* TextOnlyRenderer.swift */; };
+		B10000070000000000000007 /* StackedBarsRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000070000000000000007 /* StackedBarsRenderer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +42,13 @@
 		A20000090000000000000010 /* AccountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountStore.swift; sourceTree = "<group>"; };
 		A2000000000000000000000C /* ClaudeAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeAPI.swift; sourceTree = "<group>"; };
 		A2000000000000000000000D /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
+		B20000010000000000000001 /* IconStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IconStyle.swift; sourceTree = "<group>"; };
+		B20000020000000000000002 /* IconRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IconRenderer.swift; sourceTree = "<group>"; };
+		B20000030000000000000003 /* DualHorizontalRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DualHorizontalRenderer.swift; sourceTree = "<group>"; };
+		B20000040000000000000004 /* MinimalRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MinimalRenderer.swift; sourceTree = "<group>"; };
+		B20000050000000000000005 /* DualArcGaugeRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DualArcGaugeRenderer.swift; sourceTree = "<group>"; };
+		B20000060000000000000006 /* TextOnlyRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextOnlyRenderer.swift; sourceTree = "<group>"; };
+		B20000070000000000000007 /* StackedBarsRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StackedBarsRenderer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -60,6 +74,7 @@
 			isa = PBXGroup;
 			children = (
 				A40000030000000000000003 /* App */,
+				B40000010000000000000001 /* Models */,
 				A40000040000000000000004 /* Services */,
 				A40000050000000000000005 /* Views */,
 				A40000070000000000000007 /* Resources */,
@@ -94,6 +109,7 @@
 				A20000050000000000000005 /* MenuBarController.swift */,
 				A20000060000000000000006 /* UsagePopoverView.swift */,
 				A20000070000000000000007 /* SettingsView.swift */,
+				B40000020000000000000002 /* IconRendering */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -114,6 +130,27 @@
 				A2000000000000000000000A /* ClaudeBattery.entitlements */,
 			);
 			path = Resources;
+			sourceTree = "<group>";
+		};
+		B40000010000000000000001 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				B20000010000000000000001 /* IconStyle.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		B40000020000000000000002 /* IconRendering */ = {
+			isa = PBXGroup;
+			children = (
+				B20000020000000000000002 /* IconRenderer.swift */,
+				B20000030000000000000003 /* DualHorizontalRenderer.swift */,
+				B20000040000000000000004 /* MinimalRenderer.swift */,
+				B20000050000000000000005 /* DualArcGaugeRenderer.swift */,
+				B20000060000000000000006 /* TextOnlyRenderer.swift */,
+				B20000070000000000000007 /* StackedBarsRenderer.swift */,
+			);
+			path = IconRendering;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -195,6 +232,13 @@
 				A10000090000000000000009 /* AccountStore.swift in Sources */,
 				A1000000000000000000000A /* ClaudeAPI.swift in Sources */,
 				A1000000000000000000000B /* UpdateChecker.swift in Sources */,
+				B10000010000000000000001 /* IconStyle.swift in Sources */,
+				B10000020000000000000002 /* IconRenderer.swift in Sources */,
+				B10000030000000000000003 /* DualHorizontalRenderer.swift in Sources */,
+				B10000040000000000000004 /* MinimalRenderer.swift in Sources */,
+				B10000050000000000000005 /* DualArcGaugeRenderer.swift in Sources */,
+				B10000060000000000000006 /* TextOnlyRenderer.swift in Sources */,
+				B10000070000000000000007 /* StackedBarsRenderer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
