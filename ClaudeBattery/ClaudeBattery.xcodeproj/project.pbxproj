@@ -17,6 +17,7 @@
 		A10000080000000000000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000080000000000000008 /* Assets.xcassets */; };
 		A10000090000000000000009 /* AccountStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000090000000000000010 /* AccountStore.swift */; };
 		A1000000000000000000000A /* ClaudeAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* ClaudeAPI.swift */; };
+		A1000000000000000000000B /* UpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* UpdateChecker.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +34,7 @@
 		A20000090000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A20000090000000000000010 /* AccountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountStore.swift; sourceTree = "<group>"; };
 		A2000000000000000000000C /* ClaudeAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeAPI.swift; sourceTree = "<group>"; };
+		A2000000000000000000000D /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -81,6 +83,7 @@
 				A20000040000000000000004 /* UsageService.swift */,
 				A20000090000000000000010 /* AccountStore.swift */,
 				A2000000000000000000000C /* ClaudeAPI.swift */,
+				A2000000000000000000000D /* UpdateChecker.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -191,6 +194,7 @@
 				A10000070000000000000007 /* SettingsView.swift in Sources */,
 				A10000090000000000000009 /* AccountStore.swift in Sources */,
 				A1000000000000000000000A /* ClaudeAPI.swift in Sources */,
+				A1000000000000000000000B /* UpdateChecker.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -347,7 +351,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.5;
-				MARKETING_VERSION = 1.11;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.reebz.claudebattery;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE = "";
@@ -385,7 +389,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.5;
-				MARKETING_VERSION = 1.11;
+				MARKETING_VERSION = 1.4;
 				PRODUCT_BUNDLE_IDENTIFIER = com.reebz.claudebattery;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE = "";
