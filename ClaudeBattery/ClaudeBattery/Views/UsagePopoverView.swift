@@ -1,8 +1,10 @@
+import AppKit
 import SwiftUI
 
 struct UsagePopoverView: View {
     @ObservedObject var accountStore: AccountStore
     @ObservedObject var usageService: UsageService
+    @ObservedObject var updateChecker: UpdateChecker
     let onSignIn: () -> Void
 
     var body: some View {
@@ -71,9 +73,19 @@ struct UsagePopoverView: View {
             }
 
             VStack(spacing: 2) {
-                Text(lastUpdatedText)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                if let version = updateChecker.availableVersion,
+                   let url = updateChecker.downloadURL {
+                    Button(action: { NSWorkspace.shared.open(url) }) {
+                        Text("v\(version) available — Download")
+                            .font(.caption2)
+                            .foregroundColor(.cyan)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text(lastUpdatedText)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
                 Text("Right-click the battery icon in your menu bar for Settings.")
                     .font(.system(size: 9))
                     .foregroundColor(.secondary)
