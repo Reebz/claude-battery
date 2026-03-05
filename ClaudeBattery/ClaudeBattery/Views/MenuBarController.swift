@@ -10,6 +10,7 @@ class MenuBarController: NSObject {
     private let accountStore: AccountStore
     private let authManager: AuthManager
     private let usageService: UsageService
+    private let updateChecker: UpdateChecker
     private var settingsWindowController: NSWindowController?
     private var appearanceObservation: NSKeyValueObservation?
 
@@ -68,10 +69,11 @@ class MenuBarController: NSObject {
         return image
     }
 
-    init(accountStore: AccountStore, authManager: AuthManager, usageService: UsageService) {
+    init(accountStore: AccountStore, authManager: AuthManager, usageService: UsageService, updateChecker: UpdateChecker) {
         self.accountStore = accountStore
         self.authManager = authManager
         self.usageService = usageService
+        self.updateChecker = updateChecker
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
@@ -100,6 +102,7 @@ class MenuBarController: NSObject {
             rootView: UsagePopoverView(
                 accountStore: accountStore,
                 usageService: usageService,
+                updateChecker: updateChecker,
                 onSignIn: { [weak self] in self?.authManager.presentLogin() }
             )
         )
