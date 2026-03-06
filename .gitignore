@@ -24,3 +24,15 @@ dist/
 # Local docs and todos
 docs/
 todos/
+
+# Secrets & signing materials
+*.p12
+*.cer
+*.pem
+*.key
+*.pfx
+*.mobileprovision
+*.keychain
+*.keychain-db
+.env
+.env.*
