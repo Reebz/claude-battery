@@ -12,6 +12,8 @@ class AuthManager: NSObject, ObservableObject {
     private var loginWebView: WKWebView?
     private var loginWindowController: NSWindowController?
     private var loginTimeoutTask: Task<Void, Never>?
+    private var cookiePollTimer: Timer?
+    private var urlObservation: NSKeyValueObservation?
     private var hasCapturedSession = false
     private var pendingSessionKey: String?
     private var pendingExpiration: Date?
@@ -59,9 +61,89 @@ class AuthManager: NSObject, ObservableObject {
         controller.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
 
+        // KVO: observe URL changes for SPA navigations that don't trigger didFinish
+        urlObservation = webView.observe(\.url, options: [.new]) { [weak self] webView, _ in
+            Task { @MainActor [weak self] in
+                guard let self, !self.hasCapturedSession else { return }
+                self.checkCookiesFromAllSources(webView)
+            }
+        }
+
+        // Poll cookies every 0.5s — most reliable fallback for non-persistent store observer bugs
+        cookiePollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, !self.hasCapturedSession, let webView = self.loginWebView else { return }
+                self.checkCookiesFromAllSources(webView)
+            }
+        }
+
         if let url = URL(string: "https://claude.ai/login") {
             webView.load(URLRequest(url: url))
         }
+    }
+
+    /// Check for session cookie via both WKHTTPCookieStore and JavaScript document.cookie
+    private func checkCookiesFromAllSources(_ webView: WKWebView) {
+        guard !hasCapturedSession else { return }
+
+        // Path 1: WKHTTPCookieStore (captures HTTP Set-Cookie headers)
+        Task {
+            let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
+
+            #if DEBUG
+            let names = cookies.map { "\($0.name)=\($0.domain)" }.joined(separator: ", ")
+            logger.debug("Cookie store poll — \(cookies.count) cookies: \(names)")
+            #endif
+
+            if let sessionCookie = cookies.first(where: Self.isSessionCookie) {
+                handleCookieCaptured(sessionCookie)
+                return
+            }
+        }
+
+        // Path 2: JavaScript document.cookie (captures JS-set cookies missed by WKHTTPCookieStore)
+        webView.evaluateJavaScript("document.cookie") { [weak self] result, error in
+            Task { @MainActor [weak self] in
+                guard let self, !self.hasCapturedSession else { return }
+                guard let cookieString = result as? String, !cookieString.isEmpty else { return }
+
+                #if DEBUG
+                logger.debug("JS document.cookie: \(cookieString.prefix(200))")
+                #endif
+
+                // Parse "sessionKey=value; other=value2; ..." format
+                let pairs = cookieString.components(separatedBy: "; ")
+                for pair in pairs {
+                    let parts = pair.components(separatedBy: "=")
+                    guard parts.count >= 2, parts[0] == "sessionKey" else { continue }
+                    let value = parts.dropFirst().joined(separator: "=")
+                    guard !value.isEmpty else { continue }
+
+                    logger.info("Session cookie captured via JavaScript fallback")
+                    self.hasCapturedSession = true
+                    self.pendingSessionKey = value
+                    self.pendingExpiration = nil  // JS cookies don't expose expiration
+
+                    self.stopLoginWindow()
+                    Task { await self.fetchOrganizationId() }
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopLoginWindow() {
+        loginTimeoutTask?.cancel()
+        loginTimeoutTask = nil
+        cookiePollTimer?.invalidate()
+        cookiePollTimer = nil
+        urlObservation?.invalidate()
+        urlObservation = nil
+        loginWebView?.stopLoading()
+        loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
+        loginWebView = nil
+        loginWindowController?.close()
+        loginWindowController = nil
     }
 
     private static func isSessionCookie(_ cookie: HTTPCookie) -> Bool {
@@ -83,16 +165,9 @@ class AuthManager: NSObject, ObservableObject {
         pendingSessionKey = cookie.value
         pendingExpiration = cookie.expiresDate
 
-        logger.info("Session cookie captured")
+        logger.info("Session cookie captured via cookie store")
 
-        loginTimeoutTask?.cancel()
-        loginTimeoutTask = nil
-
-        loginWebView?.stopLoading()
-        loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
-        loginWebView = nil
-        loginWindowController?.close()
-        loginWindowController = nil
+        stopLoginWindow()
 
         Task { await fetchOrganizationId() }
     }
@@ -261,23 +336,14 @@ extension AuthManager: WKNavigationDelegate {
             loginWindowController?.window?.title = "Sign in to Claude — \(url.host ?? "")"
         }
 
-        Task {
-            let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
-            if let sessionCookie = cookies.first(where: Self.isSessionCookie) {
-                handleCookieCaptured(sessionCookie)
-                return
-            }
-        }
+        // Check cookies on every page load (immediate check + polling handles the rest)
+        checkCookiesFromAllSources(webView)
 
         if loginTimeoutTask == nil {
             loginTimeoutTask = Task {
                 try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
                 guard !Task.isCancelled else { return }
-                loginWebView?.stopLoading()
-                loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
-                loginWebView = nil
-                loginWindowController?.close()
-                loginWindowController = nil
+                self.stopLoginWindow()
             }
         }
     }
@@ -303,6 +369,10 @@ extension AuthManager: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         loginTimeoutTask?.cancel()
         loginTimeoutTask = nil
+        cookiePollTimer?.invalidate()
+        cookiePollTimer = nil
+        urlObservation?.invalidate()
+        urlObservation = nil
         loginWebView?.stopLoading()
         loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
         loginWebView = nil
