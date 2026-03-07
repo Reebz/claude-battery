@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Battery - Your Claude usage at a glance</title>
+  <meta name="description" content="A macOS menu bar widget that shows your Claude AI usage as a battery. Simple, lightweight, privacy-first.">
+  <link rel="icon" type="image/png" href="images/app-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    *,
+    *::before,
+    *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --bg: #FAFAF9;
+      --bg-alt: #F5F5F4;
+      --text: #1C1917;
+      --text-muted: #57534E;
+      --accent: #EA580C;
+      --accent-hover: #C2410C;
+      --border: #E7E5E4;
+      --card-bg: #FFFFFF;
+      --code-bg: #292524;
+      --code-text: #FAFAF9;
+      --shadow: 0 1px 3px rgba(28, 25, 23, 0.08), 0 1px 2px rgba(28, 25, 23, 0.04);
+      --shadow-lg: 0 10px 25px rgba(28, 25, 23, 0.08), 0 4px 10px rgba(28, 25, 23, 0.04);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1C1917;
+        --bg-alt: #292524;
+        --text: #FAFAF9;
+        --text-muted: #A8A29E;
+        --accent: #FB923C;
+        --accent-hover: #F97316;
+        --border: #44403C;
+        --card-bg: #292524;
+        --shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 1px 2px rgba(0, 0, 0, 0.2);
+        --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.3), 0 4px 10px rgba(0, 0, 0, 0.2);
+      }
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+
+    body {
+      font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+      font-weight: 500;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* ---- Hero ---- */
+    .hero {
+      padding: 80px 0 64px;
+      text-align: center;
+    }
+
+    .hero-icon {
+      width: 120px;
+      height: auto;
+      margin-bottom: 24px;
+      border-radius: 24px;
+    }
+
+    .hero h1 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 12px;
+      line-height: 1.15;
+    }
+
+    .hero .tagline {
+      font-size: 1.2rem;
+      color: var(--text-muted);
+      font-weight: 500;
+      max-width: 520px;
+      margin: 0 auto 32px;
+      line-height: 1.5;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 14px 28px;
+      border-radius: 12px;
+      font-family: inherit;
+      font-size: 1rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 200ms ease, transform 200ms ease;
+      border: none;
+    }
+
+    .btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #FFFFFF;
+    }
+
+    .btn-primary:hover {
+      background: var(--accent-hover);
+      transform: translateY(-1px);
+    }
+
+    .btn-secondary {
+      background: var(--bg-alt);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: var(--border);
+      transform: translateY(-1px);
+    }
+
+    .btn svg {
+      width: 20px;
+      height: 20px;
+      flex-shrink: 0;
+    }
+
+    .menubar-preview {
+      margin-top: 40px;
+    }
+
+    .menubar-preview img {
+      height: 56px;
+      width: auto;
+      border-radius: 10px;
+      box-shadow: var(--shadow-lg);
+    }
+
+    .menubar-caption {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+      font-weight: 500;
+      margin-top: 12px;
+      line-height: 1.6;
+    }
+
+    /* ---- Features ---- */
+    .features {
+      padding: 64px 0;
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+    }
+
+    .feature-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: var(--shadow);
+      transition: box-shadow 200ms ease;
+    }
+
+    .feature-card:hover {
+      box-shadow: var(--shadow-lg);
+    }
+
+    .feature-icon {
+      width: 40px;
+      height: 40px;
+      background: var(--bg-alt);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 16px;
+    }
+
+    .feature-icon svg {
+      width: 22px;
+      height: 22px;
+      color: var(--accent);
+    }
+
+    .feature-card h3 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .feature-card p {
+      font-size: 0.92rem;
+      color: var(--text-muted);
+      font-weight: 500;
+      line-height: 1.55;
+    }
+
+    /* ---- Screenshot ---- */
+    .screenshot {
+      padding: 48px 0 64px;
+      text-align: center;
+    }
+
+    .screenshot h2 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin-bottom: 8px;
+      letter-spacing: -0.01em;
+    }
+
+    .screenshot .subtitle {
+      color: var(--text-muted);
+      font-weight: 500;
+      margin-bottom: 32px;
+      font-size: 1.05rem;
+    }
+
+    .screenshot-img {
+      max-width: 380px;
+      width: 100%;
+      border-radius: 20px;
+      box-shadow: var(--shadow-lg);
+    }
+
+    /* ---- Icon Styles ---- */
+    .icon-styles {
+      padding: 64px 0;
+    }
+
+    .icon-styles h2 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      text-align: center;
+      margin-bottom: 8px;
+      letter-spacing: -0.01em;
+    }
+
+    .icon-styles .subtitle {
+      color: var(--text-muted);
+      font-weight: 500;
+      text-align: center;
+      margin-bottom: 32px;
+      font-size: 1.05rem;
+    }
+
+    .styles-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      max-width: 720px;
+      margin: 0 auto;
+      justify-content: center;
+    }
+
+    .style-item {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px 12px 16px;
+      text-align: center;
+      box-shadow: var(--shadow);
+      width: 128px;
+    }
+
+    .style-preview {
+      height: 52px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 12px;
+    }
+
+    .style-preview img {
+      height: 36px;
+      width: auto;
+      border-radius: 6px;
+    }
+
+    .style-item .style-name {
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--text);
+      line-height: 1.3;
+    }
+
+    .style-item .style-default {
+      font-size: 0.7rem;
+      color: var(--accent);
+      font-weight: 600;
+      margin-top: 2px;
+    }
+
+    /* ---- Install ---- */
+    .install {
+      padding: 64px 0;
+    }
+
+    .install h2 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      text-align: center;
+      margin-bottom: 32px;
+      letter-spacing: -0.01em;
+    }
+
+    .install-options {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 20px;
+      max-width: 680px;
+      margin: 0 auto;
+    }
+
+    .install-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: var(--shadow);
+      text-align: center;
+    }
+
+    .install-card h3 {
+      font-size: 1rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .install-card p {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+      font-weight: 500;
+      margin-bottom: 16px;
+    }
+
+    .code-block {
+      background: var(--code-bg);
+      color: var(--code-text);
+      padding: 14px 18px;
+      border-radius: 10px;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.82rem;
+      font-weight: 500;
+      text-align: left;
+      overflow-x: auto;
+      line-height: 1.5;
+    }
+
+    /* ---- Footer ---- */
+    .footer {
+      padding: 40px 0;
+      border-top: 1px solid var(--border);
+      text-align: center;
+    }
+
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 24px;
+      justify-content: center;
+      margin-bottom: 16px;
+    }
+
+    .footer-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.9rem;
+      font-weight: 600;
+      transition: color 200ms ease;
+      cursor: pointer;
+    }
+
+    .footer-links a:hover {
+      color: var(--accent);
+    }
+
+    .footer-links a:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    .footer-copy {
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-muted);
+    }
+
+    /* ---- Responsive: Tablet ---- */
+    @media (max-width: 768px) {
+      .features { padding: 48px 0; }
+      .screenshot { padding: 40px 0 48px; }
+      .icon-styles { padding: 48px 0; }
+      .install { padding: 48px 0; }
+    }
+
+    /* ---- Responsive: Phone ---- */
+    @media (max-width: 640px) {
+      .container { padding: 0 20px; }
+      .hero { padding: 48px 0 40px; }
+      .hero-icon { width: 88px; }
+      .hero h1 { font-size: 1.85rem; }
+      .hero .tagline { font-size: 1rem; margin-bottom: 24px; }
+      .hero-actions { flex-direction: column; gap: 10px; }
+      .hero-actions .btn { width: 100%; justify-content: center; }
+      .menubar-preview { margin-top: 32px; }
+      .menubar-preview img { height: 44px; }
+      .features { padding: 40px 0; }
+      .features-grid { grid-template-columns: 1fr; gap: 14px; }
+      .feature-card { padding: 22px; }
+      .screenshot h2,
+      .icon-styles h2,
+      .install h2 { font-size: 1.35rem; }
+      .screenshot .subtitle,
+      .icon-styles .subtitle { font-size: 0.95rem; }
+      .screenshot { padding: 32px 0 40px; }
+      .screenshot-img { max-width: 300px; border-radius: 16px; }
+      .icon-styles { padding: 40px 0; }
+      .install { padding: 40px 0; }
+      .install-options { grid-template-columns: 1fr; gap: 14px; }
+      .install-card { padding: 22px; }
+      .code-block { font-size: 0.72rem; padding: 12px 14px; word-break: break-all; }
+      .footer { padding: 32px 0; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <img src="images/app-icon.png" alt="Claude Battery app icon" class="hero-icon" width="120" height="108">
+      <h1>Claude Battery</h1>
+      <p class="tagline">Your Claude usage at a glance. A lightweight macOS menu bar app that turns confusing token counts into a simple battery.</p>
+      <div class="hero-actions">
+        <a href="https://github.com/Reebz/claude-battery/releases/download/v1.41/claude-battery_v1.41.dmg" class="btn btn-primary">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download for macOS
+        </a>
+        <a href="#install" class="btn btn-secondary">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          Install via Homebrew
+        </a>
+      </div>
+      <div class="menubar-preview">
+        <img src="images/menubar-screenshot.png" alt="Claude Battery in the macOS menu bar showing session and weekly usage">
+        <p class="menubar-caption">Lives quietly in your menu bar.<br>No analytics. No tracking. No data collection.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section class="features">
+    <div class="container">
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="7" width="12" height="14" rx="2"/><path d="M10 7V4a2 2 0 0 1 4 0v3"/><line x1="12" y1="14" x2="12" y2="14.01"/></svg>
+          </div>
+          <h3>Instantly understandable</h3>
+          <p>Full means you're good. Half means pace yourself. Low means take a break. No token math required.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          </div>
+          <h3>Session and weekly tracking</h3>
+          <p>Two batteries at a glance -- your 5-hour session limit and your 7-day weekly quota, with reset countdown timers.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+          </div>
+          <h3>Low usage alerts</h3>
+          <p>Get a notification when your weekly quota drops below a threshold you set. Never get caught off guard again.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          </div>
+          <h3>Multiple accounts</h3>
+          <p>Sign into up to 5 Claude accounts -- work, personal, side projects. Switch between them instantly.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Screenshot -->
+  <section class="screenshot">
+    <div class="container">
+      <h2>Everything you need, nothing you don't</h2>
+      <p class="subtitle">Left-click for details. Right-click for settings. That's it.</p>
+      <img src="images/popover-screenshot.png" alt="Claude Battery popover showing session and weekly usage gauges, model breakdown, and account switcher" class="screenshot-img">
+    </div>
+  </section>
+
+  <!-- Icon Styles -->
+  <section class="icon-styles">
+    <div class="container">
+      <h2>5 menu bar styles</h2>
+      <p class="subtitle">Pick the one that fits your workflow. Change anytime in Settings.</p>
+      <div class="styles-grid">
+        <div class="style-item">
+          <div class="style-preview">
+            <img src="images/style-dual-horizontal.png" alt="Dual Horizontal icon style showing two side-by-side battery icons with percentages">
+          </div>
+          <div class="style-name">Dual Horizontal</div>
+          <div class="style-default">Default</div>
+        </div>
+        <div class="style-item">
+          <div class="style-preview">
+            <img src="images/style-minimal.png" alt="Minimal icon style showing a single compact battery">
+          </div>
+          <div class="style-name">Minimal</div>
+        </div>
+        <div class="style-item">
+          <div class="style-preview">
+            <img src="images/style-dual-arc-gauge.png" alt="Dual Arc Gauge icon style showing concentric circular arcs">
+          </div>
+          <div class="style-name">Dual Arc Gauge</div>
+        </div>
+        <div class="style-item">
+          <div class="style-preview">
+            <img src="images/style-text-only.png" alt="Text Only icon style showing percentages as plain text">
+          </div>
+          <div class="style-name">Text Only</div>
+        </div>
+        <div class="style-item">
+          <div class="style-preview">
+            <img src="images/style-stacked-bars.png" alt="Stacked Bars icon style showing two horizontal progress bars">
+          </div>
+          <div class="style-name">Stacked Bars</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Install -->
+  <section class="install" id="install">
+    <div class="container">
+      <h2>Get started in 8 seconds</h2>
+      <div class="install-options">
+        <div class="install-card">
+          <h3>Direct download</h3>
+          <p>Open the DMG, drag to Applications, done.</p>
+          <a href="https://github.com/Reebz/claude-battery/releases/download/v1.41/claude-battery_v1.41.dmg" class="btn btn-primary" style="width: 100%; justify-content: center;">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download v1.41
+          </a>
+        </div>
+        <div class="install-card">
+          <h3>Homebrew</h3>
+          <p>If you prefer the command line.</p>
+          <div class="code-block">brew install reebz/claude-battery/claude-battery</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <nav class="footer-links" aria-label="Footer">
+        <a href="https://github.com/Reebz/claude-battery">GitHub</a>
+        <a href="https://buymeacoffee.com/reebz">Buy Me a Coffee</a>
+        <a href="https://github.com/Reebz/claude-battery/blob/main/LICENSE">MIT License</a>
+      </nav>
+      <p class="footer-copy">No analytics. No tracking. No data collection. Just a battery.</p>
+    </div>
+  </footer>
+
+</body>
+</html>
