@@ -139,6 +139,22 @@ DOWNLOADS_DIR="$SCRIPT_DIR/../downloads"
 mkdir -p "$DOWNLOADS_DIR"
 cp "$DMG_PATH" "$DOWNLOADS_DIR/$DMG_NAME"
 
+echo "==> Updating Homebrew cask checksum..."
+DMG_SHA256=$(shasum -a 256 "$DMG_PATH" | awk '{print $1}')
+CASK_FILE="$(brew --repo reebz/claude-battery)/Casks/claude-battery.rb"
+if [ -f "$CASK_FILE" ]; then
+  sed -i '' "s/version \".*\"/version \"$VERSION\"/" "$CASK_FILE"
+  sed -i '' "s/sha256 \".*\"/sha256 \"$DMG_SHA256\"/" "$CASK_FILE"
+  (cd "$(dirname "$CASK_FILE")/.." && \
+    git add Casks/claude-battery.rb && \
+    git commit -m "update claude-battery to v$VERSION" && \
+    git push origin main)
+  echo "    Cask updated: $DMG_SHA256"
+else
+  echo "    WARNING: Cask file not found at $CASK_FILE"
+  echo "    Manually update sha256 to: $DMG_SHA256"
+fi
+
 echo ""
 echo "=== Release complete ==="
 echo "DMG: $DMG_PATH"
