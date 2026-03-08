@@ -62,6 +62,7 @@ class MenuBarController: NSObject {
         popover.contentViewController = NSHostingController(
             rootView: UsagePopoverView(
                 accountStore: accountStore,
+                authManager: authManager,
                 usageService: usageService,
                 updateChecker: updateChecker,
                 onSignIn: { [weak self] in self?.authManager.presentLogin() }

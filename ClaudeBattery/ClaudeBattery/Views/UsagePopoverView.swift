@@ -3,13 +3,18 @@ import SwiftUI
 
 struct UsagePopoverView: View {
     @ObservedObject var accountStore: AccountStore
+    @ObservedObject var authManager: AuthManager
     @ObservedObject var usageService: UsageService
     @ObservedObject var updateChecker: UpdateChecker
     let onSignIn: () -> Void
 
     var body: some View {
         Group {
-            if !accountStore.isAuthenticated {
+            if authManager.loginState == .signingIn {
+                signingInContent
+            } else if case .error(let message) = authManager.loginState {
+                loginErrorContent(message)
+            } else if !accountStore.isAuthenticated {
                 unauthenticatedContent
             } else if let usage = usageService.latestUsage {
                 authenticatedContent(usage: usage)
@@ -216,6 +221,35 @@ struct UsagePopoverView: View {
     }
 
     // MARK: - States
+
+    private var signingInContent: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .scaleEffect(0.8)
+            Text("Signing in...")
+                .font(.headline)
+        }
+        .frame(maxWidth: .infinity, minHeight: 100)
+        .padding(16)
+    }
+
+    private func loginErrorContent(_ message: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 32))
+                .foregroundColor(.orange)
+            Text(message)
+                .font(.subheadline)
+                .multilineTextAlignment(.center)
+            Button("Try Again") {
+                authManager.loginState = .idle
+                onSignIn()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .frame(maxWidth: .infinity, minHeight: 120)
+        .padding(16)
+    }
 
     private var loadingContent: some View {
         VStack(spacing: 12) {

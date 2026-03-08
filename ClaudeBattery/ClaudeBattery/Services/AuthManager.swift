@@ -5,13 +5,22 @@ import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app", category: "Auth")
 
+enum LoginState: Equatable {
+    case idle
+    case signingIn
+    case error(String)
+}
+
 @MainActor
 class AuthManager: NSObject, ObservableObject {
+    @Published var loginState: LoginState = .idle
+
     private let storage: StorageService
     private let accountStore: AccountStore
     private var loginWebView: WKWebView?
     private var loginWindowController: NSWindowController?
     private var loginTimeoutTask: Task<Void, Never>?
+    private var orgDiscoveryTask: Task<Void, Never>?
     private var cookiePollTimer: Timer?
     private var urlObservation: NSKeyValueObservation?
     private var hasCapturedSession = false
@@ -27,11 +36,15 @@ class AuthManager: NSObject, ObservableObject {
     // MARK: - Login
 
     func presentLogin() {
+        guard loginState != .signingIn else { return }
+
         guard loginWindowController == nil else {
             loginWindowController?.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
+
+        loginState = .idle
 
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
@@ -123,9 +136,11 @@ class AuthManager: NSObject, ObservableObject {
                     self.hasCapturedSession = true
                     self.pendingSessionKey = value
                     self.pendingExpiration = nil  // JS cookies don't expose expiration
+                    self.loginState = .signingIn
+                    self.cookiePollTimer?.invalidate()
+                    self.cookiePollTimer = nil
 
-                    self.stopLoginWindow()
-                    Task { await self.fetchOrganizationId() }
+                    self.orgDiscoveryTask = Task { await self.fetchOrganizationId() }
                     return
                 }
             }
@@ -164,40 +179,52 @@ class AuthManager: NSObject, ObservableObject {
         hasCapturedSession = true
         pendingSessionKey = cookie.value
         pendingExpiration = cookie.expiresDate
+        loginState = .signingIn
+        cookiePollTimer?.invalidate()
+        cookiePollTimer = nil
 
         logger.info("Session cookie captured via cookie store")
 
-        stopLoginWindow()
-
-        Task { await fetchOrganizationId() }
+        orgDiscoveryTask = Task { await fetchOrganizationId() }
     }
 
     // MARK: - Org Discovery
 
     private func fetchOrganizationId() async {
-        guard let sessionKey = pendingSessionKey else { return }
+        guard let sessionKey = pendingSessionKey else {
+            loginState = .idle
+            stopLoginWindow()
+            return
+        }
 
         guard let request = ClaudeAPI.makeRequest(path: "/api/organizations", sessionKey: sessionKey) else {
             logger.error("Failed to construct organizations API URL")
+            handleOrgDiscoveryFailure("Connection error. Please try again.")
+            showLoginAlert("Connection Error", "Could not complete sign-in. Please close this window and try again.")
             return
         }
 
         do {
             let (data, response) = try await ClaudeAPI.session.data(for: request)
 
+            guard !Task.isCancelled else { return }
+
             guard let httpResponse = response as? HTTPURLResponse else {
                 logger.error("Non-HTTP response from organizations API")
+                handleOrgDiscoveryFailure("Connection error. Please try again.")
+                showLoginAlert("Connection Error", "Could not complete sign-in. Please close this window and try again.")
                 return
             }
 
             logger.info("Org discovery HTTP \(httpResponse.statusCode)")
 
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+                #if DEBUG
                 let body = String(data: data, encoding: .utf8) ?? "(non-utf8)"
                 logger.warning("Auth failure during org discovery (HTTP \(httpResponse.statusCode)): \(body.prefix(500))")
-                pendingSessionKey = nil
-                pendingExpiration = nil
-                hasCapturedSession = false
+                #endif
+                handleOrgDiscoveryFailure("Sign-in failed. Please try again.")
+                showLoginAlert("Sign-in Failed", "The session could not be verified. Please close this window and try again.")
                 return
             }
 
@@ -208,11 +235,12 @@ class AuthManager: NSObject, ObservableObject {
 
             let orgs = try JSONDecoder().decode([Organization].self, from: data)
 
+            guard !Task.isCancelled else { return }
+
             if orgs.isEmpty {
                 logger.info("No organizations found — user may not have Pro/Max subscription")
-                pendingSessionKey = nil
-                pendingExpiration = nil
-                hasCapturedSession = false
+                handleOrgDiscoveryFailure("No organizations found for this account.")
+                showLoginAlert("No Organizations", "No Claude organizations were found for this account. A Pro or Team subscription may be required.")
                 return
             }
 
@@ -236,16 +264,39 @@ class AuthManager: NSObject, ObservableObject {
                 logger.info("Re-authenticated existing account: \(existing.displayName)")
             } else {
                 logger.warning("Failed to add account (limit reached)")
+                handleOrgDiscoveryFailure("Account limit reached.")
+                showLoginAlert("Account Limit", "You can have up to \(AccountStore.maxAccounts) accounts. Remove one in Settings before adding another.")
+                return
             }
 
+            // Success — clean up and close window
             pendingSessionKey = nil
             pendingExpiration = nil
+            loginState = .idle
+            stopLoginWindow()
         } catch {
+            guard !Task.isCancelled else { return }
             logger.error("Org discovery failed: \(error.localizedDescription)")
-            pendingSessionKey = nil
-            pendingExpiration = nil
-            hasCapturedSession = false
+            handleOrgDiscoveryFailure("Connection error. Please try again.")
+            showLoginAlert("Connection Error", "Could not complete sign-in. Please close this window and try again.")
         }
+    }
+
+    private func handleOrgDiscoveryFailure(_ message: String) {
+        pendingSessionKey = nil
+        pendingExpiration = nil
+        hasCapturedSession = false
+        loginState = .error(message)
+    }
+
+    private func showLoginAlert(_ title: String, _ message: String) {
+        guard let window = loginWindowController?.window else { return }
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window)
     }
 
     private func extractEmail(from data: Data) -> String? {
@@ -272,6 +323,7 @@ class AuthManager: NSObject, ObservableObject {
     func signOut(accountId: UUID) {
         accountStore.removeAccount(accountId)
         hasCapturedSession = false
+        loginState = .idle
         WKWebsiteDataStore.default().removeData(
             ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
             modifiedSince: .distantPast
@@ -283,6 +335,7 @@ class AuthManager: NSObject, ObservableObject {
         let ids = accountStore.accounts.map(\.id)
         for id in ids { accountStore.removeAccount(id) }
         hasCapturedSession = false
+        loginState = .idle
         WKWebsiteDataStore.default().removeData(
             ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
             modifiedSince: .distantPast
@@ -293,6 +346,7 @@ class AuthManager: NSObject, ObservableObject {
     func handleAuthFailure() {
         // Mark the active account as failed — user switches manually
         hasCapturedSession = false
+        loginState = .idle
         logger.info("Auth failure for active account")
     }
 
@@ -343,6 +397,12 @@ extension AuthManager: WKNavigationDelegate {
             loginTimeoutTask = Task {
                 try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
                 guard !Task.isCancelled else { return }
+                self.orgDiscoveryTask?.cancel()
+                self.orgDiscoveryTask = nil
+                self.loginState = .idle
+                self.hasCapturedSession = false
+                self.pendingSessionKey = nil
+                self.pendingExpiration = nil
                 self.stopLoginWindow()
             }
         }
@@ -367,6 +427,18 @@ extension AuthManager: WKHTTPCookieStoreObserver {
 
 extension AuthManager: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
+        // Cancel in-flight org discovery if user closes window
+        orgDiscoveryTask?.cancel()
+        orgDiscoveryTask = nil
+
+        // Reset auth state so user can try again
+        if loginState == .signingIn {
+            hasCapturedSession = false
+            pendingSessionKey = nil
+            pendingExpiration = nil
+        }
+        loginState = .idle
+
         loginTimeoutTask?.cancel()
         loginTimeoutTask = nil
         cookiePollTimer?.invalidate()
