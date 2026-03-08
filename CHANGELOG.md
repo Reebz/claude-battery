@@ -1,5 +1,13 @@
 # Change Log
 
+### v1.42
+
+**Sign-In Reliability**
+- Fixed login window closing before account was actually saved, causing "Session expired" after sign-in
+- All sign-in errors now show clear messages instead of failing silently
+- Added "Signing in..." spinner so you know the app is working
+- Fixed a bug that could permanently lock out sign-in until app restart
+
 ### v1.41
 
 **New Icon Styles**
