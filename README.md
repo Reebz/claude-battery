@@ -3,7 +3,7 @@
 
 Your Claude usage at a glance. A macOS menu bar widget that shows your Claude session and weekly limits... as a battery.
 
-[Download the app](https://github.com/Reebz/claude-battery/releases/download/v1.41/claude-battery_v1.41.dmg) or `brew install reebz/claude-battery/claude-battery`
+[Download the app](https://github.com/Reebz/claude-battery/releases/download/v1.42/claude-battery_v1.42.dmg) or `brew install reebz/claude-battery/claude-battery`
 
 <img src ="https://iili.io/qdnW1SV.png" width="180" height="80">
 
@@ -24,7 +24,7 @@ And lastly, ["Invert, always invert".](https://www.stripe.press/poor-charlies-al
 
 ### Download
 
-[Download here](https://github.com/Reebz/claude-battery/releases/download/v1.41/claude-battery_v1.41.dmg), or manually find the latest `.dmg` file from the downloads folder, open it, and drag Claude Battery to your Applications folder.
+[Download here](https://github.com/Reebz/claude-battery/releases/download/v1.42/claude-battery_v1.42.dmg), or manually find the latest `.dmg` file from the downloads folder, open it, and drag Claude Battery to your Applications folder.
 
 ### Homebrew
 
