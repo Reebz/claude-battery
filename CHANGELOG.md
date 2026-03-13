@@ -1,5 +1,12 @@
 # Change Log
 
+### v1.44
+
+**Sign-In Timeout Fix**
+- Fixed login window closing on its own while checking email for the verification code
+- Login timeout now resets on each page navigation instead of counting from when the window first opens
+- Extended idle timeout from 5 minutes to 10 minutes
+
 ### v1.42
 
 **Sign-In Reliability**

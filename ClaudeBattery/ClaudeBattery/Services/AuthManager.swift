@@ -393,18 +393,19 @@ extension AuthManager: WKNavigationDelegate {
         // Check cookies on every page load (immediate check + polling handles the rest)
         checkCookiesFromAllSources(webView)
 
-        if loginTimeoutTask == nil {
-            loginTimeoutTask = Task {
-                try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
-                guard !Task.isCancelled else { return }
-                self.orgDiscoveryTask?.cancel()
-                self.orgDiscoveryTask = nil
-                self.loginState = .idle
-                self.hasCapturedSession = false
-                self.pendingSessionKey = nil
-                self.pendingExpiration = nil
-                self.stopLoginWindow()
-            }
+        // Reset timeout on every navigation — proves user is still actively signing in.
+        // Prevents the window from closing while the user checks email for their code.
+        loginTimeoutTask?.cancel()
+        loginTimeoutTask = Task {
+            try? await Task.sleep(nanoseconds: 10 * 60 * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            self.orgDiscoveryTask?.cancel()
+            self.orgDiscoveryTask = nil
+            self.loginState = .idle
+            self.hasCapturedSession = false
+            self.pendingSessionKey = nil
+            self.pendingExpiration = nil
+            self.stopLoginWindow()
         }
     }
 }
