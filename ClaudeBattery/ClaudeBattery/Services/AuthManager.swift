@@ -28,7 +28,6 @@ class AuthManager: NSObject, ObservableObject {
     private var hasCapturedSession = false
     // internal for @testable access in AuthManagerTests
     var pendingSessionKey: String?
-    private var pendingExpiration: Date?
 
     init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
         self.storage = storage
@@ -52,9 +51,9 @@ class AuthManager: NSObject, ObservableObject {
 
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
-        config.applicationNameForUserAgent = ClaudeAPI.safariUserAgentSuffix
 
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 640), configuration: config)
+        webView.customUserAgent = ClaudeAPI.safariUserAgent
         webView.navigationDelegate = self
         self.loginWebView = webView
 
@@ -139,7 +138,6 @@ class AuthManager: NSObject, ObservableObject {
                     logger.info("Session cookie captured via JavaScript fallback")
                     self.hasCapturedSession = true
                     self.pendingSessionKey = value
-                    self.pendingExpiration = nil  // JS cookies don't expose expiration
                     self.loginState = .signingIn
                     self.cookiePollTimer?.invalidate()
                     self.cookiePollTimer = nil
@@ -184,7 +182,6 @@ class AuthManager: NSObject, ObservableObject {
 
         hasCapturedSession = true
         pendingSessionKey = cookie.value
-        pendingExpiration = cookie.expiresDate
         loginState = .signingIn
         cookiePollTimer?.invalidate()
         cookiePollTimer = nil
@@ -251,22 +248,42 @@ class AuthManager: NSObject, ObservableObject {
                 return
             }
 
+            // Determine which org to use
+            let chosenOrg: Organization
+            if orgs.count == 1 {
+                chosenOrg = orgs[0]
+            } else if let existingAccount = accountStore.accounts.first(where: { acct in orgs.contains(where: { $0.uuid == acct.organizationId }) }),
+                      let match = orgs.first(where: { $0.uuid == existingAccount.organizationId }) {
+                // Re-auth: auto-select if any existing account's org is in the list
+                chosenOrg = match
+                logger.info("Re-auth auto-selected org for account \(existingAccount.displayName): \(match.displayName)")
+            } else {
+                // Multiple orgs, no auto-select match — show picker
+                guard let picked = await showOrgPicker(orgs: orgs) else {
+                    // User cancelled the picker
+                    handleOrgDiscoveryFailure("Sign-in cancelled.")
+                    return
+                }
+                chosenOrg = picked
+            }
+
+            guard !Task.isCancelled else { return }
+
             // Try to extract email from org response
-            let email = extractEmail(from: data) ?? "Account \(accountStore.accounts.count + 1)"
+            let email = extractEmail(from: orgs, rawData: data) ?? "Account \(accountStore.accounts.count + 1)"
 
             let account = Account(
                 email: email,
                 sessionKey: sessionKey,
-                organizationId: orgs[0].uuid,
-                sessionKeyExpiration: pendingExpiration
+                organizationId: chosenOrg.uuid
             )
 
             if accountStore.addAccount(account) {
                 accountStore.switchTo(account.id)
                 logger.info("Account added and activated: \(account.displayName)")
-            } else if let existing = accountStore.accounts.first(where: { $0.organizationId == orgs[0].uuid }) {
+            } else if let existing = accountStore.accounts.first(where: { $0.organizationId == chosenOrg.uuid }) {
                 // Re-authentication: update session key on existing account
-                accountStore.updateSessionKey(existing.id, sessionKey, expiration: pendingExpiration)
+                accountStore.updateSessionKey(existing.id, sessionKey)
                 accountStore.switchTo(existing.id)
                 logger.info("Re-authenticated existing account: \(existing.displayName)")
             } else {
@@ -278,7 +295,6 @@ class AuthManager: NSObject, ObservableObject {
 
             // Success — clean up and close window
             pendingSessionKey = nil
-            pendingExpiration = nil
             loginState = .idle
             stopLoginWindow()
         } catch {
@@ -291,7 +307,6 @@ class AuthManager: NSObject, ObservableObject {
 
     private func handleOrgDiscoveryFailure(_ message: String) {
         pendingSessionKey = nil
-        pendingExpiration = nil
         hasCapturedSession = false
         loginState = .error(message)
     }
@@ -306,18 +321,59 @@ class AuthManager: NSObject, ObservableObject {
         alert.beginSheetModal(for: window)
     }
 
-    private func extractEmail(from data: Data) -> String? {
-        // Try to extract email from the organizations response, checking multiple possible keys
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-              let first = json.first else { return nil }
+    private func showOrgPicker(orgs: [Organization]) async -> Organization? {
+        guard let window = loginWindowController?.window else { return nil }
 
-        let emailKeys = ["email_address", "email", "billing_email", "primary_email"]
-        for key in emailKeys {
+        return await withCheckedContinuation { continuation in
+            let alert = NSAlert()
+            alert.messageText = "Choose Organization"
+            alert.informativeText = "Multiple organizations found. Select which one to monitor."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Select")
+            alert.addButton(withTitle: "Cancel")
+
+            let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 28), pullsDown: false)
+            for (index, org) in orgs.enumerated() {
+                var title = org.displayName == "Organization" ? "Organization \(index + 1)" : org.displayName
+                // Disambiguate if another org has the same display name
+                let duplicateCount = orgs.prefix(index).filter { $0.displayName == org.displayName && org.displayName != "Organization" }.count
+                if duplicateCount > 0 {
+                    title = "\(title) (\(duplicateCount + 1))"
+                }
+                popup.addItem(withTitle: title)
+            }
+            alert.accessoryView = popup
+
+            alert.beginSheetModal(for: window) { response in
+                if response == .alertFirstButtonReturn {
+                    let selectedIndex = popup.indexOfSelectedItem
+                    guard selectedIndex >= 0, selectedIndex < orgs.count else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    continuation.resume(returning: orgs[selectedIndex])
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+
+    private func extractEmail(from orgs: [Organization], rawData: Data) -> String? {
+        // Prefer the enriched model's emailAddress field
+        for org in orgs {
+            if let email = org.emailAddress, !email.isEmpty {
+                return email
+            }
+        }
+        // Fallback: search raw JSON for additional email keys not in the model
+        guard let json = try? JSONSerialization.jsonObject(with: rawData) as? [[String: Any]],
+              let first = json.first else { return nil }
+        for key in ["email", "billing_email", "primary_email"] {
             if let email = first[key] as? String, !email.isEmpty {
                 return email
             }
         }
-        // Try nested billing object
         if let billing = first["billing"] as? [String: Any],
            let email = billing["email"] as? String, !email.isEmpty {
             return email
@@ -411,7 +467,6 @@ extension AuthManager: WKNavigationDelegate {
             self.loginState = .idle
             self.hasCapturedSession = false
             self.pendingSessionKey = nil
-            self.pendingExpiration = nil
             self.stopLoginWindow()
         }
     }
@@ -443,7 +498,6 @@ extension AuthManager: NSWindowDelegate {
         if loginState == .signingIn {
             hasCapturedSession = false
             pendingSessionKey = nil
-            pendingExpiration = nil
         }
         loginState = .idle
 
@@ -464,4 +518,25 @@ extension AuthManager: NSWindowDelegate {
 
 struct Organization: Codable {
     let uuid: String
+    let name: String?
+    let billingType: String?
+    let emailAddress: String?
+
+    var displayName: String {
+        if let name, !name.isEmpty {
+            let sanitized = name.filter { !$0.isNewline && $0 != "\u{200F}" && $0 != "\u{200E}" }
+            return String(sanitized.prefix(100))
+        }
+        if let billingType, !billingType.isEmpty {
+            return billingType.capitalized
+        }
+        return "Organization"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case uuid
+        case name
+        case billingType = "billing_type"
+        case emailAddress = "email_address"
+    }
 }
