@@ -38,13 +38,15 @@ class UsageService: NSObject, ObservableObject {
 
     private let storage: StorageService
     private let accountStore: AccountStore
+    private let session: any HTTPDataFetching
     private var timer: Timer?
     private var isPolling = false
     private var currentPollTask: Task<Void, Never>?
 
-    init(storage: StorageService, accountStore: AccountStore) {
+    init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
         self.storage = storage
         self.accountStore = accountStore
+        self.session = session
         super.init()
 
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -135,7 +137,7 @@ class UsageService: NSObject, ObservableObject {
         }
 
         do {
-            let (data, response) = try await ClaudeAPI.session.data(for: request)
+            let (data, response) = try await session.data(for: request)
 
             guard !Task.isCancelled else { return }
 

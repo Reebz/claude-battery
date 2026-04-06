@@ -16,7 +16,9 @@ class AuthManager: NSObject, ObservableObject {
     @Published var loginState: LoginState = .idle
 
     private let storage: StorageService
-    private let accountStore: AccountStore
+    // internal for @testable access in AuthManagerTests
+    let accountStore: AccountStore
+    private let session: any HTTPDataFetching
     private var loginWebView: WKWebView?
     private var loginWindowController: NSWindowController?
     private var loginTimeoutTask: Task<Void, Never>?
@@ -24,12 +26,14 @@ class AuthManager: NSObject, ObservableObject {
     private var cookiePollTimer: Timer?
     private var urlObservation: NSKeyValueObservation?
     private var hasCapturedSession = false
-    private var pendingSessionKey: String?
+    // internal for @testable access in AuthManagerTests
+    var pendingSessionKey: String?
     private var pendingExpiration: Date?
 
-    init(storage: StorageService, accountStore: AccountStore) {
+    init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
         self.storage = storage
         self.accountStore = accountStore
+        self.session = session
         super.init()
     }
 
@@ -161,12 +165,14 @@ class AuthManager: NSObject, ObservableObject {
         loginWindowController = nil
     }
 
-    private static func isSessionCookie(_ cookie: HTTPCookie) -> Bool {
+    // internal for @testable access in AuthManagerTests
+    static func isSessionCookie(_ cookie: HTTPCookie) -> Bool {
         cookie.name == "sessionKey" &&
         (cookie.domain == "claude.ai" || cookie.domain == ".claude.ai")
     }
 
-    private func handleCookieCaptured(_ cookie: HTTPCookie) {
+    // internal for @testable access in AuthManagerTests
+    func handleCookieCaptured(_ cookie: HTTPCookie) {
         guard !hasCapturedSession else { return }
 
         guard Self.isSessionCookie(cookie),
@@ -190,7 +196,8 @@ class AuthManager: NSObject, ObservableObject {
 
     // MARK: - Org Discovery
 
-    private func fetchOrganizationId() async {
+    // internal for @testable access in AuthManagerTests
+    func fetchOrganizationId() async {
         guard let sessionKey = pendingSessionKey else {
             loginState = .idle
             stopLoginWindow()
@@ -205,7 +212,7 @@ class AuthManager: NSObject, ObservableObject {
         }
 
         do {
-            let (data, response) = try await ClaudeAPI.session.data(for: request)
+            let (data, response) = try await session.data(for: request)
 
             guard !Task.isCancelled else { return }
 
