@@ -20,8 +20,8 @@ xcodebuild -project ClaudeBattery/ClaudeBattery.xcodeproj \
 - Xcode project: `ClaudeBattery/ClaudeBattery.xcodeproj`
 - Scheme: `ClaudeBattery`
 - Build output: `/tmp/ClaudeBattery-build/` (NOT iCloud — avoids provenance xattrs)
-- Signing: `Developer ID Application: [REDACTED]`
-- Notarization keychain profile: `ClaudeBattery`
+- Signing: Developer ID Application (see release.sh for identity)
+- Notarization keychain profile: see release.sh
 
 ## Architecture
 

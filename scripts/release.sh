@@ -9,7 +9,7 @@ set -euo pipefail
 #   2. Store notarization credentials once:
 #      xcrun notarytool store-credentials "ClaudeBattery" \
 #        --apple-id "your@email.com" \
-#        --team-id "PJHS9XQS6H" \
+#        --team-id "YOUR_TEAM_ID" \
 #        --password "app-specific-password"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

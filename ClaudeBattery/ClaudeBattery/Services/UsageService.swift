@@ -149,8 +149,12 @@ class UsageService: NSObject, ObservableObject {
 
             guard (200...299).contains(httpResponse.statusCode) else {
                 consecutiveFailures += 1
+                #if DEBUG
                 let body = String(data: data, encoding: .utf8) ?? "(non-utf8)"
                 logger.warning("Unexpected HTTP status: \(httpResponse.statusCode) body: \(body.prefix(500))")
+                #else
+                logger.warning("Unexpected HTTP status: \(httpResponse.statusCode)")
+                #endif
                 return
             }
 
