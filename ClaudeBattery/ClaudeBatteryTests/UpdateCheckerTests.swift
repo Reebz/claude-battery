@@ -56,8 +56,9 @@ final class UpdateCheckerTests: XCTestCase {
         // Trigger the check by calling startChecking, which calls checkForUpdate
         checker.startChecking()
 
-        // Give the async task time to complete
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        // UpdateChecker.startChecking() fires a detached Task internally with no await handle.
+        // We sleep to allow the async work to complete. 500ms is generous for CI safety.
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         // The fixture has tag_name "v2.0" -- current bundle version in tests is
         // typically "1.0" or similar, so 2.0 should be newer
@@ -73,7 +74,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseStatusCode = 200
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertEqual(
             checker.downloadURL?.absoluteString,
@@ -91,7 +92,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseStatusCode = 200
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         // availableVersion should be the stripped version, not "v3.5"
         XCTAssertEqual(checker.availableVersion, "3.5")
@@ -108,7 +109,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseStatusCode = 200
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertNil(checker.availableVersion, "Should reject version with four segments")
         XCTAssertNil(checker.downloadURL)
@@ -124,7 +125,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseStatusCode = 200
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertEqual(checker.availableVersion, "99.1.2")
 
@@ -139,7 +140,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseStatusCode = 200
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertNil(checker.availableVersion, "Should reject non-numeric version")
 
@@ -154,7 +155,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseStatusCode = 404
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertNil(checker.availableVersion, "Should not set version on 404")
         XCTAssertNil(checker.downloadURL, "Should not set URL on 404")
@@ -169,7 +170,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseError = URLError(.notConnectedToInternet)
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertNil(checker.availableVersion, "Should not set version on network error")
         XCTAssertNil(checker.downloadURL, "Should not set URL on network error")
@@ -185,7 +186,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseStatusCode = 200
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertNil(checker.availableVersion, "Should not set version on malformed JSON")
 
@@ -203,7 +204,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseStatusCode = 200
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertNil(checker.availableVersion, "Should reject non-GitHub download URL")
         XCTAssertNil(checker.downloadURL)
@@ -222,7 +223,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseStatusCode = 200
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertNil(checker.availableVersion, "Should reject http:// URL")
         XCTAssertNil(checker.downloadURL)
@@ -238,7 +239,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseStatusCode = 200
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         let request = mockSession.lastRequest
         XCTAssertEqual(request?.value(forHTTPHeaderField: "User-Agent"), "claude-battery")
@@ -252,7 +253,7 @@ final class UpdateCheckerTests: XCTestCase {
         mockSession.responseStatusCode = 200
 
         checker.startChecking()
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         let request = mockSession.lastRequest
         XCTAssertTrue(
@@ -273,7 +274,7 @@ final class UpdateCheckerTests: XCTestCase {
         checker.stopChecking()
 
         // No startChecking called, so no request should be made
-        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000)
 
         XCTAssertTrue(mockSession.capturedRequests.isEmpty)
         XCTAssertNil(checker.availableVersion)

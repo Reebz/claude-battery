@@ -202,6 +202,7 @@ final class ExtraUsageDataTests: XCTestCase {
 
 final class UsageServicePollTests: XCTestCase {
 
+    private var suiteName: String!
     private var mockSession: MockHTTPSession!
     private var storage: StorageService!
     private var accountStore: AccountStore!
@@ -220,8 +221,9 @@ final class UsageServicePollTests: XCTestCase {
         mockSession = MockHTTPSession()
 
         // Isolated UserDefaults per test to avoid cross-contamination
-        let defaults = UserDefaults(suiteName: "com.claudebattery.tests.usage.\(name)")!
-        defaults.removePersistentDomain(forName: "com.claudebattery.tests.usage.\(name)")
+        suiteName = "com.claudebattery.tests.usage.\(name)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
         storage = StorageService(defaults: defaults, prefix: "test_")
         accountStore = AccountStore(storage: storage)
 
@@ -231,9 +233,11 @@ final class UsageServicePollTests: XCTestCase {
 
     @MainActor
     override func tearDown() {
+        UserDefaults.standard.removePersistentDomain(forName: suiteName)
         mockSession = nil
         storage = nil
         accountStore = nil
+        suiteName = nil
         super.tearDown()
     }
 
