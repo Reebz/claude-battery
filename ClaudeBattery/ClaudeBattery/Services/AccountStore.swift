@@ -38,6 +38,23 @@ class AccountStore: ObservableObject {
         }
     }
 
+    // MARK: - Migration
+
+    /// Clear stale sessionKeyExpiration from all accounts.
+    /// Non-persistent WKWebView store produces unreliable expiresDate values;
+    /// session validity is now determined solely by API 401/403 responses.
+    func clearSessionExpirations() {
+        var changed = false
+        for i in accounts.indices where accounts[i].sessionKeyExpiration != nil {
+            accounts[i].sessionKeyExpiration = nil
+            changed = true
+        }
+        if changed {
+            persist()
+            logger.info("Cleared stale sessionKeyExpiration from stored accounts")
+        }
+    }
+
     // MARK: - Mutations
 
     func addAccount(_ account: Account) -> Bool {
