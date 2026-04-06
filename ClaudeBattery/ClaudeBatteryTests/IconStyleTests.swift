@@ -64,7 +64,7 @@ final class IconStyleTests: XCTestCase {
 
     // MARK: - Each renderer call returns a fresh instance (struct value type)
 
-    func testRendererReturnsFreshInstanceEachCall() {
+    func testRendererReturnsSameTypeEachCall() {
         // Since renderers are structs, each `.renderer` access creates a new value.
         // Verify the two calls produce equivalent but distinct values by checking
         // they're both valid (struct identity isn't reference-comparable).

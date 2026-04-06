@@ -36,8 +36,8 @@ struct Account: Codable, Identifiable, Equatable {
 // MARK: - Storage
 
 final class StorageService {
-    let defaults: UserDefaults
-    let prefix: String
+    private let defaults: UserDefaults
+    private let prefix: String
 
     enum Keys {
         static let sessionKey = "sessionKey"
