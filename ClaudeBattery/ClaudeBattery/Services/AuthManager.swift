@@ -28,7 +28,6 @@ class AuthManager: NSObject, ObservableObject {
     private var hasCapturedSession = false
     // internal for @testable access in AuthManagerTests
     var pendingSessionKey: String?
-    private var pendingExpiration: Date?
 
     init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
         self.storage = storage
@@ -139,7 +138,6 @@ class AuthManager: NSObject, ObservableObject {
                     logger.info("Session cookie captured via JavaScript fallback")
                     self.hasCapturedSession = true
                     self.pendingSessionKey = value
-                    self.pendingExpiration = nil  // JS cookies don't expose expiration
                     self.loginState = .signingIn
                     self.cookiePollTimer?.invalidate()
                     self.cookiePollTimer = nil
@@ -184,7 +182,6 @@ class AuthManager: NSObject, ObservableObject {
 
         hasCapturedSession = true
         pendingSessionKey = cookie.value
-        pendingExpiration = nil  // Don't trust cookie.expiresDate from non-persistent store
         loginState = .signingIn
         cookiePollTimer?.invalidate()
         cookiePollTimer = nil
@@ -255,11 +252,11 @@ class AuthManager: NSObject, ObservableObject {
             let chosenOrg: Organization
             if orgs.count == 1 {
                 chosenOrg = orgs[0]
-            } else if let activeOrgId = accountStore.activeAccount?.organizationId,
-                      let match = orgs.first(where: { $0.uuid == activeOrgId }) {
-                // Re-auth: auto-select the active account's org if still in the list
+            } else if let existingAccount = accountStore.accounts.first(where: { acct in orgs.contains(where: { $0.uuid == acct.organizationId }) }),
+                      let match = orgs.first(where: { $0.uuid == existingAccount.organizationId }) {
+                // Re-auth: auto-select if any existing account's org is in the list
                 chosenOrg = match
-                logger.info("Re-auth auto-selected org: \(match.displayName)")
+                logger.info("Re-auth auto-selected org for account \(existingAccount.displayName): \(match.displayName)")
             } else {
                 // Multiple orgs, no auto-select match — show picker
                 guard let picked = await showOrgPicker(orgs: orgs) else {
@@ -278,8 +275,7 @@ class AuthManager: NSObject, ObservableObject {
             let account = Account(
                 email: email,
                 sessionKey: sessionKey,
-                organizationId: chosenOrg.uuid,
-                sessionKeyExpiration: pendingExpiration
+                organizationId: chosenOrg.uuid
             )
 
             if accountStore.addAccount(account) {
@@ -287,7 +283,7 @@ class AuthManager: NSObject, ObservableObject {
                 logger.info("Account added and activated: \(account.displayName)")
             } else if let existing = accountStore.accounts.first(where: { $0.organizationId == chosenOrg.uuid }) {
                 // Re-authentication: update session key on existing account
-                accountStore.updateSessionKey(existing.id, sessionKey, expiration: pendingExpiration)
+                accountStore.updateSessionKey(existing.id, sessionKey)
                 accountStore.switchTo(existing.id)
                 logger.info("Re-authenticated existing account: \(existing.displayName)")
             } else {
@@ -299,7 +295,6 @@ class AuthManager: NSObject, ObservableObject {
 
             // Success — clean up and close window
             pendingSessionKey = nil
-            pendingExpiration = nil
             loginState = .idle
             stopLoginWindow()
         } catch {
@@ -312,7 +307,6 @@ class AuthManager: NSObject, ObservableObject {
 
     private func handleOrgDiscoveryFailure(_ message: String) {
         pendingSessionKey = nil
-        pendingExpiration = nil
         hasCapturedSession = false
         loginState = .error(message)
     }
@@ -340,7 +334,12 @@ class AuthManager: NSObject, ObservableObject {
 
             let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 28), pullsDown: false)
             for (index, org) in orgs.enumerated() {
-                let title = org.displayName == "Organization" ? "Organization \(index + 1)" : org.displayName
+                var title = org.displayName == "Organization" ? "Organization \(index + 1)" : org.displayName
+                // Disambiguate if another org has the same display name
+                let duplicateCount = orgs.prefix(index).filter { $0.displayName == org.displayName && org.displayName != "Organization" }.count
+                if duplicateCount > 0 {
+                    title = "\(title) (\(duplicateCount + 1))"
+                }
                 popup.addItem(withTitle: title)
             }
             alert.accessoryView = popup
@@ -468,7 +467,6 @@ extension AuthManager: WKNavigationDelegate {
             self.loginState = .idle
             self.hasCapturedSession = false
             self.pendingSessionKey = nil
-            self.pendingExpiration = nil
             self.stopLoginWindow()
         }
     }
@@ -500,7 +498,6 @@ extension AuthManager: NSWindowDelegate {
         if loginState == .signingIn {
             hasCapturedSession = false
             pendingSessionKey = nil
-            pendingExpiration = nil
         }
         loginState = .idle
 

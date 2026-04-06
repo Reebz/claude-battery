@@ -33,7 +33,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         storage = StorageService()
         accountStore = AccountStore(storage: storage)
-        accountStore.clearSessionExpirations()
         authManager = AuthManager(storage: storage, accountStore: accountStore)
         usageService = UsageService(storage: storage, accountStore: accountStore)
 
