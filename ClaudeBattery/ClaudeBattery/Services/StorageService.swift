@@ -14,13 +14,12 @@ struct Account: Codable, Identifiable, Equatable {
     let addedDate: Date
     var notificationThreshold: Double
     var didNotifyBelowThreshold: Bool
-    var sessionKeyExpiration: Date?
 
     var displayName: String {
         nickname ?? email
     }
 
-    init(id: UUID = UUID(), email: String, sessionKey: String, organizationId: String, nickname: String? = nil, addedDate: Date = Date(), notificationThreshold: Double = 20.0, didNotifyBelowThreshold: Bool = false, sessionKeyExpiration: Date? = nil) {
+    init(id: UUID = UUID(), email: String, sessionKey: String, organizationId: String, nickname: String? = nil, addedDate: Date = Date(), notificationThreshold: Double = 20.0, didNotifyBelowThreshold: Bool = false) {
         self.id = id
         self.email = email
         self.sessionKey = sessionKey
@@ -29,7 +28,6 @@ struct Account: Codable, Identifiable, Equatable {
         self.addedDate = addedDate
         self.notificationThreshold = notificationThreshold
         self.didNotifyBelowThreshold = didNotifyBelowThreshold
-        self.sessionKeyExpiration = sessionKeyExpiration
     }
 }
 

@@ -10,8 +10,6 @@ enum ClaudeAPI {
 
     static let safariUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) \(safariVersionToken) Safari/605.1.15"
 
-    static let safariUserAgentSuffix = "\(safariVersionToken) Safari/605.1.15"
-
     static let session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false
