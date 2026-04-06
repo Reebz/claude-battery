@@ -36,3 +36,4 @@ todos/
 *.keychain-db
 .env
 .env.*
+.worktrees
