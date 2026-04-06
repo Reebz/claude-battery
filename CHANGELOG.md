@@ -1,5 +1,15 @@
 # Change Log
 
+### v1.45
+
+**Multi-Org Support & Login Fixes**
+- Added organization picker for users with multiple plans (e.g., Team + Free) on the same email
+- Fixed 100%/100% false usage display when the wrong org was auto-selected
+- Fixed Google OAuth "error logging you in" by replacing the User-Agent append with a full override
+- Fixed immediate "Session expired" after email/code login by removing unreliable cookie expiration trust
+- Re-authentication now auto-selects the previously used org when it's still available
+- Added 92 automated tests covering all services and models
+
 ### v1.44
 
 **Sign-In Timeout Fix**
