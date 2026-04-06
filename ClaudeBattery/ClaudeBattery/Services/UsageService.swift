@@ -122,14 +122,6 @@ class UsageService: NSObject, ObservableObject {
             return
         }
 
-        if let expiration = account.sessionKeyExpiration, expiration < Date() {
-            consecutiveFailures += 1
-            authFailed = true
-            logger.info("Session cookie expired, triggering re-auth")
-            onAuthFailure?()
-            return
-        }
-
         guard let request = ClaudeAPI.makeRequest(path: "/api/organizations/\(account.organizationId)/usage", sessionKey: account.sessionKey) else {
             consecutiveFailures += 1
             logger.error("Failed to construct usage API URL")
