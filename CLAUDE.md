@@ -38,7 +38,7 @@ xcodebuild -project ClaudeBattery/ClaudeBattery.xcodeproj \
 ## Gotchas
 
 - WKWebView uses non-persistent data store — cookie observer is unreliable, triple-redundant capture required
-- Auth has had 7 rounds of hardening — check docs/solutions/ before modifying
+- Auth has had 8 rounds of hardening — check docs/solutions/ before modifying
 - Build directory MUST be outside iCloud/Dropbox to avoid com.apple.provenance xattrs
 - Version must be bumped in TWO places in project.pbxproj (Debug + Release)
 
