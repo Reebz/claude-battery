@@ -36,7 +36,7 @@ struct Account: Codable, Identifiable, Equatable {
 // MARK: - Storage
 
 final class StorageService {
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private let prefix: String
 
     enum Keys {
@@ -47,8 +47,9 @@ final class StorageService {
         static let migrated = "migrated"
     }
 
-    init() {
-        self.prefix = "cb_"
+    init(defaults: UserDefaults = .standard, prefix: String = "cb_") {
+        self.defaults = defaults
+        self.prefix = prefix
         migrateIfNeeded()
     }
 

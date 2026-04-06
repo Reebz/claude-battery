@@ -19,7 +19,7 @@ class UpdateChecker: NSObject, ObservableObject {
         static let allowedHosts: Set<String> = ["github.com", "www.github.com"]
     }
 
-    private static let session: URLSession = {
+    private static let defaultSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false
         config.httpCookieStorage = nil
@@ -29,7 +29,10 @@ class UpdateChecker: NSObject, ObservableObject {
         return URLSession(configuration: config)
     }()
 
-    override init() {
+    private let session: any HTTPDataFetching
+
+    init(session: any HTTPDataFetching = UpdateChecker.defaultSession) {
+        self.session = session
         super.init()
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -75,7 +78,7 @@ class UpdateChecker: NSObject, ObservableObject {
         request.setValue("claude-battery", forHTTPHeaderField: "User-Agent")
 
         do {
-            let (data, response) = try await Self.session.data(for: request)
+            let (data, response) = try await session.data(for: request)
 
             guard !Task.isCancelled else { return }
 
