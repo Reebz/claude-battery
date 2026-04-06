@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		09C1A92B095161678D2A3778 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1188B7AAC9F9C765EEF70301 /* Cocoa.framework */; };
+		522F8A60215EA3D91D88C782 /* UpdateCheckerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06A9D8FEA3510DE3A69EEA9F /* UpdateCheckerTests.swift */; };
+		6BD92493B6E2F2C928493ED9 /* ClaudeAPITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 882ED57CBE7110FF7B5A110A /* ClaudeAPITests.swift */; };
+		A1000000000000000000000A /* ClaudeAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* ClaudeAPI.swift */; };
+		A1000000000000000000000B /* UpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* UpdateChecker.swift */; };
 		A10000010000000000000001 /* ClaudeBatteryApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000010000000000000001 /* ClaudeBatteryApp.swift */; };
 		A10000020000000000000002 /* StorageService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000020000000000000002 /* StorageService.swift */; };
 		A10000030000000000000003 /* AuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000030000000000000003 /* AuthManager.swift */; };
@@ -16,8 +21,6 @@
 		A10000070000000000000007 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000070000000000000007 /* SettingsView.swift */; };
 		A10000080000000000000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000080000000000000008 /* Assets.xcassets */; };
 		A10000090000000000000009 /* AccountStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000090000000000000010 /* AccountStore.swift */; };
-		A1000000000000000000000A /* ClaudeAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000C /* ClaudeAPI.swift */; };
-		A1000000000000000000000B /* UpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* UpdateChecker.swift */; };
 		B10000010000000000000001 /* IconStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000010000000000000001 /* IconStyle.swift */; };
 		B10000020000000000000002 /* IconRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000020000000000000002 /* IconRenderer.swift */; };
 		B10000030000000000000003 /* DualHorizontalRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000030000000000000003 /* DualHorizontalRenderer.swift */; };
@@ -25,11 +28,45 @@
 		B10000050000000000000005 /* DualArcGaugeRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000050000000000000005 /* DualArcGaugeRenderer.swift */; };
 		B10000060000000000000006 /* TextOnlyRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000060000000000000006 /* TextOnlyRenderer.swift */; };
 		B10000070000000000000007 /* StackedBarsRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000070000000000000007 /* StackedBarsRenderer.swift */; };
+		B8B7E94DFB5BF777D586E1F6 /* IconStyleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55346AC851D0669ADFB2113D /* IconStyleTests.swift */; };
+		C10000010000000000000001 /* StorageServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000010000000000000001 /* StorageServiceTests.swift */; };
+		C10000020000000000000002 /* AccountStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000020000000000000002 /* AccountStoreTests.swift */; };
+		C10000030000000000000003 /* UsageServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000030000000000000003 /* UsageServiceTests.swift */; };
+		C10000040000000000000004 /* MockHTTPSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000040000000000000004 /* MockHTTPSession.swift */; };
+		C10000050000000000000005 /* usage_full.json in Resources */ = {isa = PBXBuildFile; fileRef = C20000050000000000000005 /* usage_full.json */; };
+		C10000060000000000000006 /* usage_nil_fields.json in Resources */ = {isa = PBXBuildFile; fileRef = C20000060000000000000006 /* usage_nil_fields.json */; };
+		C10000070000000000000007 /* usage_extra_usage.json in Resources */ = {isa = PBXBuildFile; fileRef = C20000070000000000000007 /* usage_extra_usage.json */; };
+		D10000010000000000000001 /* AuthManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000010000000000000001 /* AuthManagerTests.swift */; };
+		D10000020000000000000002 /* OrganizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000020000000000000002 /* OrganizationTests.swift */; };
+		D10000030000000000000003 /* orgs_single.json in Resources */ = {isa = PBXBuildFile; fileRef = D20000030000000000000003 /* orgs_single.json */; };
+		D10000040000000000000004 /* orgs_multiple.json in Resources */ = {isa = PBXBuildFile; fileRef = D20000040000000000000004 /* orgs_multiple.json */; };
+		D10000050000000000000005 /* orgs_empty.json in Resources */ = {isa = PBXBuildFile; fileRef = D20000050000000000000005 /* orgs_empty.json */; };
+		D9349C6F15CD2C504DCC2896 /* github_release.json in Resources */ = {isa = PBXBuildFile; fileRef = 1232516F2B36B5410E84AEF4 /* github_release.json */; };
+		E60B83499A3692A0D57124E8 /* HTTPDataFetching.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40FA3E7941EBB6529BB0D867 /* HTTPDataFetching.swift */; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		DB3233E6EEA81A2B6C751314 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A80000010000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A50000010000000000000001;
+			remoteInfo = ClaudeBattery;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		06A9D8FEA3510DE3A69EEA9F /* UpdateCheckerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = UpdateCheckerTests.swift; sourceTree = "<group>"; };
+		1188B7AAC9F9C765EEF70301 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
+		1232516F2B36B5410E84AEF4 /* github_release.json */ = {isa = PBXFileReference; includeInIndex = 1; path = github_release.json; sourceTree = "<group>"; };
+		40FA3E7941EBB6529BB0D867 /* HTTPDataFetching.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HTTPDataFetching.swift; sourceTree = "<group>"; };
+		55346AC851D0669ADFB2113D /* IconStyleTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = IconStyleTests.swift; sourceTree = "<group>"; };
+		882ED57CBE7110FF7B5A110A /* ClaudeAPITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ClaudeAPITests.swift; sourceTree = "<group>"; };
+		9122EF168B95FED765D28F78 /* ClaudeBatteryTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ClaudeBatteryTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2000000000000000000000A /* ClaudeBattery.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ClaudeBattery.entitlements; sourceTree = "<group>"; };
 		A2000000000000000000000B /* ClaudeBattery.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClaudeBattery.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2000000000000000000000C /* ClaudeAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeAPI.swift; sourceTree = "<group>"; };
+		A2000000000000000000000D /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
 		A20000010000000000000001 /* ClaudeBatteryApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeBatteryApp.swift; sourceTree = "<group>"; };
 		A20000020000000000000002 /* StorageService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorageService.swift; sourceTree = "<group>"; };
 		A20000030000000000000003 /* AuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthManager.swift; sourceTree = "<group>"; };
@@ -40,8 +77,6 @@
 		A20000080000000000000008 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A20000090000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A20000090000000000000010 /* AccountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccountStore.swift; sourceTree = "<group>"; };
-		A2000000000000000000000C /* ClaudeAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeAPI.swift; sourceTree = "<group>"; };
-		A2000000000000000000000D /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
 		B20000010000000000000001 /* IconStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IconStyle.swift; sourceTree = "<group>"; };
 		B20000020000000000000002 /* IconRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IconRenderer.swift; sourceTree = "<group>"; };
 		B20000030000000000000003 /* DualHorizontalRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DualHorizontalRenderer.swift; sourceTree = "<group>"; };
@@ -49,6 +84,18 @@
 		B20000050000000000000005 /* DualArcGaugeRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DualArcGaugeRenderer.swift; sourceTree = "<group>"; };
 		B20000060000000000000006 /* TextOnlyRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextOnlyRenderer.swift; sourceTree = "<group>"; };
 		B20000070000000000000007 /* StackedBarsRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StackedBarsRenderer.swift; sourceTree = "<group>"; };
+		C20000010000000000000001 /* StorageServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = StorageServiceTests.swift; path = StorageServiceTests.swift; sourceTree = "<group>"; };
+		C20000020000000000000002 /* AccountStoreTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AccountStoreTests.swift; path = AccountStoreTests.swift; sourceTree = "<group>"; };
+		C20000030000000000000003 /* UsageServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = UsageServiceTests.swift; path = UsageServiceTests.swift; sourceTree = "<group>"; };
+		C20000040000000000000004 /* MockHTTPSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MockHTTPSession.swift; path = Helpers/MockHTTPSession.swift; sourceTree = "<group>"; };
+		C20000050000000000000005 /* usage_full.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = usage_full.json; path = Fixtures/usage_full.json; sourceTree = "<group>"; };
+		C20000060000000000000006 /* usage_nil_fields.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = usage_nil_fields.json; path = Fixtures/usage_nil_fields.json; sourceTree = "<group>"; };
+		C20000070000000000000007 /* usage_extra_usage.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = usage_extra_usage.json; path = Fixtures/usage_extra_usage.json; sourceTree = "<group>"; };
+		D20000010000000000000001 /* AuthManagerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AuthManagerTests.swift; path = AuthManagerTests.swift; sourceTree = "<group>"; };
+		D20000020000000000000002 /* OrganizationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = OrganizationTests.swift; path = OrganizationTests.swift; sourceTree = "<group>"; };
+		D20000030000000000000003 /* orgs_single.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = orgs_single.json; path = Fixtures/orgs_single.json; sourceTree = "<group>"; };
+		D20000040000000000000004 /* orgs_multiple.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = orgs_multiple.json; path = Fixtures/orgs_multiple.json; sourceTree = "<group>"; };
+		D20000050000000000000005 /* orgs_empty.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = orgs_empty.json; path = Fixtures/orgs_empty.json; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -59,14 +106,64 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C9D194409AA64A3A99FE8C09 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				09C1A92B095161678D2A3778 /* Cocoa.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		25063B05958C2C313EF4539C /* OS X */ = {
+			isa = PBXGroup;
+			children = (
+				1188B7AAC9F9C765EEF70301 /* Cocoa.framework */,
+			);
+			name = "OS X";
+			sourceTree = "<group>";
+		};
+		2D74A40D83CBBEDA6C45DC8F /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				25063B05958C2C313EF4539C /* OS X */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		7C62D77671ACD7827B66F6A3 /* ClaudeBatteryTests */ = {
+			isa = PBXGroup;
+			children = (
+				C20000010000000000000001 /* StorageServiceTests.swift */,
+				C20000020000000000000002 /* AccountStoreTests.swift */,
+				C20000030000000000000003 /* UsageServiceTests.swift */,
+				C20000040000000000000004 /* MockHTTPSession.swift */,
+				C20000050000000000000005 /* usage_full.json */,
+				C20000060000000000000006 /* usage_nil_fields.json */,
+				C20000070000000000000007 /* usage_extra_usage.json */,
+				D20000010000000000000001 /* AuthManagerTests.swift */,
+				D20000020000000000000002 /* OrganizationTests.swift */,
+				D20000030000000000000003 /* orgs_single.json */,
+				D20000040000000000000004 /* orgs_multiple.json */,
+				D20000050000000000000005 /* orgs_empty.json */,
+				C47FA80A990791E4034FD1BC /* Fixtures */,
+				882ED57CBE7110FF7B5A110A /* ClaudeAPITests.swift */,
+				06A9D8FEA3510DE3A69EEA9F /* UpdateCheckerTests.swift */,
+				55346AC851D0669ADFB2113D /* IconStyleTests.swift */,
+			);
+			name = ClaudeBatteryTests;
+			path = ClaudeBatteryTests;
+			sourceTree = "<group>";
+		};
 		A40000010000000000000001 = {
 			isa = PBXGroup;
 			children = (
 				A40000020000000000000002 /* ClaudeBattery */,
 				A40000060000000000000006 /* Products */,
+				2D74A40D83CBBEDA6C45DC8F /* Frameworks */,
+				7C62D77671ACD7827B66F6A3 /* ClaudeBatteryTests */,
 			);
 			sourceTree = "<group>";
 		};
@@ -99,6 +196,7 @@
 				A20000090000000000000010 /* AccountStore.swift */,
 				A2000000000000000000000C /* ClaudeAPI.swift */,
 				A2000000000000000000000D /* UpdateChecker.swift */,
+				40FA3E7941EBB6529BB0D867 /* HTTPDataFetching.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -118,6 +216,7 @@
 			isa = PBXGroup;
 			children = (
 				A2000000000000000000000B /* ClaudeBattery.app */,
+				9122EF168B95FED765D28F78 /* ClaudeBatteryTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -153,9 +252,36 @@
 			path = IconRendering;
 			sourceTree = "<group>";
 		};
+		C47FA80A990791E4034FD1BC /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				1232516F2B36B5410E84AEF4 /* github_release.json */,
+			);
+			name = Fixtures;
+			path = Fixtures;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		0EFBC817EC5BA68402D7EB6B /* ClaudeBatteryTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EC4B9E222C00870F4780A378 /* Build configuration list for PBXNativeTarget "ClaudeBatteryTests" */;
+			buildPhases = (
+				F554355C76DD2168063F8A21 /* Sources */,
+				C9D194409AA64A3A99FE8C09 /* Frameworks */,
+				185A5F1F4DF0DB18C0D63D76 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3901F6BD976B998DBE21204C /* PBXTargetDependency */,
+			);
+			name = ClaudeBatteryTests;
+			productName = ClaudeBatteryTests;
+			productReference = 9122EF168B95FED765D28F78 /* ClaudeBatteryTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		A50000010000000000000001 /* ClaudeBattery */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = A70000010000000000000001 /* Build configuration list for PBXNativeTarget "ClaudeBattery" */;
@@ -202,11 +328,26 @@
 			projectRoot = "";
 			targets = (
 				A50000010000000000000001 /* ClaudeBattery */,
+				0EFBC817EC5BA68402D7EB6B /* ClaudeBatteryTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		185A5F1F4DF0DB18C0D63D76 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C10000050000000000000005 /* usage_full.json in Resources */,
+				C10000060000000000000006 /* usage_nil_fields.json in Resources */,
+				C10000070000000000000007 /* usage_extra_usage.json in Resources */,
+				D10000030000000000000003 /* orgs_single.json in Resources */,
+				D10000040000000000000004 /* orgs_multiple.json in Resources */,
+				D10000050000000000000005 /* orgs_empty.json in Resources */,
+				D9349C6F15CD2C504DCC2896 /* github_release.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		A60000020000000000000002 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -239,12 +380,74 @@
 				B10000050000000000000005 /* DualArcGaugeRenderer.swift in Sources */,
 				B10000060000000000000006 /* TextOnlyRenderer.swift in Sources */,
 				B10000070000000000000007 /* StackedBarsRenderer.swift in Sources */,
+				E60B83499A3692A0D57124E8 /* HTTPDataFetching.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F554355C76DD2168063F8A21 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C10000010000000000000001 /* StorageServiceTests.swift in Sources */,
+				C10000020000000000000002 /* AccountStoreTests.swift in Sources */,
+				C10000030000000000000003 /* UsageServiceTests.swift in Sources */,
+				C10000040000000000000004 /* MockHTTPSession.swift in Sources */,
+				D10000010000000000000001 /* AuthManagerTests.swift in Sources */,
+				D10000020000000000000002 /* OrganizationTests.swift in Sources */,
+				6BD92493B6E2F2C928493ED9 /* ClaudeAPITests.swift in Sources */,
+				522F8A60215EA3D91D88C782 /* UpdateCheckerTests.swift in Sources */,
+				B8B7E94DFB5BF777D586E1F6 /* IconStyleTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		3901F6BD976B998DBE21204C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			name = ClaudeBattery;
+			target = A50000010000000000000001 /* ClaudeBattery */;
+			targetProxy = DB3233E6EEA81A2B6C751314 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		460B6C3D88FB72DEDAFB6038 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = PJHS9XQS6H;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "";
+				MACOSX_DEPLOYMENT_TARGET = 13.5;
+				PRODUCT_BUNDLE_IDENTIFIER = com.reebz.claudebattery.tests;
+				PRODUCT_MODULE_NAME = ClaudeBatteryTests;
+				PRODUCT_NAME = ClaudeBatteryTests;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ClaudeBattery.app/Contents/MacOS/ClaudeBattery";
+			};
+			name = Release;
+		};
+		83165F23BCFBBEAF6E076FD5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = PJHS9XQS6H;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "";
+				MACOSX_DEPLOYMENT_TARGET = 13.5;
+				PRODUCT_BUNDLE_IDENTIFIER = com.reebz.claudebattery.tests;
+				PRODUCT_MODULE_NAME = ClaudeBatteryTests;
+				PRODUCT_NAME = ClaudeBatteryTests;
+				SDKROOT = macosx;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ClaudeBattery.app/Contents/MacOS/ClaudeBattery";
+			};
+			name = Debug;
+		};
 		A90000010000000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -460,6 +663,15 @@
 			buildConfigurations = (
 				A90000010000000000000001 /* Debug */,
 				A90000020000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		EC4B9E222C00870F4780A378 /* Build configuration list for PBXNativeTarget "ClaudeBatteryTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				460B6C3D88FB72DEDAFB6038 /* Release */,
+				83165F23BCFBBEAF6E076FD5 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
