@@ -18,8 +18,16 @@ PROJECT_DIR="$SCRIPT_DIR/../ClaudeBattery"
 BUILD_DIR="/tmp/ClaudeBattery-build"
 APP_NAME="ClaudeBattery"
 SCHEME="ClaudeBattery"
-KEYCHAIN_PROFILE="ClaudeBattery"
-SIGNING_IDENTITY="Developer ID Application: [REDACTED]"
+
+# Load signing config from gitignored local file
+if [ -f "$SCRIPT_DIR/release.local" ]; then
+  # shellcheck source=release.local
+  source "$SCRIPT_DIR/release.local"
+else
+  echo "ERROR: scripts/release.local not found."
+  echo "Copy scripts/release.local.example to scripts/release.local and fill in your signing details."
+  exit 1
+fi
 
 # Read version from project
 VERSION=$(grep -m1 'MARKETING_VERSION' "$PROJECT_DIR/$APP_NAME.xcodeproj/project.pbxproj" | sed 's/.*= //;s/;//')
@@ -49,7 +57,7 @@ cat > "$BUILD_DIR/ExportOptions.plist" <<PLIST
     <key>method</key>
     <string>developer-id</string>
     <key>teamID</key>
-    <string>PJHS9XQS6H</string>
+    <string>${TEAM_ID}</string>
     <key>signingStyle</key>
     <string>manual</string>
     <key>signingCertificate</key>
