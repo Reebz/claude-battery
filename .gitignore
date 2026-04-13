@@ -39,4 +39,5 @@ todos/
 .worktrees
 .claude/
 .serena/
+CLAUDE.md
 scripts/release.local
