@@ -39,3 +39,4 @@ todos/
 .worktrees
 .claude/
 .serena/
+scripts/release.local

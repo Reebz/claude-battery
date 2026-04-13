@@ -1,0 +1,6 @@
+# Copy this file to release.local and fill in your signing details.
+# release.local is gitignored and will not be committed.
+
+SIGNING_IDENTITY="Developer ID Application: Your Name (YOUR_TEAM_ID)"
+TEAM_ID="YOUR_TEAM_ID"
+KEYCHAIN_PROFILE="ClaudeBattery"
