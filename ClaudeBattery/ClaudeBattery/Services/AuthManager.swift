@@ -16,9 +16,7 @@ class AuthManager: NSObject, ObservableObject {
     @Published var loginState: LoginState = .idle
 
     private let storage: StorageService
-    // internal for @testable access in AuthManagerTests
-    let accountStore: AccountStore
-    private let session: any HTTPDataFetching
+    private let accountStore: AccountStore
     private var loginWebView: WKWebView?
     private var loginWindowController: NSWindowController?
     private var loginTimeoutTask: Task<Void, Never>?
@@ -26,13 +24,14 @@ class AuthManager: NSObject, ObservableObject {
     private var cookiePollTimer: Timer?
     private var urlObservation: NSKeyValueObservation?
     private var hasCapturedSession = false
-    // internal for @testable access in AuthManagerTests
-    var pendingSessionKey: String?
+    private var pendingSessionKey: String?
+    private var pendingExpiration: Date?
+    private var pendingCookieHeader: String?
+    private var popupWebView: WKWebView?
 
-    init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
+    init(storage: StorageService, accountStore: AccountStore) {
         self.storage = storage
         self.accountStore = accountStore
-        self.session = session
         super.init()
     }
 
@@ -51,10 +50,11 @@ class AuthManager: NSObject, ObservableObject {
 
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
+        config.applicationNameForUserAgent = ClaudeAPI.safariUserAgentSuffix
 
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 640), configuration: config)
-        webView.customUserAgent = ClaudeAPI.safariUserAgent
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         self.loginWebView = webView
 
         config.websiteDataStore.httpCookieStore.add(self)
@@ -138,6 +138,8 @@ class AuthManager: NSObject, ObservableObject {
                     logger.info("Session cookie captured via JavaScript fallback")
                     self.hasCapturedSession = true
                     self.pendingSessionKey = value
+                    self.pendingExpiration = nil  // JS cookies don't expose expiration
+                    self.pendingCookieHeader = cookieString  // Full JS cookie string includes all visible cookies
                     self.loginState = .signingIn
                     self.cookiePollTimer?.invalidate()
                     self.cookiePollTimer = nil
@@ -156,6 +158,8 @@ class AuthManager: NSObject, ObservableObject {
         cookiePollTimer = nil
         urlObservation?.invalidate()
         urlObservation = nil
+        popupWebView?.removeFromSuperview()
+        popupWebView = nil
         loginWebView?.stopLoading()
         loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
         loginWebView = nil
@@ -163,45 +167,56 @@ class AuthManager: NSObject, ObservableObject {
         loginWindowController = nil
     }
 
-    // internal for @testable access in AuthManagerTests
-    static func isSessionCookie(_ cookie: HTTPCookie) -> Bool {
+    private static func isSessionCookie(_ cookie: HTTPCookie) -> Bool {
         cookie.name == "sessionKey" &&
-        (cookie.domain == "claude.ai" || cookie.domain == ".claude.ai")
+        (cookie.domain == "claude.ai" || cookie.domain == ".claude.ai" || cookie.domain.hasSuffix(".claude.ai"))
     }
 
-    // internal for @testable access in AuthManagerTests
-    func handleCookieCaptured(_ cookie: HTTPCookie) {
+    private func handleCookieCaptured(_ cookie: HTTPCookie) {
         guard !hasCapturedSession else { return }
 
         guard Self.isSessionCookie(cookie),
               cookie.isSecure,
               cookie.path == "/" else {
-            logger.debug("Cookie rejected — name=\(cookie.name) domain=\(cookie.domain)")
+            logger.debug("Cookie rejected — name=\(cookie.name) domain=\(cookie.domain) path=\(cookie.path)")
             return
         }
 
         hasCapturedSession = true
         pendingSessionKey = cookie.value
+        pendingExpiration = cookie.expiresDate
         loginState = .signingIn
         cookiePollTimer?.invalidate()
         cookiePollTimer = nil
 
         logger.info("Session cookie captured via cookie store")
 
-        orgDiscoveryTask = Task { await fetchOrganizationId() }
+        // Capture ALL cookies from the WebView to include in API requests
+        // (Cloudflare, CSRF tokens, etc. may be required alongside sessionKey)
+        Task {
+            guard let webView = loginWebView else {
+                orgDiscoveryTask = Task { await fetchOrganizationId() }
+                return
+            }
+            let allCookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
+            let claudeCookies = allCookies.filter { $0.domain == "claude.ai" || $0.domain == ".claude.ai" || $0.domain.hasSuffix(".claude.ai") }
+            let header = claudeCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+            pendingCookieHeader = header.isEmpty ? nil : header
+            logger.info("Captured \(claudeCookies.count) cookies for API requests")
+            orgDiscoveryTask = Task { await fetchOrganizationId() }
+        }
     }
 
     // MARK: - Org Discovery
 
-    // internal for @testable access in AuthManagerTests
-    func fetchOrganizationId() async {
+    private func fetchOrganizationId() async {
         guard let sessionKey = pendingSessionKey else {
             loginState = .idle
             stopLoginWindow()
             return
         }
 
-        guard let request = ClaudeAPI.makeRequest(path: "/api/organizations", sessionKey: sessionKey) else {
+        guard let request = ClaudeAPI.makeRequest(path: "/api/organizations", sessionKey: sessionKey, cookieHeader: pendingCookieHeader) else {
             logger.error("Failed to construct organizations API URL")
             handleOrgDiscoveryFailure("Connection error. Please try again.")
             showLoginAlert("Connection Error", "Could not complete sign-in. Please close this window and try again.")
@@ -209,7 +224,7 @@ class AuthManager: NSObject, ObservableObject {
         }
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await ClaudeAPI.session.data(for: request)
 
             guard !Task.isCancelled else { return }
 
@@ -248,53 +263,77 @@ class AuthManager: NSObject, ObservableObject {
                 return
             }
 
-            // Determine which org to use
-            let chosenOrg: Organization
-            if orgs.count == 1 {
-                chosenOrg = orgs[0]
-            } else if let existingAccount = accountStore.accounts.first(where: { acct in orgs.contains(where: { $0.uuid == acct.organizationId }) }),
-                      let match = orgs.first(where: { $0.uuid == existingAccount.organizationId }) {
-                // Re-auth: auto-select if any existing account's org is in the list
-                chosenOrg = match
-                logger.info("Re-auth auto-selected org for account \(existingAccount.displayName): \(match.displayName)")
-            } else {
-                // Multiple orgs, no auto-select match — show picker
-                guard let picked = await showOrgPicker(orgs: orgs) else {
-                    // User cancelled the picker
-                    handleOrgDiscoveryFailure("Sign-in cancelled.")
-                    return
+            logger.info("Found \(orgs.count) organization(s): \(orgs.map(\.uuid).joined(separator: ", "))")
+
+            // Probe each org's usage endpoint to find one that grants access.
+            // The first org isn't always the one with a Pro/Max subscription.
+            let cookieHeader = pendingCookieHeader
+            var validOrgUUID: String?
+            for org in orgs {
+                guard !Task.isCancelled else { return }
+                if let probe = ClaudeAPI.makeRequest(path: "/api/organizations/\(org.uuid)/usage", sessionKey: sessionKey, cookieHeader: cookieHeader) {
+                    do {
+                        let (_, probeResp) = try await ClaudeAPI.session.data(for: probe)
+                        if let httpProbe = probeResp as? HTTPURLResponse {
+                            logger.info("Usage probe for org \(org.uuid): HTTP \(httpProbe.statusCode)")
+                            if (200...299).contains(httpProbe.statusCode) {
+                                validOrgUUID = org.uuid
+                                break
+                            }
+                        }
+                    } catch {
+                        logger.warning("Usage probe failed for org \(org.uuid): \(error.localizedDescription)")
+                    }
                 }
-                chosenOrg = picked
             }
 
-            guard !Task.isCancelled else { return }
+            guard let orgUUID = validOrgUUID else {
+                logger.warning("No organization with usage access found")
+                handleOrgDiscoveryFailure("No organization with usage access.")
+                showLoginAlert("No Usage Access", "None of the \(orgs.count) organization(s) on this account have usage data access. A Pro or Max subscription may be required.")
+                return
+            }
 
             // Try to extract email from org response
-            let email = extractEmail(from: orgs, rawData: data) ?? "Account \(accountStore.accounts.count + 1)"
+            let email = extractEmail(from: data) ?? "Account \(accountStore.accounts.count + 1)"
 
             let account = Account(
                 email: email,
                 sessionKey: sessionKey,
-                organizationId: chosenOrg.uuid
+                organizationId: orgUUID,
+                sessionKeyExpiration: pendingExpiration,
+                allCookieHeader: cookieHeader
             )
 
             if accountStore.addAccount(account) {
                 accountStore.switchTo(account.id)
                 logger.info("Account added and activated: \(account.displayName)")
-            } else if let existing = accountStore.accounts.first(where: { $0.organizationId == chosenOrg.uuid }) {
+            } else if let existing = accountStore.accounts.first(where: { $0.organizationId == orgUUID }) {
                 // Re-authentication: update session key on existing account
-                accountStore.updateSessionKey(existing.id, sessionKey)
+                accountStore.updateSessionKey(existing.id, sessionKey, expiration: pendingExpiration, cookieHeader: cookieHeader)
                 accountStore.switchTo(existing.id)
                 logger.info("Re-authenticated existing account: \(existing.displayName)")
             } else {
-                logger.warning("Failed to add account (limit reached)")
-                handleOrgDiscoveryFailure("Account limit reached.")
-                showLoginAlert("Account Limit", "You can have up to \(AccountStore.maxAccounts) accounts. Remove one in Settings before adding another.")
-                return
+                // Org ID changed — remove the stale account and add fresh
+                if let stale = accountStore.accounts.first(where: { $0.email == email || $0.email.hasPrefix("Account ") }) {
+                    accountStore.removeAccount(stale.id)
+                    logger.info("Removed stale account: \(stale.displayName)")
+                }
+                if accountStore.addAccount(account) {
+                    accountStore.switchTo(account.id)
+                    logger.info("Account added (replaced stale): \(account.displayName)")
+                } else {
+                    logger.warning("Failed to add account (limit reached)")
+                    handleOrgDiscoveryFailure("Account limit reached.")
+                    showLoginAlert("Account Limit", "You can have up to \(AccountStore.maxAccounts) accounts. Remove one in Settings before adding another.")
+                    return
+                }
             }
 
             // Success — clean up and close window
             pendingSessionKey = nil
+            pendingExpiration = nil
+            pendingCookieHeader = nil
             loginState = .idle
             stopLoginWindow()
         } catch {
@@ -307,6 +346,8 @@ class AuthManager: NSObject, ObservableObject {
 
     private func handleOrgDiscoveryFailure(_ message: String) {
         pendingSessionKey = nil
+        pendingExpiration = nil
+        pendingCookieHeader = nil
         hasCapturedSession = false
         loginState = .error(message)
     }
@@ -321,59 +362,18 @@ class AuthManager: NSObject, ObservableObject {
         alert.beginSheetModal(for: window)
     }
 
-    private func showOrgPicker(orgs: [Organization]) async -> Organization? {
-        guard let window = loginWindowController?.window else { return nil }
-
-        return await withCheckedContinuation { continuation in
-            let alert = NSAlert()
-            alert.messageText = "Choose Organization"
-            alert.informativeText = "Multiple organizations found. Select which one to monitor."
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: "Select")
-            alert.addButton(withTitle: "Cancel")
-
-            let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 300, height: 28), pullsDown: false)
-            for (index, org) in orgs.enumerated() {
-                var title = org.displayName == "Organization" ? "Organization \(index + 1)" : org.displayName
-                // Disambiguate if another org has the same display name
-                let duplicateCount = orgs.prefix(index).filter { $0.displayName == org.displayName && org.displayName != "Organization" }.count
-                if duplicateCount > 0 {
-                    title = "\(title) (\(duplicateCount + 1))"
-                }
-                popup.addItem(withTitle: title)
-            }
-            alert.accessoryView = popup
-
-            alert.beginSheetModal(for: window) { response in
-                if response == .alertFirstButtonReturn {
-                    let selectedIndex = popup.indexOfSelectedItem
-                    guard selectedIndex >= 0, selectedIndex < orgs.count else {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-                    continuation.resume(returning: orgs[selectedIndex])
-                } else {
-                    continuation.resume(returning: nil)
-                }
-            }
-        }
-    }
-
-    private func extractEmail(from orgs: [Organization], rawData: Data) -> String? {
-        // Prefer the enriched model's emailAddress field
-        for org in orgs {
-            if let email = org.emailAddress, !email.isEmpty {
-                return email
-            }
-        }
-        // Fallback: search raw JSON for additional email keys not in the model
-        guard let json = try? JSONSerialization.jsonObject(with: rawData) as? [[String: Any]],
+    private func extractEmail(from data: Data) -> String? {
+        // Try to extract email from the organizations response, checking multiple possible keys
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
               let first = json.first else { return nil }
-        for key in ["email", "billing_email", "primary_email"] {
+
+        let emailKeys = ["email_address", "email", "billing_email", "primary_email"]
+        for key in emailKeys {
             if let email = first[key] as? String, !email.isEmpty {
                 return email
             }
         }
+        // Try nested billing object
         if let billing = first["billing"] as? [String: Any],
            let email = billing["email"] as? String, !email.isEmpty {
             return email
@@ -387,6 +387,7 @@ class AuthManager: NSObject, ObservableObject {
         accountStore.removeAccount(accountId)
         hasCapturedSession = false
         loginState = .idle
+        ClaudeAPI.clearCookies()
         WKWebsiteDataStore.default().removeData(
             ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
             modifiedSince: .distantPast
@@ -399,6 +400,7 @@ class AuthManager: NSObject, ObservableObject {
         for id in ids { accountStore.removeAccount(id) }
         hasCapturedSession = false
         loginState = .idle
+        ClaudeAPI.clearCookies()
         WKWebsiteDataStore.default().removeData(
             ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
             modifiedSince: .distantPast
@@ -422,6 +424,13 @@ class AuthManager: NSObject, ObservableObject {
         host.hasSuffix(".anthropic.com") ||
         host == "accounts.google.com" ||
         host.hasSuffix(".accounts.google.com") ||
+        host == "google.com" ||
+        host.hasSuffix(".google.com") ||
+        host.hasSuffix(".gstatic.com") ||
+        host.hasSuffix(".googleapis.com") ||
+        host.hasSuffix(".googleusercontent.com") ||
+        host == "youtube.com" ||
+        host.hasSuffix(".youtube.com") ||
         host == "appleid.apple.com" ||
         host.hasSuffix(".appleid.apple.com") ||
         host.hasSuffix(".icloud.com") ||
@@ -434,7 +443,18 @@ class AuthManager: NSObject, ObservableObject {
 
 extension AuthManager: WKNavigationDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard let url = navigationAction.request.url, let host = url.host else {
+        guard let url = navigationAction.request.url else {
+            decisionHandler(.cancel)
+            return
+        }
+
+        // Allow about:blank and about:srcdoc — used by OAuth flows and iframes
+        if url.scheme == "about" {
+            decisionHandler(.allow)
+            return
+        }
+
+        guard let host = url.host else {
             decisionHandler(.cancel)
             return
         }
@@ -467,8 +487,69 @@ extension AuthManager: WKNavigationDelegate {
             self.loginState = .idle
             self.hasCapturedSession = false
             self.pendingSessionKey = nil
+            self.pendingExpiration = nil
             self.stopLoginWindow()
         }
+    }
+}
+
+// MARK: - WKUIDelegate
+
+extension AuthManager: WKUIDelegate {
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        // Create a real child webview for popups (e.g. Google OAuth).
+        // Using the provided `configuration` preserves `window.opener` so the OAuth
+        // callback can postMessage back to the parent claude.ai page.
+        guard let url = navigationAction.request.url else { return nil }
+
+        if let host = url.host, !isAllowedDomain(host), url.scheme != "about" {
+            logger.info("Blocked popup to disallowed domain: \(host)")
+            return nil
+        }
+
+        let popup = WKWebView(frame: webView.bounds, configuration: configuration)
+        popup.navigationDelegate = self
+        popup.uiDelegate = self
+        popup.autoresizingMask = [.width, .height]
+
+        // Add popup on top of the parent webview so user can interact with it
+        webView.addSubview(popup)
+        self.popupWebView = popup
+
+        logger.debug("Created popup webview for: \(url.host ?? url.absoluteString)")
+        return popup
+    }
+
+    func webViewDidClose(_ webView: WKWebView) {
+        // Called when popup's JavaScript executes window.close() after OAuth callback
+        if webView == popupWebView {
+            logger.debug("Popup webview closed by page")
+            popupWebView?.removeFromSuperview()
+            popupWebView = nil
+        }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        guard let window = loginWindowController?.window else {
+            completionHandler()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window) { _ in completionHandler() }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        guard let window = loginWindowController?.window else {
+            completionHandler(false)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { response in completionHandler(response == .alertFirstButtonReturn) }
     }
 }
 
@@ -498,6 +579,8 @@ extension AuthManager: NSWindowDelegate {
         if loginState == .signingIn {
             hasCapturedSession = false
             pendingSessionKey = nil
+            pendingExpiration = nil
+            pendingCookieHeader = nil
         }
         loginState = .idle
 
@@ -507,6 +590,8 @@ extension AuthManager: NSWindowDelegate {
         cookiePollTimer = nil
         urlObservation?.invalidate()
         urlObservation = nil
+        popupWebView?.removeFromSuperview()
+        popupWebView = nil
         loginWebView?.stopLoading()
         loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
         loginWebView = nil
@@ -518,25 +603,4 @@ extension AuthManager: NSWindowDelegate {
 
 struct Organization: Codable {
     let uuid: String
-    let name: String?
-    let billingType: String?
-    let emailAddress: String?
-
-    var displayName: String {
-        if let name, !name.isEmpty {
-            let sanitized = name.filter { !$0.isNewline && $0 != "\u{200F}" && $0 != "\u{200E}" }
-            return String(sanitized.prefix(100))
-        }
-        if let billingType, !billingType.isEmpty {
-            return billingType.capitalized
-        }
-        return "Organization"
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case uuid
-        case name
-        case billingType = "billing_type"
-        case emailAddress = "email_address"
-    }
 }

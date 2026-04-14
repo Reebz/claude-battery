@@ -169,12 +169,6 @@ struct UsagePopoverView: View {
         return .green
     }
 
-    private func spendColor(for percent: Double) -> Color {
-        if percent >= 80 { return .red }
-        if percent >= 50 { return .orange }
-        return .cyan
-    }
-
     private static let currencyFormatter: NumberFormatter = {
         let formatter = NumberFormatter()
         formatter.numberStyle = .currency
@@ -196,10 +190,10 @@ struct UsagePopoverView: View {
                     .foregroundColor(Color(white: 0.6))
                 Spacer()
                 HStack(spacing: 0) {
-                    Text(formatCurrency(extraUsage.spent))
+                    Text(formatCurrency(extraUsage.balance))
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundColor(.white)
-                    Text(" / \(formatCurrency(extraUsage.limit))")
+                    Text(" balance")
                         .font(.system(size: 10, weight: .regular))
                         .foregroundColor(Color(white: 0.45))
                 }
@@ -209,7 +203,7 @@ struct UsagePopoverView: View {
                     RoundedRectangle(cornerRadius: 3)
                         .fill(Color(white: 0.25))
                     RoundedRectangle(cornerRadius: 3)
-                        .fill(spendColor(for: extraUsage.percentage))
+                        .fill(gaugeColor(for: extraUsage.percentage))
                         .frame(width: max(0, geo.size.width * extraUsage.percentage / 100))
                 }
             }

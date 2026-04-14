@@ -29,9 +29,9 @@ struct SettingsView: View {
                     .onAppear {
                         launchAtLogin = SMAppService.mainApp.status == .enabled
                     }
-                    .onChange(of: launchAtLogin) { newValue in
+                    .onChange(of: launchAtLogin) {
                         do {
-                            if newValue {
+                            if launchAtLogin {
                                 try SMAppService.mainApp.register()
                             } else {
                                 try SMAppService.mainApp.unregister()
@@ -44,8 +44,8 @@ struct SettingsView: View {
 
             Section {
                 Toggle("Low usage notifications", isOn: $notificationsEnabled)
-                    .onChange(of: notificationsEnabled) { newValue in
-                        if newValue {
+                    .onChange(of: notificationsEnabled) {
+                        if notificationsEnabled {
                             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
                         }
                     }

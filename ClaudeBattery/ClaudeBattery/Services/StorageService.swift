@@ -14,12 +14,21 @@ struct Account: Codable, Identifiable, Equatable {
     let addedDate: Date
     var notificationThreshold: Double
     var didNotifyBelowThreshold: Bool
+    var sessionKeyExpiration: Date?
+    /// Full cookie header captured from the login WebView (e.g. "sessionKey=abc; __cf_bm=xyz; ...")
+    var allCookieHeader: String?
 
     var displayName: String {
         nickname ?? email
     }
 
-    init(id: UUID = UUID(), email: String, sessionKey: String, organizationId: String, nickname: String? = nil, addedDate: Date = Date(), notificationThreshold: Double = 20.0, didNotifyBelowThreshold: Bool = false) {
+    /// The Cookie header value to use for API requests.
+    /// Prefers the full captured cookie header; falls back to just sessionKey.
+    var cookieHeaderValue: String {
+        allCookieHeader ?? "sessionKey=\(sessionKey)"
+    }
+
+    init(id: UUID = UUID(), email: String, sessionKey: String, organizationId: String, nickname: String? = nil, addedDate: Date = Date(), notificationThreshold: Double = 20.0, didNotifyBelowThreshold: Bool = false, sessionKeyExpiration: Date? = nil, allCookieHeader: String? = nil) {
         self.id = id
         self.email = email
         self.sessionKey = sessionKey
@@ -28,13 +37,15 @@ struct Account: Codable, Identifiable, Equatable {
         self.addedDate = addedDate
         self.notificationThreshold = notificationThreshold
         self.didNotifyBelowThreshold = didNotifyBelowThreshold
+        self.sessionKeyExpiration = sessionKeyExpiration
+        self.allCookieHeader = allCookieHeader
     }
 }
 
 // MARK: - Storage
 
 final class StorageService {
-    private let defaults: UserDefaults
+    private let defaults = UserDefaults.standard
     private let prefix: String
 
     enum Keys {
@@ -45,9 +56,8 @@ final class StorageService {
         static let migrated = "migrated"
     }
 
-    init(defaults: UserDefaults = .standard, prefix: String = "cb_") {
-        self.defaults = defaults
-        self.prefix = prefix
+    init() {
+        self.prefix = "cb_"
         migrateIfNeeded()
     }
 

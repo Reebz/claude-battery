@@ -38,15 +38,13 @@ class UsageService: NSObject, ObservableObject {
 
     private let storage: StorageService
     private let accountStore: AccountStore
-    private let session: any HTTPDataFetching
     private var timer: Timer?
     private var isPolling = false
     private var currentPollTask: Task<Void, Never>?
 
-    init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
+    init(storage: StorageService, accountStore: AccountStore) {
         self.storage = storage
         self.accountStore = accountStore
-        self.session = session
         super.init()
 
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -122,14 +120,22 @@ class UsageService: NSObject, ObservableObject {
             return
         }
 
-        guard let request = ClaudeAPI.makeRequest(path: "/api/organizations/\(account.organizationId)/usage", sessionKey: account.sessionKey) else {
+        if let expiration = account.sessionKeyExpiration, expiration < Date() {
+            consecutiveFailures += 1
+            authFailed = true
+            logger.info("Session cookie expired, triggering re-auth")
+            onAuthFailure?()
+            return
+        }
+
+        guard let request = ClaudeAPI.makeRequest(path: "/api/organizations/\(account.organizationId)/usage", sessionKey: account.sessionKey, cookieHeader: account.cookieHeaderValue) else {
             consecutiveFailures += 1
             logger.error("Failed to construct usage API URL")
             return
         }
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await ClaudeAPI.session.data(for: request)
 
             guard !Task.isCancelled else { return }
 
@@ -149,12 +155,8 @@ class UsageService: NSObject, ObservableObject {
 
             guard (200...299).contains(httpResponse.statusCode) else {
                 consecutiveFailures += 1
-                #if DEBUG
                 let body = String(data: data, encoding: .utf8) ?? "(non-utf8)"
                 logger.warning("Unexpected HTTP status: \(httpResponse.statusCode) body: \(body.prefix(500))")
-                #else
-                logger.warning("Unexpected HTTP status: \(httpResponse.statusCode)")
-                #endif
                 return
             }
 
@@ -170,7 +172,20 @@ class UsageService: NSObject, ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            latestUsage = UsageData(from: usage)
+            // Fetch billing info for prepaid balance
+            var prepaidBalance: Double?
+            let creditsPath = "/api/organizations/\(account.organizationId)/prepaid/credits"
+            if let creditsRequest = ClaudeAPI.makeRequest(path: creditsPath, sessionKey: account.sessionKey, cookieHeader: account.cookieHeaderValue) {
+                if let (creditsData, creditsResponse) = try? await ClaudeAPI.session.data(for: creditsRequest),
+                   let creditsHttp = creditsResponse as? HTTPURLResponse,
+                   (200...299).contains(creditsHttp.statusCode),
+                   let json = try? JSONSerialization.jsonObject(with: creditsData) as? [String: Any],
+                   let amountCents = json["amount"] as? Double {
+                    prepaidBalance = amountCents / 100.0
+                }
+            }
+
+            latestUsage = UsageData(from: usage, prepaidBalance: prepaidBalance)
             lastSuccessfulFetch = Date()
             consecutiveFailures = 0
             authFailed = false
@@ -294,19 +309,19 @@ struct UsageTier: Codable {
 }
 
 struct ExtraUsageData {
-    let spent: Double
-    let limit: Double
+    let balance: Double
+    let monthlyLimit: Double
     let percentage: Double
 
-    init?(from tier: ExtraUsageTier?) {
+    init?(from tier: ExtraUsageTier?, prepaidBalance: Double?) {
         guard let tier, tier.isEnabled == true,
-              let spentCents = tier.usedCredits,
+              let balance = prepaidBalance,
               let limitCents = tier.monthlyLimit,
               limitCents > 0 else { return nil }
 
-        self.spent = spentCents / 100.0
-        self.limit = limitCents / 100.0
-        self.percentage = min(100, max(0, spentCents / limitCents * 100))
+        self.balance = balance
+        self.monthlyLimit = limitCents / 100.0
+        self.percentage = min(100, max(0, balance / self.monthlyLimit * 100))
     }
 }
 
@@ -321,7 +336,7 @@ struct UsageData {
     let sonnetResetDate: Date?
     let extraUsage: ExtraUsageData?
 
-    init(from response: UsageResponse) {
+    init(from response: UsageResponse, prepaidBalance: Double? = nil) {
         weeklyRemaining = max(0, min(100, 100 - (response.sevenDay?.utilization ?? 0)))
         weeklyResetDate = response.sevenDay?.resetsAt
         sessionRemaining = max(0, min(100, 100 - (response.fiveHour?.utilization ?? 0)))
@@ -330,6 +345,6 @@ struct UsageData {
         opusResetDate = response.sevenDayOpus?.resetsAt
         sonnetRemaining = max(0, min(100, 100 - (response.sevenDaySonnet?.utilization ?? 0)))
         sonnetResetDate = response.sevenDaySonnet?.resetsAt
-        extraUsage = ExtraUsageData(from: response.extraUsage)
+        extraUsage = ExtraUsageData(from: response.extraUsage, prepaidBalance: prepaidBalance)
     }
 }
