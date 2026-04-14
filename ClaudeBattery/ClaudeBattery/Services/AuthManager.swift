@@ -82,6 +82,24 @@ class AuthManager: NSObject, ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self, !self.hasCapturedSession else { return }
                 self.checkCookiesFromAllSources(webView)
+
+                // URL-based dashboard detection: if the WebView navigated to a
+                // claude.ai dashboard path, the user likely completed login via SPA.
+                // Trigger an aggressive delayed cookie check to catch the session
+                // cookie that may not yet be in the store.
+                if let url = webView.url,
+                   url.scheme == "https",
+                   url.host == "claude.ai",
+                   let path = url.path.isEmpty ? nil : url.path,
+                   path.hasPrefix("/chat") || path.hasPrefix("/new") || path == "/" {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                        guard let self, !self.hasCapturedSession, let webView = self.loginWebView else { return }
+                        #if DEBUG
+                        logger.debug("Dashboard URL detected (\(path)) — aggressive cookie re-check")
+                        #endif
+                        self.checkCookiesFromAllSources(webView)
+                    }
+                }
             }
         }
 
@@ -89,6 +107,9 @@ class AuthManager: NSObject, ObservableObject {
         cookiePollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.hasCapturedSession, let webView = self.loginWebView else { return }
+                #if DEBUG
+                logger.debug("Cookie poll timer fired — URL: \(webView.url?.absoluteString ?? "nil")")
+                #endif
                 self.checkCookiesFromAllSources(webView)
             }
         }
