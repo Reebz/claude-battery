@@ -149,7 +149,7 @@ final class AuthManagerTests: XCTestCase {
     // MARK: - fetchOrganizationId: Happy Path — multiple orgs uses first
 
     @MainActor
-    func testFetchOrganizationId_multipleOrgsUsesFirst() async {
+    func testFetchOrganizationId_multipleOrgsWithNoWindowFailsGracefully() async {
         let auth = makeAuthManager()
 
         let json = """
@@ -162,10 +162,12 @@ final class AuthManagerTests: XCTestCase {
 
         await auth.fetchOrganizationId()
 
+        // With multiple orgs and no login window (test context), the org picker
+        // returns nil because loginWindowController is nil. This triggers
+        // handleOrgDiscoveryFailure, so no account is created.
         let store = auth.accountStore
-        XCTAssertEqual(store.accounts.count, 1)
-        XCTAssertEqual(store.accounts.first?.organizationId, "org-first-111",
-                       "Should use the first org's UUID")
+        XCTAssertEqual(store.accounts.count, 0,
+                       "No account created when org picker has no window")
     }
 
     // MARK: - fetchOrganizationId: Error Path — 401 sets error state

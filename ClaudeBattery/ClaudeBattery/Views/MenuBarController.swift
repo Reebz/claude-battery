@@ -13,7 +13,8 @@ class MenuBarController: NSObject {
     private let updateChecker: UpdateChecker
     private var settingsWindowController: NSWindowController?
     private var appearanceObservation: NSKeyValueObservation?
-    private var defaultsObserver: NSObjectProtocol?
+    private var iconStyleObservation: NSKeyValueObservation?
+    private var stalenessTimer: Timer?
 
     @AppStorage("iconStyle") private var iconStyleRaw: String = IconStyle.dualHorizontal.rawValue
 
@@ -71,18 +72,24 @@ class MenuBarController: NSObject {
     }
 
     private func setupObservers() {
+        // Combine pipeline with deduplication and throttle to prevent unnecessary icon re-renders.
+        // Without these, every @Published write (even identical values) triggers updateIcon().
         usageService.$latestUsage
             .combineLatest(usageService.$consecutiveFailures, accountStore.$activeAccountId)
+            .throttle(for: .milliseconds(500), scheduler: RunLoop.main, latest: true)
+            .removeDuplicates { prev, next in
+                prev.0 == next.0 && prev.1 == next.1 && prev.2 == next.2
+            }
             .receive(on: RunLoop.main)
             .sink { [weak self] usage, _, activeId in
                 self?.updateIcon(usage, isAuthenticated: activeId != nil)
             }
             .store(in: &cancellables)
 
-        // Re-render when icon style preference changes in Settings
-        defaultsObserver = NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
+        // Targeted KVO on the iconStyle key only — replaces the global
+        // UserDefaults.didChangeNotification which fired for EVERY defaults write
+        // across the entire process (including SwiftUI @AppStorage), causing high CPU.
+        iconStyleObservation = UserDefaults.standard.observe(\.iconStyle, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let currentStyle = UserDefaults.standard.string(forKey: "iconStyle") ?? IconStyle.dualHorizontal.rawValue
@@ -97,6 +104,16 @@ class MenuBarController: NSObject {
             \.effectiveAppearance, options: [.new, .old]
         ) { [weak self] _, change in
             guard change.oldValue?.name != change.newValue?.name else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated)
+            }
+        }
+
+        // 60-second staleness timer — isStale is a time-dependent computed property
+        // not in the Combine pipeline. Without this timer, the icon won't transition
+        // to the faded "stale" state when polling stalls during active use.
+        stalenessTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated)
@@ -213,6 +230,14 @@ class MenuBarController: NSObject {
 
         lastRenderedStyle = iconStyleRaw
         statusItem.button?.image = image
+    }
+}
+
+// MARK: - UserDefaults KVO Support
+
+extension UserDefaults {
+    @objc dynamic var iconStyle: String? {
+        string(forKey: "iconStyle")
     }
 }
 
