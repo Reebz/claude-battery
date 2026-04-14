@@ -55,9 +55,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Set notification delegate early
         UNUserNotificationCenter.current().delegate = usageService
 
-        // Start polling if we have an active account
+        // Start polling if we have an active account, or show sign-in on first launch
         if accountStore.activeAccount != nil {
             usageService.startPolling()
+        } else if accountStore.accounts.isEmpty {
+            // First launch with no accounts — show sign-in window so users aren't
+            // left with an invisible/unauthenticated menu bar icon and no way to start
+            DispatchQueue.main.async { [weak self] in
+                self?.authManager.presentLogin()
+            }
         }
 
         // Observe active account changes to start/stop polling

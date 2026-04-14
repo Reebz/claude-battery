@@ -1,6 +1,9 @@
 import AppKit
 import SwiftUI
 import Combine
+import os
+
+private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app", category: "MenuBar")
 
 @MainActor
 class MenuBarController: NSObject {
@@ -14,6 +17,7 @@ class MenuBarController: NSObject {
     private var settingsWindowController: NSWindowController?
     private var appearanceObservation: NSKeyValueObservation?
     private var defaultsObserver: NSObjectProtocol?
+    private var buttonSetupCompleted = false
 
     @AppStorage("iconStyle") private var iconStyleRaw: String = IconStyle.dualHorizontal.rawValue
 
@@ -50,10 +54,14 @@ class MenuBarController: NSObject {
     // MARK: - Setup
 
     private func setupButton() {
-        guard let button = statusItem.button else { return }
+        guard let button = statusItem.button else {
+            logger.warning("statusItem.button is nil during setupButton — icon will not appear until retry")
+            return
+        }
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         button.action = #selector(handleClick)
         button.target = self
+        buttonSetupCompleted = true
     }
 
     private func setupPopover() {
@@ -194,6 +202,11 @@ class MenuBarController: NSObject {
     // MARK: - Icon Rendering
 
     private func updateIcon(_ usage: UsageData?, isAuthenticated: Bool) {
+        // Retry button setup if it failed during init (timing issue on some macOS versions)
+        if !buttonSetupCompleted {
+            setupButton()
+        }
+
         let style = IconStyle(rawValue: iconStyleRaw) ?? .dualHorizontal
         let renderer = style.renderer
         let color = iconColor
@@ -212,7 +225,12 @@ class MenuBarController: NSObject {
         }
 
         lastRenderedStyle = iconStyleRaw
-        statusItem.button?.image = image
+
+        if let button = statusItem.button {
+            button.image = image
+        } else {
+            logger.error("statusItem.button is nil — icon cannot be displayed")
+        }
     }
 }
 
