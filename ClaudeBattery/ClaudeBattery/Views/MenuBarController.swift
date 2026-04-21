@@ -8,6 +8,11 @@ private let logger = Logger(
     category: "MenuBar"
 )
 
+/// Appearance names the menu-bar icon distinguishes between. Sub-variants
+/// (e.g. `NSAppearanceNameAccessibilityHighContrastDarkAqua`) collapse onto
+/// these via `bestMatch(from:)`.
+private let menuBarAppearanceBuckets: [NSAppearance.Name] = [.darkAqua, .aqua]
+
 @MainActor
 class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
@@ -20,6 +25,7 @@ class MenuBarController: NSObject {
     private var settingsWindowController: NSWindowController?
     private var appearanceObservation: NSKeyValueObservation?
     private var iconStyleObservation: NSKeyValueObservation?
+    private var wakeObserver: NSObjectProtocol?
     private var stalenessTimer: Timer?
     private var counterFlushTimer: Timer?
 
@@ -29,20 +35,21 @@ class MenuBarController: NSObject {
     /// when all inputs that determine the rendered output are unchanged.
     private var lastRenderedSignature: IconSignature?
 
-    // Per-minute diagnostic counters. Incremented inside updateIcon (Unit 3) and
-    // flushed to os_log .notice by counterFlushTimer so affected users in
-    // extended desktop mode can paste Console.app output into issue #11.
+    // Per-minute diagnostic counters. Flushed to os_log .notice by counterFlushTimer
+    // so affected users in extended desktop mode can paste Console.app output into
+    // issue #11. Three counters triangulate which path is driving CPU:
+    //   - appearanceKVODispatched: bestMatch guard passed, Task dispatched.
+    //     Low count + high CPU + high suppressed = loop driver is NOT the appearance
+    //     KVO, so the guard+signature fix is masking the wrong path.
+    //   - updateIconRendered: button.image was actually reassigned.
+    //   - updateIconSuppressedBySignature: signature matched cached value, no render.
+    private var appearanceKVODispatched: Int = 0
     private var updateIconRendered: Int = 0
     private var updateIconSuppressedBySignature: Int = 0
 
     private var isMenuBarDark: Bool {
         guard let button = statusItem.button else { return true }
-        return button.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-    }
-
-    /// The primary icon color: white on dark menu bars, black on light menu bars.
-    private var iconColor: NSColor {
-        isMenuBarDark ? .white : .black
+        return button.effectiveAppearance.bestMatch(from: menuBarAppearanceBuckets) == .darkAqua
     }
 
     init(accountStore: AccountStore, authManager: AuthManager, usageService: UsageService, updateChecker: UpdateChecker) {
@@ -111,21 +118,34 @@ class MenuBarController: NSObject {
             }
         }
 
-        // KVO on the button's effectiveAppearance — fires when wallpaper changes
-        // the menu bar from dark to light (or vice versa), unlike DistributedNotificationCenter.
+        // KVO on the button's effectiveAppearance. The bestMatch dedup runs synchronously
+        // on whatever thread AppKit fires the observation on (bestMatch on an immutable
+        // NSAppearance is thread-safe per Apple docs), so suppressed fires never allocate
+        // a @MainActor Task. Only real dark/light transitions reach the main actor.
+        // See issue #11 — .name comparison leaks AccessibilityHighContrast sub-variants
+        // whose names differ but whose brightness bucket is identical.
         appearanceObservation = statusItem.button?.observe(
             \.effectiveAppearance, options: [.new, .old]
         ) { [weak self] _, change in
+            guard Self.shouldReactToAppearanceChange(old: change.oldValue, new: change.newValue) else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                // Dedupe sub-variant NSAppearance instances that share dark/light brightness.
-                // Extended-desktop mode produces these via per-screen context changes —
-                // .name comparison leaks fires because AccessibilityHighContrast variants
-                // have different names but resolve to the same bestMatch value (see issue #11).
-                let oldDark = change.oldValue?.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                let newDark = change.newValue?.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                // Treat nil oldValue as an implicit change (first fire during init).
-                if change.oldValue != nil, oldDark == newDark { return }
+                self.appearanceKVODispatched += 1
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated)
+            }
+        }
+
+        // Invalidate the render-signature cache on wake. The button may have been
+        // reset during sleep/wake display reconfiguration, so a matching signature
+        // must not suppress the first post-wake render.
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.lastRenderedSignature = nil
                 self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated)
             }
         }
@@ -140,9 +160,9 @@ class MenuBarController: NSObject {
             }
         }
 
-        // Per-minute counter flush. Emits rendered + suppressed counts via os_log .notice
-        // so the values survive in the persistent log store and can be retrieved from
-        // affected users via `log show` or Console.app filtered by subsystem + category.
+        // Per-minute counter flush. Emits counts via os_log .notice so the values
+        // survive in the persistent log store and can be retrieved from affected
+        // users via `log show` or Console.app filtered by subsystem + category.
         counterFlushTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -152,10 +172,22 @@ class MenuBarController: NSObject {
     }
 
     private func flushCounters() {
+        logger.notice("counter=appearanceKVODispatched value=\(self.appearanceKVODispatched)")
         logger.notice("counter=updateIconRendered value=\(self.updateIconRendered)")
         logger.notice("counter=updateIconSuppressedBySignature value=\(self.updateIconSuppressedBySignature)")
+        appearanceKVODispatched = 0
         updateIconRendered = 0
         updateIconSuppressedBySignature = 0
+    }
+
+    deinit {
+        stalenessTimer?.invalidate()
+        counterFlushTimer?.invalidate()
+        appearanceObservation?.invalidate()
+        iconStyleObservation?.invalidate()
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
     }
 
     // MARK: - Click Handling
@@ -248,7 +280,14 @@ class MenuBarController: NSObject {
     // MARK: - Icon Rendering
 
     private func updateIcon(_ usage: UsageData?, isAuthenticated: Bool) {
-        let isMenuBarDark = self.isMenuBarDark
+        // If the button has disappeared, invalidate the cache so a returning button
+        // starts from a clean state rather than inheriting a suppressed signature.
+        guard let button = statusItem.button else {
+            lastRenderedSignature = nil
+            return
+        }
+
+        let isMenuBarDark = button.effectiveAppearance.bestMatch(from: menuBarAppearanceBuckets) == .darkAqua
         let style = IconStyle(rawValue: iconStyleRaw) ?? .dualHorizontal
         let render = Self.renderState(
             isAuthenticated: isAuthenticated,
@@ -264,10 +303,7 @@ class MenuBarController: NSObject {
         }
 
         let color: NSColor = isMenuBarDark ? .white : .black
-        let image = makeImage(for: render, style: style, color: color)
-
-        guard let button = statusItem.button else { return }
-        button.image = image
+        button.image = makeImage(for: render, style: style, color: color)
         lastRenderedSignature = signature
         updateIconRendered += 1
     }
@@ -311,6 +347,10 @@ enum RenderState: Equatable {
     case statusLoading     // "..." at alpha 1.0
 }
 
+/// Full cache key for the rendered menu-bar icon: render branch plus the two
+/// rendering-context inputs (`style`, `isMenuBarDark`) that also determine the
+/// visible output. When two `IconSignature` values compare equal, the produced
+/// NSImage would be byte-identical and a re-render is wasted work.
 struct IconSignature: Equatable {
     let style: IconStyle
     let isMenuBarDark: Bool
@@ -332,6 +372,26 @@ extension MenuBarController {
         if consecutiveFailures >= 10 { return .statusError }
         if consecutiveFailures >= 3 && isStale { return .statusStale }
         return .statusLoading
+    }
+
+    /// Decide whether an `effectiveAppearance` KVO fire represents a real light/dark
+    /// transition worth re-rendering for. Collapses sub-variant `NSAppearance`
+    /// instances (accessibility/high-contrast etc.) onto the two brightness
+    /// buckets the icon cares about, and treats a nil `old` as an implicit change
+    /// (the first fire during init has no prior value to compare against).
+    /// Returns `false` when the fire should be dropped, `true` when the caller
+    /// should proceed to render. Pure — safe to call from any thread, which is
+    /// required because KVO observation closures on AppKit properties are not
+    /// guaranteed to run on the main thread.
+    nonisolated static func shouldReactToAppearanceChange(
+        old: NSAppearance?,
+        new: NSAppearance?
+    ) -> Bool {
+        guard let new else { return false }
+        guard let old else { return true }
+        let oldDark = old.bestMatch(from: menuBarAppearanceBuckets) == .darkAqua
+        let newDark = new.bestMatch(from: menuBarAppearanceBuckets) == .darkAqua
+        return oldDark != newDark
     }
 }
 
