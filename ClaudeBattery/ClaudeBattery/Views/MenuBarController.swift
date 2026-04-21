@@ -1,6 +1,12 @@
 import AppKit
 import SwiftUI
 import Combine
+import os
+
+private let logger = Logger(
+    subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app",
+    category: "MenuBar"
+)
 
 @MainActor
 class MenuBarController: NSObject {
@@ -15,11 +21,18 @@ class MenuBarController: NSObject {
     private var appearanceObservation: NSKeyValueObservation?
     private var iconStyleObservation: NSKeyValueObservation?
     private var stalenessTimer: Timer?
+    private var counterFlushTimer: Timer?
 
     @AppStorage("iconStyle") private var iconStyleRaw: String = IconStyle.dualHorizontal.rawValue
 
     /// Tracks the last rendered style to avoid redundant re-renders.
     private var lastRenderedStyle: String = ""
+
+    // Per-minute diagnostic counters. Incremented inside updateIcon (Unit 3) and
+    // flushed to os_log .notice by counterFlushTimer so affected users in
+    // extended desktop mode can paste Console.app output into issue #11.
+    private var updateIconRendered: Int = 0
+    private var updateIconSuppressedBySignature: Int = 0
 
     private var isMenuBarDark: Bool {
         guard let button = statusItem.button else { return true }
@@ -103,9 +116,16 @@ class MenuBarController: NSObject {
         appearanceObservation = statusItem.button?.observe(
             \.effectiveAppearance, options: [.new, .old]
         ) { [weak self] _, change in
-            guard change.oldValue?.name != change.newValue?.name else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // Dedupe sub-variant NSAppearance instances that share dark/light brightness.
+                // Extended-desktop mode produces these via per-screen context changes —
+                // .name comparison leaks fires because AccessibilityHighContrast variants
+                // have different names but resolve to the same bestMatch value (see issue #11).
+                let oldDark = change.oldValue?.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                let newDark = change.newValue?.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                // Treat nil oldValue as an implicit change (first fire during init).
+                if change.oldValue != nil, oldDark == newDark { return }
                 self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated)
             }
         }
@@ -119,6 +139,23 @@ class MenuBarController: NSObject {
                 self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated)
             }
         }
+
+        // Per-minute counter flush. Emits rendered + suppressed counts via os_log .notice
+        // so the values survive in the persistent log store and can be retrieved from
+        // affected users via `log show` or Console.app filtered by subsystem + category.
+        counterFlushTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.flushCounters()
+            }
+        }
+    }
+
+    private func flushCounters() {
+        logger.notice("counter=updateIconRendered value=\(self.updateIconRendered)")
+        logger.notice("counter=updateIconSuppressedBySignature value=\(self.updateIconSuppressedBySignature)")
+        updateIconRendered = 0
+        updateIconSuppressedBySignature = 0
     }
 
     // MARK: - Click Handling
