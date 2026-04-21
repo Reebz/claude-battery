@@ -5,7 +5,11 @@ Your Claude usage at a glance. A macOS menu bar widget that shows your Claude se
 
 [Download the app](https://github.com/Reebz/claude-battery/releases/download/v1.45/claude-battery_v1.45.dmg) or `brew install reebz/claude-battery/claude-battery`
 
-<img src ="https://iili.io/qdnW1SV.png" width="180" height="80">
+<div class="styles-grid">
+        <div class="style-item">
+          <div class="style-preview">
+            <img src="https://claudebattery.com/images/style-dual-horizontal.png" alt="Dual Horizontal icon style showing two side-by-side battery icons with percentages">
+      </div>
 
 ## Why a battery?
 
@@ -71,8 +75,40 @@ Right-click the menu bar icon for Settings, Notification customization, and to Q
 - Switch between accounts instantly from the popover
 - Custom nicknames per account
 
-<img src="https://iili.io/qdwFrAJ.md.png">
+<img src="https://claudebattery.com/images/popover-screenshot.png">
 
+<div class="styles-grid">
+        <div class="style-item">
+          <div class="style-preview">
+            <img src="https://claudebattery.com/images/style-dual-horizontal.png" alt="Dual Horizontal icon style showing two side-by-side battery icons with percentages">
+          </div>
+          <div class="style-name">Dual Horizontal (default)</div>
+        </div>
+        <div class="style-item">
+          <div class="style-preview">
+            <img src="https://claudebattery.com/images/style-minimal.png" alt="Minimal icon style showing a single compact battery">
+          </div>
+          <div class="style-name">Minimal</div>
+        </div>
+        <div class="style-item">
+          <div class="style-preview">
+            <img src="https://claudebattery.com/images/style-dual-arc-gauge.png" alt="Dual Arc Gauge icon style showing concentric circular arcs">
+          </div>
+          <div class="style-name">Dual Arc Gauge</div>
+        </div>
+        <div class="style-item">
+          <div class="style-preview">
+            <img src="https://claudebattery.com/images/style-text-only.png" alt="Text Only icon style showing percentages as plain text">
+          </div>
+          <div class="style-name">Text Only</div>
+        </div>
+        <div class="style-item">
+          <div class="style-preview">
+            <img src="https://claudebattery.com/images/style-stacked-bars.png" alt="Stacked Bars icon style showing two horizontal progress bars">
+          </div>
+          <div class="style-name">Stacked Bars</div>
+        </div>
+      </div>
 
 ## Credits
 
