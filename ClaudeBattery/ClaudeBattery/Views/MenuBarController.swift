@@ -25,8 +25,9 @@ class MenuBarController: NSObject {
 
     @AppStorage("iconStyle") private var iconStyleRaw: String = IconStyle.dualHorizontal.rawValue
 
-    /// Tracks the last rendered style to avoid redundant re-renders.
-    private var lastRenderedStyle: String = ""
+    /// Signature of the last successful render. Used by updateIcon to short-circuit
+    /// when all inputs that determine the rendered output are unchanged.
+    private var lastRenderedSignature: IconSignature?
 
     // Per-minute diagnostic counters. Incremented inside updateIcon (Unit 3) and
     // flushed to os_log .notice by counterFlushTimer so affected users in
@@ -102,11 +103,10 @@ class MenuBarController: NSObject {
         // Targeted KVO on the iconStyle key only — replaces the global
         // UserDefaults.didChangeNotification which fired for EVERY defaults write
         // across the entire process (including SwiftUI @AppStorage), causing high CPU.
+        // Dedup is handled inside updateIcon by the signature short-circuit.
         iconStyleObservation = UserDefaults.standard.observe(\.iconStyle, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let currentStyle = UserDefaults.standard.string(forKey: "iconStyle") ?? IconStyle.dualHorizontal.rawValue
-                guard currentStyle != self.lastRenderedStyle else { return }
                 self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated)
             }
         }
@@ -248,25 +248,44 @@ class MenuBarController: NSObject {
     // MARK: - Icon Rendering
 
     private func updateIcon(_ usage: UsageData?, isAuthenticated: Bool) {
+        let isMenuBarDark = self.isMenuBarDark
         let style = IconStyle(rawValue: iconStyleRaw) ?? .dualHorizontal
-        let renderer = style.renderer
-        let color = iconColor
-        let image: NSImage
+        let render = Self.renderState(
+            isAuthenticated: isAuthenticated,
+            usage: usage,
+            consecutiveFailures: usageService.consecutiveFailures,
+            isStale: usageService.isStale
+        )
+        let signature = IconSignature(style: style, isMenuBarDark: isMenuBarDark, render: render)
 
-        if !isAuthenticated {
-            image = renderer.makeUnauthenticatedIcon(color: color)
-        } else if let usage = usage {
-            image = renderer.makeBatteryIcon(usage: usage, color: color)
-        } else if usageService.consecutiveFailures >= 10 {
-            image = renderer.makeStatusIcon(text: "!", color: color, alpha: 0.5)
-        } else if usageService.isStale && usageService.consecutiveFailures >= 3 {
-            image = renderer.makeStatusIcon(text: "...", color: color, alpha: 0.5)
-        } else {
-            image = renderer.makeStatusIcon(text: "...", color: color, alpha: 1.0)
+        guard signature != lastRenderedSignature else {
+            updateIconSuppressedBySignature += 1
+            return
         }
 
-        lastRenderedStyle = iconStyleRaw
-        statusItem.button?.image = image
+        let color: NSColor = isMenuBarDark ? .white : .black
+        let image = makeImage(for: render, style: style, color: color)
+
+        guard let button = statusItem.button else { return }
+        button.image = image
+        lastRenderedSignature = signature
+        updateIconRendered += 1
+    }
+
+    private func makeImage(for render: RenderState, style: IconStyle, color: NSColor) -> NSImage {
+        let renderer = style.renderer
+        switch render {
+        case .unauthenticated:
+            return renderer.makeUnauthenticatedIcon(color: color)
+        case .battery(let usage):
+            return renderer.makeBatteryIcon(usage: usage, color: color)
+        case .statusError:
+            return renderer.makeStatusIcon(text: "!", color: color, alpha: 0.5)
+        case .statusStale:
+            return renderer.makeStatusIcon(text: "...", color: color, alpha: 0.5)
+        case .statusLoading:
+            return renderer.makeStatusIcon(text: "...", color: color, alpha: 1.0)
+        }
     }
 }
 
