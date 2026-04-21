@@ -21,9 +21,10 @@ xcuserdata/
 # Distribution
 dist/
 
-# Local docs and todos
+# Local docs, todos, and compound-engineering run artifacts
 docs/
 todos/
+.context/
 
 # Secrets & signing materials
 *.p12
