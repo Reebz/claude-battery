@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import ClaudeBattery
 
 final class RenderStateTests: XCTestCase {
@@ -299,5 +300,77 @@ final class IconSignatureTests: XCTestCase {
             isStale: isStale
         )
         return IconSignature(style: style, isMenuBarDark: isMenuBarDark, render: render)
+    }
+}
+
+// MARK: - Appearance KVO Dedup
+
+final class AppearanceChangeDedupTests: XCTestCase {
+
+    // MARK: - Nil handling
+
+    func testNilNew_returnsFalse() {
+        let dark = NSAppearance(named: .darkAqua)!
+        XCTAssertFalse(MenuBarController.shouldReactToAppearanceChange(old: dark, new: nil))
+    }
+
+    func testNilOld_nonNilNew_returnsTrue() {
+        let dark = NSAppearance(named: .darkAqua)!
+        XCTAssertTrue(MenuBarController.shouldReactToAppearanceChange(old: nil, new: dark))
+    }
+
+    func testBothNil_returnsFalse() {
+        XCTAssertFalse(MenuBarController.shouldReactToAppearanceChange(old: nil, new: nil))
+    }
+
+    // MARK: - Same brightness bucket should suppress
+
+    func testSameDarkAqua_returnsFalse() {
+        let a = NSAppearance(named: .darkAqua)!
+        let b = NSAppearance(named: .darkAqua)!
+        XCTAssertFalse(MenuBarController.shouldReactToAppearanceChange(old: a, new: b))
+    }
+
+    func testSameAqua_returnsFalse() {
+        let a = NSAppearance(named: .aqua)!
+        let b = NSAppearance(named: .aqua)!
+        XCTAssertFalse(MenuBarController.shouldReactToAppearanceChange(old: a, new: b))
+    }
+
+    // MARK: - Correctness gate: HighContrast sub-variants collapse to the same bucket
+
+    // This is the fix for issue #11 — .name comparison would treat these as different.
+    func testAccessibilityHighContrastDarkAqua_collapsesToDark() {
+        let dark = NSAppearance(named: .darkAqua)!
+        let highContrastDark = NSAppearance(named: .accessibilityHighContrastDarkAqua)!
+        XCTAssertFalse(MenuBarController.shouldReactToAppearanceChange(old: dark, new: highContrastDark))
+        XCTAssertFalse(MenuBarController.shouldReactToAppearanceChange(old: highContrastDark, new: dark))
+    }
+
+    func testAccessibilityHighContrastAqua_collapsesToLight() {
+        let light = NSAppearance(named: .aqua)!
+        let highContrastLight = NSAppearance(named: .accessibilityHighContrastAqua)!
+        XCTAssertFalse(MenuBarController.shouldReactToAppearanceChange(old: light, new: highContrastLight))
+        XCTAssertFalse(MenuBarController.shouldReactToAppearanceChange(old: highContrastLight, new: light))
+    }
+
+    // MARK: - Real transitions should pass
+
+    func testDarkToLight_returnsTrue() {
+        let dark = NSAppearance(named: .darkAqua)!
+        let light = NSAppearance(named: .aqua)!
+        XCTAssertTrue(MenuBarController.shouldReactToAppearanceChange(old: dark, new: light))
+    }
+
+    func testLightToDark_returnsTrue() {
+        let dark = NSAppearance(named: .darkAqua)!
+        let light = NSAppearance(named: .aqua)!
+        XCTAssertTrue(MenuBarController.shouldReactToAppearanceChange(old: light, new: dark))
+    }
+
+    func testHighContrastDarkToHighContrastLight_returnsTrue() {
+        let hcDark = NSAppearance(named: .accessibilityHighContrastDarkAqua)!
+        let hcLight = NSAppearance(named: .accessibilityHighContrastAqua)!
+        XCTAssertTrue(MenuBarController.shouldReactToAppearanceChange(old: hcDark, new: hcLight))
     }
 }
