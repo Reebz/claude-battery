@@ -241,6 +241,44 @@ extension UserDefaults {
     }
 }
 
+// MARK: - Render State & Signature
+
+/// The rendered-output branch selected by updateIcon. The signature short-circuit
+/// depends on this rather than raw inputs so that state changes which do not affect
+/// the rendered NSImage (e.g. failure count churn while usage data is present)
+/// do not trigger spurious re-renders.
+enum RenderState: Equatable {
+    case unauthenticated
+    case battery(UsageData)
+    case statusError       // "!" at alpha 0.5
+    case statusStale       // "..." at alpha 0.5
+    case statusLoading     // "..." at alpha 1.0
+}
+
+struct IconSignature: Equatable {
+    let style: IconStyle
+    let isMenuBarDark: Bool
+    let render: RenderState
+}
+
+extension MenuBarController {
+    /// Pure mapping from updateIcon inputs to the render branch that will be drawn.
+    /// Mirrors updateIcon's if-chain exactly so the signature composed from this
+    /// output is a faithful representation of what appears on screen.
+    nonisolated static func renderState(
+        isAuthenticated: Bool,
+        usage: UsageData?,
+        consecutiveFailures: Int,
+        isStale: Bool
+    ) -> RenderState {
+        if !isAuthenticated { return .unauthenticated }
+        if let usage { return .battery(usage) }
+        if consecutiveFailures >= 10 { return .statusError }
+        if consecutiveFailures >= 3 && isStale { return .statusStale }
+        return .statusLoading
+    }
+}
+
 // MARK: - NSMenuDelegate
 
 extension MenuBarController: NSMenuDelegate {
