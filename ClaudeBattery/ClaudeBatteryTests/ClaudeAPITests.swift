@@ -152,4 +152,97 @@ final class ClaudeAPITests: XCTestCase {
         // rotating cookies (Cloudflare `__cf_bm`) flow through `Set-Cookie` responses.
         XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
     }
+
+    // MARK: - injectCookies edge cases
+
+    func testInjectCookiesSplitsOnBareSemicolon() {
+        // RFC 6265 allows ";" without trailing space between cookie pairs
+        let header = "sessionKey=sk123;__cf_bm=cfvalue"
+        ClaudeAPI.activateCookies(sessionKey: "sk123", cookieHeader: header)
+        let url = URL(string: "https://claude.ai")!
+        let cookies = ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: url) ?? []
+        XCTAssertNotNil(cookies.first { $0.name == "sessionKey" }, "sessionKey missing after bare-semicolon split")
+        XCTAssertNotNil(cookies.first { $0.name == "__cf_bm" }, "__cf_bm missing after bare-semicolon split")
+    }
+
+    func testInjectCookiesHandlesValueWithEquals() {
+        // Base64-encoded session keys often contain "=" padding
+        let header = "sessionKey=sk-ant-abc123=="
+        ClaudeAPI.activateCookies(sessionKey: "x", cookieHeader: header)
+        let url = URL(string: "https://claude.ai")!
+        let cookies = ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: url) ?? []
+        let sk = cookies.first { $0.name == "sessionKey" }
+        XCTAssertEqual(sk?.value, "sk-ant-abc123==", "Cookie value with = should be preserved")
+    }
+
+    func testActivateCookiesThenClearClaudeCookies() {
+        ClaudeAPI.activateCookies(sessionKey: "sk-test", cookieHeader: "sessionKey=sk-test; __cf_bm=cf")
+        let url = URL(string: "https://claude.ai")!
+        XCTAssertTrue((ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: url) ?? []).count >= 2)
+
+        ClaudeAPI.clearClaudeCookies()
+        let after = ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: url) ?? []
+        XCTAssertTrue(after.isEmpty, "clearClaudeCookies should remove all claude.ai cookies")
+    }
+}
+
+// MARK: - isClaudeCookie / isSessionCookie Tests
+
+@MainActor
+final class CookieDomainValidationTests: XCTestCase {
+
+    func testIsSessionCookie_exactDomain() {
+        let cookie = makeCookie(name: "sessionKey", domain: "claude.ai")
+        XCTAssertTrue(AuthManager.isSessionCookie(cookie))
+    }
+
+    func testIsSessionCookie_leadingDotDomain() {
+        let cookie = makeCookie(name: "sessionKey", domain: ".claude.ai")
+        XCTAssertTrue(AuthManager.isSessionCookie(cookie))
+    }
+
+    func testIsSessionCookie_rejectsEvilDomain() {
+        let cookie = makeCookie(name: "sessionKey", domain: "evil-claude.ai")
+        XCTAssertFalse(AuthManager.isSessionCookie(cookie), "hasSuffix('.claude.ai') must not pass - Critical Pattern #2")
+    }
+
+    func testIsSessionCookie_rejectsWrongName() {
+        let cookie = makeCookie(name: "__cf_bm", domain: "claude.ai")
+        XCTAssertFalse(AuthManager.isSessionCookie(cookie))
+    }
+
+    func testIsClaudeCookie_exactDomain() {
+        let cookie = makeCookie(name: "__cf_bm", domain: "claude.ai")
+        XCTAssertTrue(AuthManager.isClaudeCookie(cookie))
+    }
+
+    func testIsClaudeCookie_leadingDotDomain() {
+        let cookie = makeCookie(name: "__cf_bm", domain: ".claude.ai")
+        XCTAssertTrue(AuthManager.isClaudeCookie(cookie))
+    }
+
+    func testIsClaudeCookie_rejectsEvilDomain() {
+        let cookie = makeCookie(name: "__cf_bm", domain: "evil-claude.ai")
+        XCTAssertFalse(AuthManager.isClaudeCookie(cookie), "hasSuffix must not pass - Critical Pattern #2")
+    }
+
+    func testIsClaudeCookie_rejectsSubdomain() {
+        let cookie = makeCookie(name: "__cf_bm", domain: "cdn.claude.ai")
+        XCTAssertFalse(AuthManager.isClaudeCookie(cookie), "Subdomain cookies should not pass exact-match")
+    }
+
+    func testIsClaudeCookie_rejectsUnrelatedDomain() {
+        let cookie = makeCookie(name: "sessionKey", domain: "google.com")
+        XCTAssertFalse(AuthManager.isClaudeCookie(cookie))
+    }
+
+    private func makeCookie(name: String, domain: String) -> HTTPCookie {
+        HTTPCookie(properties: [
+            .name: name,
+            .value: "test-value",
+            .domain: domain,
+            .path: "/",
+            .secure: "TRUE",
+        ])!
+    }
 }

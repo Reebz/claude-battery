@@ -198,6 +198,79 @@ final class ExtraUsageDataTests: XCTestCase {
     }
 }
 
+// MARK: - PrepaidBalance Tests
+
+final class PrepaidBalanceTests: XCTestCase {
+
+    func testPositiveAmount_convertsCentsToDollars() {
+        let response = makePrepaidResponse(amount: 3750)
+        let balance = PrepaidBalance(from: response)
+        XCTAssertNotNil(balance)
+        XCTAssertEqual(balance!.dollars, 37.50, accuracy: 0.01)
+    }
+
+    func testLargeAmount_convertsCentsToDollars() {
+        let response = makePrepaidResponse(amount: 50000)
+        let balance = PrepaidBalance(from: response)
+        XCTAssertNotNil(balance)
+        XCTAssertEqual(balance!.dollars, 500.00, accuracy: 0.01)
+    }
+
+    func testZeroAmount_returnsNil() {
+        let response = makePrepaidResponse(amount: 0)
+        XCTAssertNil(PrepaidBalance(from: response))
+    }
+
+    func testNegativeAmount_returnsNil() {
+        let response = makePrepaidResponse(amount: -100)
+        XCTAssertNil(PrepaidBalance(from: response))
+    }
+
+    func testNilResponse_returnsNil() {
+        XCTAssertNil(PrepaidBalance(from: nil))
+    }
+
+    func testNilAmount_returnsNil() {
+        let response = makePrepaidResponse(amount: nil)
+        XCTAssertNil(PrepaidBalance(from: response))
+    }
+
+    func testDecodesFromJSON() {
+        let json = """
+        {"amount": 1250}
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try! decoder.decode(PrepaidCreditsResponse.self, from: json)
+        let balance = PrepaidBalance(from: response)
+        XCTAssertNotNil(balance)
+        XCTAssertEqual(balance!.dollars, 12.50, accuracy: 0.01)
+    }
+
+    func testDecodesFromEmptyJSON() {
+        let json = "{}".data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try! decoder.decode(PrepaidCreditsResponse.self, from: json)
+        XCTAssertNil(response.amount)
+        XCTAssertNil(PrepaidBalance(from: response))
+    }
+
+    private func makePrepaidResponse(amount: Double?) -> PrepaidCreditsResponse {
+        if let amount {
+            let json = "{\"amount\": \(amount)}".data(using: .utf8)!
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try! decoder.decode(PrepaidCreditsResponse.self, from: json)
+        } else {
+            let json = "{}".data(using: .utf8)!
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try! decoder.decode(PrepaidCreditsResponse.self, from: json)
+        }
+    }
+}
+
 // MARK: - UsageService.pollUsage() Tests
 
 final class UsageServicePollTests: XCTestCase {
