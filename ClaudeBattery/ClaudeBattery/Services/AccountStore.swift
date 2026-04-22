@@ -36,6 +36,13 @@ class AccountStore: ObservableObject {
             activeAccountId = first.id
             storage.setActiveAccountId(first.id)
         }
+
+        // Prime the ClaudeAPI cookie jar from the active account's captured cookies.
+        // Runs at app launch so the first /usage poll after boot carries the full cookie set
+        // (sessionKey + Cloudflare __cf_bm etc.), not sessionKey alone.
+        if let active = activeAccount {
+            ClaudeAPI.activateCookies(sessionKey: active.sessionKey, cookieHeader: active.allCookieHeader)
+        }
     }
 
     // MARK: - Mutations
@@ -65,11 +72,17 @@ class AccountStore: ObservableObject {
     }
 
     func removeAccount(_ id: UUID) {
+        let wasActive = (activeAccountId == id)
         accounts.removeAll(where: { $0.id == id })
 
-        if activeAccountId == id {
+        if wasActive {
             activeAccountId = accounts.first?.id
             storage.setActiveAccountId(activeAccountId)
+            if let newActive = activeAccount {
+                ClaudeAPI.activateCookies(sessionKey: newActive.sessionKey, cookieHeader: newActive.allCookieHeader)
+            } else {
+                ClaudeAPI.clearClaudeCookies()
+            }
         }
 
         persist()
@@ -77,16 +90,27 @@ class AccountStore: ObservableObject {
     }
 
     func switchTo(_ id: UUID) {
-        guard accounts.contains(where: { $0.id == id }) else { return }
+        guard let account = accounts.first(where: { $0.id == id }) else { return }
         activeAccountId = id
         storage.setActiveAccountId(id)
+        ClaudeAPI.activateCookies(sessionKey: account.sessionKey, cookieHeader: account.allCookieHeader)
         logger.info("Switched to account \(id.uuidString)")
     }
 
-    func updateSessionKey(_ id: UUID, _ sessionKey: String) {
+    func updateSessionKey(_ id: UUID, _ sessionKey: String, cookieHeader: String? = nil, expiration: Date? = nil) {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
         accounts[index].sessionKey = sessionKey
+        if let cookieHeader {
+            accounts[index].allCookieHeader = cookieHeader
+        }
+        if let expiration {
+            accounts[index].sessionKeyExpiration = expiration
+        }
         persist()
+        if activeAccountId == id {
+            // Re-prime the cookie jar with the fresh credentials so the next API call uses them.
+            ClaudeAPI.activateCookies(sessionKey: sessionKey, cookieHeader: accounts[index].allCookieHeader)
+        }
     }
 
     func updateNickname(_ id: UUID, _ nickname: String) {

@@ -28,6 +28,17 @@ class AuthManager: NSObject, ObservableObject {
     private var hasCapturedSession = false
     // internal for @testable access in AuthManagerTests
     var pendingSessionKey: String?
+    /// Full Cookie header string built from every `.claude.ai` cookie in the login WebView
+    /// (or the full `document.cookie` string in the JS-fallback path). Passed to `ClaudeAPI`
+    /// alongside `pendingSessionKey` so authenticated API calls during org discovery carry
+    /// the full cookie set instead of `sessionKey` alone.
+    private var pendingCookieHeader: String?
+    /// Child WebView hosting OAuth popups spawned by `window.open()`. Added as a subview of
+    /// the primary `loginWebView` so the OAuth provider's callback can `postMessage` back to
+    /// the claude.ai page via `window.opener`. Torn down on `webViewDidClose` or login-window
+    /// shutdown. Required for "Continue with Google" - without it, `window.open()` returns nil
+    /// and Google OAuth fails immediately.
+    private var popupWebView: WKWebView?
 
     init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
         self.storage = storage
@@ -52,9 +63,70 @@ class AuthManager: NSObject, ObservableObject {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
 
+        // Debug DMG instrumentation - capture every fetch / XHR inside the login webview
+        // so we can see which claude.ai request fails when a user reports "error logging you in"
+        // inside the UI (e.g., samuelgjekic, issue #7). Logs arrive via os_log with subsystem
+        // "com.claudebattery.app", category "Auth", visible in Console.app or `log stream`.
+        let netLogScript = """
+        (function() {
+            const post = (data) => {
+                try {
+                    const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.claudebatteryNetLog;
+                    if (h) h.postMessage(JSON.stringify(data));
+                } catch (e) {}
+            };
+            post({kind: 'script-injected', url: location.href});
+            const origFetch = window.fetch;
+            window.fetch = async function(input, init) {
+                const url = typeof input === 'string' ? input : (input && input.url) || '';
+                const method = (init && init.method) || (typeof input === 'object' && input.method) || 'GET';
+                post({kind: 'fetch-start', url, method});
+                try {
+                    const response = await origFetch(input, init);
+                    post({kind: 'fetch-done', url, method, status: response.status});
+                    return response;
+                } catch (e) {
+                    post({kind: 'fetch-error', url, method, error: String(e)});
+                    throw e;
+                }
+            };
+            const OrigXHR = window.XMLHttpRequest;
+            window.XMLHttpRequest = function() {
+                const xhr = new OrigXHR();
+                const origOpen = xhr.open;
+                xhr.open = function(method, url) {
+                    this._method = method; this._url = url;
+                    post({kind: 'xhr-open', method, url});
+                    return origOpen.apply(this, arguments);
+                };
+                xhr.addEventListener('loadend', function() {
+                    post({kind: 'xhr-done', method: xhr._method, url: xhr._url, status: xhr.status});
+                });
+                return xhr;
+            };
+            window.addEventListener('error', function(ev) {
+                post({kind: 'js-error', message: String(ev.message), source: String(ev.filename || ''), lineno: ev.lineno || 0});
+            });
+            const origConsoleError = console.error;
+            console.error = function() {
+                try { post({kind: 'console-error', args: Array.from(arguments).map(a => String(a)).join(' ') }); } catch (e) {}
+                return origConsoleError.apply(console, arguments);
+            };
+        })();
+        """
+        let userScript = WKUserScript(source: netLogScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        config.userContentController.addUserScript(userScript)
+        config.userContentController.add(self, name: "claudebatteryNetLog")
+
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 640), configuration: config)
         webView.customUserAgent = ClaudeAPI.safariUserAgent
         webView.navigationDelegate = self
+        webView.uiDelegate = self
+        // Lets users open the Web Inspector on the login webview via Safari > Develop menu
+        // (or via a right-click context menu on macOS 13.3+). Debug-DMG-only - never ship enabled.
+        if #available(macOS 13.3, *) {
+            webView.isInspectable = true
+        }
         self.loginWebView = webView
 
         config.websiteDataStore.httpCookieStore.add(self)
@@ -138,6 +210,12 @@ class AuthManager: NSObject, ObservableObject {
                     logger.info("Session cookie captured via JavaScript fallback")
                     self.hasCapturedSession = true
                     self.pendingSessionKey = value
+                    // JS path: `document.cookie` only exposes non-HttpOnly cookies, which
+                    // excludes Cloudflare `__cf_bm`. Pass whatever we can see to `ClaudeAPI`;
+                    // it primes the jar with this set, then URLSession picks up the HttpOnly
+                    // cookies (including `__cf_bm`) automatically from the ambient
+                    // `WKWebsiteDataStore` context on the first authenticated response.
+                    self.pendingCookieHeader = cookieString
                     self.loginState = .signingIn
                     self.cookiePollTimer?.invalidate()
                     self.cookiePollTimer = nil
@@ -156,6 +234,9 @@ class AuthManager: NSObject, ObservableObject {
         cookiePollTimer = nil
         urlObservation?.invalidate()
         urlObservation = nil
+        popupWebView?.stopLoading()
+        popupWebView?.removeFromSuperview()
+        popupWebView = nil
         loginWebView?.stopLoading()
         loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
         loginWebView = nil
@@ -167,6 +248,14 @@ class AuthManager: NSObject, ObservableObject {
     static func isSessionCookie(_ cookie: HTTPCookie) -> Bool {
         cookie.name == "sessionKey" &&
         (cookie.domain == "claude.ai" || cookie.domain == ".claude.ai")
+    }
+
+    /// Any cookie scoped to claude.ai (exact, leading-dot, or any sub-domain).
+    /// Used when building the full Cookie header after capture.
+    static func isClaudeCookie(_ cookie: HTTPCookie) -> Bool {
+        cookie.domain == "claude.ai" ||
+        cookie.domain == ".claude.ai" ||
+        cookie.domain.hasSuffix(".claude.ai")
     }
 
     // internal for @testable access in AuthManagerTests
@@ -188,7 +277,20 @@ class AuthManager: NSObject, ObservableObject {
 
         logger.info("Session cookie captured via cookie store")
 
-        orgDiscoveryTask = Task { await fetchOrganizationId() }
+        // Enumerate every `.claude.ai` cookie into a Cookie header string so authenticated
+        // API requests carry the full set (including Cloudflare `__cf_bm`) - not `sessionKey`
+        // alone. Then kick off org discovery.
+        Task { [weak self] in
+            guard let self else { return }
+            if let webView = self.loginWebView {
+                let allCookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
+                let claudeCookies = allCookies.filter(Self.isClaudeCookie)
+                let header = claudeCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+                self.pendingCookieHeader = header.isEmpty ? nil : header
+                logger.info("Captured \(claudeCookies.count) .claude.ai cookies for API requests")
+            }
+            self.orgDiscoveryTask = Task { await self.fetchOrganizationId() }
+        }
     }
 
     // MARK: - Org Discovery
@@ -201,7 +303,7 @@ class AuthManager: NSObject, ObservableObject {
             return
         }
 
-        guard let request = ClaudeAPI.makeRequest(path: "/api/organizations", sessionKey: sessionKey) else {
+        guard let request = ClaudeAPI.makeRequest(path: "/api/organizations", sessionKey: sessionKey, cookieHeader: pendingCookieHeader) else {
             logger.error("Failed to construct organizations API URL")
             handleOrgDiscoveryFailure("Connection error. Please try again.")
             showLoginAlert("Connection Error", "Could not complete sign-in. Please close this window and try again.")
@@ -275,15 +377,18 @@ class AuthManager: NSObject, ObservableObject {
             let account = Account(
                 email: email,
                 sessionKey: sessionKey,
-                organizationId: chosenOrg.uuid
+                organizationId: chosenOrg.uuid,
+                allCookieHeader: pendingCookieHeader
             )
 
             if accountStore.addAccount(account) {
                 accountStore.switchTo(account.id)
                 logger.info("Account added and activated: \(account.displayName)")
             } else if let existing = accountStore.accounts.first(where: { $0.organizationId == chosenOrg.uuid }) {
-                // Re-authentication: update session key on existing account
-                accountStore.updateSessionKey(existing.id, sessionKey)
+                // Re-authentication: update session key AND the full cookie header so the next
+                // API call primes the jar with the fresh Cloudflare / CSRF cookies, not the stale
+                // pair that was paired with the previous sessionKey.
+                accountStore.updateSessionKey(existing.id, sessionKey, cookieHeader: pendingCookieHeader)
                 accountStore.switchTo(existing.id)
                 logger.info("Re-authenticated existing account: \(existing.displayName)")
             } else {
@@ -295,6 +400,7 @@ class AuthManager: NSObject, ObservableObject {
 
             // Success — clean up and close window
             pendingSessionKey = nil
+            pendingCookieHeader = nil
             loginState = .idle
             stopLoginWindow()
         } catch {
@@ -307,6 +413,7 @@ class AuthManager: NSObject, ObservableObject {
 
     private func handleOrgDiscoveryFailure(_ message: String) {
         pendingSessionKey = nil
+        pendingCookieHeader = nil
         hasCapturedSession = false
         loginState = .error(message)
     }
@@ -416,12 +523,21 @@ class AuthManager: NSObject, ObservableObject {
     // MARK: - Allowed Domains
 
     private func isAllowedDomain(_ host: String) -> Bool {
-        // hasSuffix is acceptable here — false positives only show content, not leak credentials.
+        // Exact match plus `".X"` suffix for multi-label domains - rejects
+        // attacker-injected prefixes like `evil.googleapis.com.attacker.com`
+        // that a bare `hasSuffix(".googleapis.com")` would accept.
         host == "claude.ai" ||
         host.hasSuffix(".claude.ai") ||
         host.hasSuffix(".anthropic.com") ||
         host == "accounts.google.com" ||
         host.hasSuffix(".accounts.google.com") ||
+        host == "google.com" ||
+        host.hasSuffix(".google.com") ||
+        host.hasSuffix(".gstatic.com") ||
+        host.hasSuffix(".googleapis.com") ||
+        host.hasSuffix(".googleusercontent.com") ||
+        host == "youtube.com" ||
+        host.hasSuffix(".youtube.com") ||
         host == "appleid.apple.com" ||
         host.hasSuffix(".appleid.apple.com") ||
         host.hasSuffix(".icloud.com") ||
@@ -434,7 +550,27 @@ class AuthManager: NSObject, ObservableObject {
 
 extension AuthManager: WKNavigationDelegate {
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        guard let url = navigationAction.request.url, let host = url.host else {
+        guard let url = navigationAction.request.url else {
+            decisionHandler(.cancel)
+            return
+        }
+
+        // Allow OAuth blank-frame bootstraps (about:blank / about:srcdoc). These appear as
+        // intermediate frames during Google's OAuth flow; blocking them breaks the popup.
+        if url.scheme == "about" {
+            let absoluteString = url.absoluteString
+            if absoluteString == "about:" ||
+               absoluteString.hasPrefix("about:blank") ||
+               absoluteString.hasPrefix("about:srcdoc") {
+                decisionHandler(.allow)
+            } else {
+                logger.info("Blocked navigation to unusual about: URI: \(absoluteString)")
+                decisionHandler(.cancel)
+            }
+            return
+        }
+
+        guard let host = url.host else {
             decisionHandler(.cancel)
             return
         }
@@ -467,8 +603,103 @@ extension AuthManager: WKNavigationDelegate {
             self.loginState = .idle
             self.hasCapturedSession = false
             self.pendingSessionKey = nil
+            self.pendingCookieHeader = nil
             self.stopLoginWindow()
         }
+    }
+}
+
+// MARK: - WKUIDelegate
+
+extension AuthManager: WKUIDelegate {
+    /// Handle `window.open()` requests from the login WebView. Google "Continue with Google"
+    /// uses this to spawn its OAuth flow as a popup; if we return nil, OAuth fails with
+    /// "There was an error logging you in." Create a real child WebView built from the
+    /// provided configuration so `window.opener` is preserved and the OAuth callback can
+    /// `postMessage` back to the parent claude.ai page.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        guard let url = navigationAction.request.url else { return nil }
+
+        // Apply the same allowlist as the parent WebView. OAuth popups must not escape to
+        // arbitrary domains. `about:` URIs are allowed here (handled by decidePolicyFor on
+        // the child's navigationDelegate).
+        if let host = url.host, !isAllowedDomain(host), url.scheme != "about" {
+            logger.info("Blocked popup to disallowed domain: \(host)")
+            return nil
+        }
+
+        // Tear down any previous popup before creating a new one.
+        popupWebView?.stopLoading()
+        popupWebView?.removeFromSuperview()
+
+        let popup = WKWebView(frame: webView.bounds, configuration: configuration)
+        popup.navigationDelegate = self
+        popup.uiDelegate = self
+        popup.customUserAgent = ClaudeAPI.safariUserAgent
+        popup.autoresizingMask = [.width, .height]
+        if #available(macOS 13.3, *) {
+            popup.isInspectable = true  // debug-DMG only
+        }
+        webView.addSubview(popup)
+        self.popupWebView = popup
+
+        logger.debug("Created OAuth popup WebView for: \(url.host ?? url.absoluteString)")
+        return popup
+    }
+
+    /// Called when the OAuth popup's JavaScript executes `window.close()` after the flow
+    /// completes. Tear down the child WebView so the parent login WebView regains focus.
+    func webViewDidClose(_ webView: WKWebView) {
+        if webView === popupWebView {
+            popupWebView?.removeFromSuperview()
+            popupWebView = nil
+            logger.debug("OAuth popup closed itself")
+        }
+    }
+
+    /// Surface JS `alert()` messages as native NSAlert sheets. Without this, claude.ai's
+    /// error messages are silently dropped inside the WebView.
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        guard let window = loginWindowController?.window else {
+            completionHandler()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.beginSheetModal(for: window) { _ in completionHandler() }
+    }
+
+    /// Surface JS `confirm()` prompts as native NSAlert sheets with OK / Cancel.
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        guard let window = loginWindowController?.window else {
+            completionHandler(false)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { response in
+            completionHandler(response == .alertFirstButtonReturn)
+        }
+    }
+}
+
+// MARK: - WKScriptMessageHandler (debug-DMG netlog)
+
+extension AuthManager: WKScriptMessageHandler {
+    nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "claudebatteryNetLog" else { return }
+        let body: String
+        if let str = message.body as? String {
+            body = str
+        } else {
+            body = String(describing: message.body)
+        }
+        // `.public` formatting so Release builds emit the literal payload to Console.app,
+        // not the `<private>` placeholder that Logger applies by default.
+        logger.info("NetLog: \(body, privacy: .public)")
     }
 }
 
@@ -498,6 +729,7 @@ extension AuthManager: NSWindowDelegate {
         if loginState == .signingIn {
             hasCapturedSession = false
             pendingSessionKey = nil
+            pendingCookieHeader = nil
         }
         loginState = .idle
 
@@ -507,6 +739,9 @@ extension AuthManager: NSWindowDelegate {
         cookiePollTimer = nil
         urlObservation?.invalidate()
         urlObservation = nil
+        popupWebView?.stopLoading()
+        popupWebView?.removeFromSuperview()
+        popupWebView = nil
         loginWebView?.stopLoading()
         loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
         loginWebView = nil
