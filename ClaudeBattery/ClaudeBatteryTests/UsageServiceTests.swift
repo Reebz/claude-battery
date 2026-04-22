@@ -280,10 +280,16 @@ final class UsageServicePollTests: XCTestCase {
         let request = mockSession.lastRequest
         XCTAssertNotNil(request)
         XCTAssertTrue(request!.url!.absoluteString.contains("org-test-123"))
-        XCTAssertEqual(
-            request!.value(forHTTPHeaderField: "Cookie"),
-            "sessionKey=sk-ant-test-key"
-        )
+
+        // Cookie is managed via ClaudeAPI's per-session jar (primed in setUp via
+        // accountStore.addAccount -> ClaudeAPI.activateCookies). URLSession constructs
+        // the Cookie header on dispatch, so URLRequest.Cookie is nil here by design.
+        XCTAssertNil(request!.value(forHTTPHeaderField: "Cookie"))
+
+        let cookies = ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: request!.url!) ?? []
+        let sessionCookie = cookies.first { $0.name == "sessionKey" }
+        XCTAssertNotNil(sessionCookie, "Cookie jar should have been primed with sessionKey on account activation")
+        XCTAssertEqual(sessionCookie?.value, "sk-ant-test-key")
     }
 
     // MARK: - 401 auth failure

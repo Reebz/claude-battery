@@ -14,12 +14,20 @@ struct Account: Codable, Identifiable, Equatable {
     let addedDate: Date
     var notificationThreshold: Double
     var didNotifyBelowThreshold: Bool
+    /// Optional expiration of the captured sessionKey cookie. Used to trigger proactive re-auth.
+    var sessionKeyExpiration: Date?
+    /// Full `.claude.ai` Cookie header captured from the login WebView at login time.
+    /// Format: "name1=value1; name2=value2; ...". Primes `ClaudeAPI`'s per-session cookie
+    /// jar when this account becomes active, so authenticated API requests carry the
+    /// full cookie set (including Cloudflare `__cf_bm`) rather than `sessionKey` alone.
+    /// Nil for accounts migrated from pre-#7-fix builds; those fall back to sessionKey-only.
+    var allCookieHeader: String?
 
     var displayName: String {
         nickname ?? email
     }
 
-    init(id: UUID = UUID(), email: String, sessionKey: String, organizationId: String, nickname: String? = nil, addedDate: Date = Date(), notificationThreshold: Double = 20.0, didNotifyBelowThreshold: Bool = false) {
+    init(id: UUID = UUID(), email: String, sessionKey: String, organizationId: String, nickname: String? = nil, addedDate: Date = Date(), notificationThreshold: Double = 20.0, didNotifyBelowThreshold: Bool = false, sessionKeyExpiration: Date? = nil, allCookieHeader: String? = nil) {
         self.id = id
         self.email = email
         self.sessionKey = sessionKey
@@ -28,6 +36,8 @@ struct Account: Codable, Identifiable, Equatable {
         self.addedDate = addedDate
         self.notificationThreshold = notificationThreshold
         self.didNotifyBelowThreshold = didNotifyBelowThreshold
+        self.sessionKeyExpiration = sessionKeyExpiration
+        self.allCookieHeader = allCookieHeader
     }
 }
 
