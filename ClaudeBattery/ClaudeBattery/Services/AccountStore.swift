@@ -97,14 +97,11 @@ class AccountStore: ObservableObject {
         logger.info("Switched to account \(id.uuidString)")
     }
 
-    func updateSessionKey(_ id: UUID, _ sessionKey: String, cookieHeader: String? = nil, expiration: Date? = nil) {
+    func updateSessionKey(_ id: UUID, _ sessionKey: String, cookieHeader: String? = nil) {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
         accounts[index].sessionKey = sessionKey
         if let cookieHeader {
             accounts[index].allCookieHeader = cookieHeader
-        }
-        if let expiration {
-            accounts[index].sessionKeyExpiration = expiration
         }
         persist()
         if activeAccountId == id {

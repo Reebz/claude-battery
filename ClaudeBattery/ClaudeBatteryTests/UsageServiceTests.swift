@@ -207,12 +207,10 @@ final class UsageServicePollTests: XCTestCase {
     private var storage: StorageService!
     private var accountStore: AccountStore!
 
-    /// Shared test account with a valid (far-future) session expiration.
     private let testAccount = Account(
         email: "test@example.com",
         sessionKey: "sk-ant-test-key",
-        organizationId: "org-test-123",
-        sessionKeyExpiration: Date.distantFuture
+        organizationId: "org-test-123"
     )
 
     @MainActor

@@ -24,30 +24,29 @@ final class ClaudeAPITests: XCTestCase {
         XCTAssertEqual(request?.url?.absoluteString, "https://claude.ai/api/organizations/uuid-123/usage")
     }
 
-    // MARK: - Cookie jar behavior (primed via makeRequest; URLSession sends from the jar)
+    // MARK: - Cookie jar behavior
+    // makeRequest only primes the jar when cookieHeader is explicitly provided.
+    // With nil or empty cookieHeader, callers must prime via activateCookies at
+    // account-activation boundaries (AccountStore.switchTo, etc).
 
-    func testMakeRequestWithNilCookieHeaderPrimesJarWithSessionKey() {
+    func testMakeRequestWithNilCookieHeaderDoesNotPrimeJar() {
         let request = ClaudeAPI.makeRequest(path: "/api/test", sessionKey: "sk123")
 
-        // URLRequest no longer carries an explicit Cookie header - URLSession builds it
-        // from the per-session jar on dispatch so rotating cookies stay fresh.
         XCTAssertNil(request?.value(forHTTPHeaderField: "Cookie"))
 
         let cookies = ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: request!.url!) ?? []
         let sessionCookie = cookies.first { $0.name == "sessionKey" }
-        XCTAssertNotNil(sessionCookie, "Jar should contain sessionKey cookie")
-        XCTAssertEqual(sessionCookie?.value, "sk123")
+        XCTAssertNil(sessionCookie, "Nil cookieHeader must not auto-prime the jar (TOCTOU fix)")
     }
 
-    func testMakeRequestWithEmptyCookieHeaderPrimesJarWithSessionKey() {
+    func testMakeRequestWithEmptyCookieHeaderDoesNotPrimeJar() {
         let request = ClaudeAPI.makeRequest(path: "/api/test", sessionKey: "sk123", cookieHeader: "")
 
         XCTAssertNil(request?.value(forHTTPHeaderField: "Cookie"))
 
         let cookies = ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: request!.url!) ?? []
         let sessionCookie = cookies.first { $0.name == "sessionKey" }
-        XCTAssertNotNil(sessionCookie, "Empty cookieHeader should still fall back to sessionKey priming")
-        XCTAssertEqual(sessionCookie?.value, "sk123")
+        XCTAssertNil(sessionCookie, "Empty cookieHeader must not prime the jar")
     }
 
     func testMakeRequestWithPopulatedCookieHeaderPrimesJarWithAllCookies() {
@@ -62,8 +61,9 @@ final class ClaudeAPITests: XCTestCase {
         XCTAssertEqual(cookies.first { $0.name == "anthropic-csrf-token" }?.value, "csrf-token")
     }
 
-    func testMakeRequestEmbedsDifferentSessionKeys() {
+    func testActivateCookiesThenMakeRequestPreservesJar() {
         let key = "sk-ant-sid01-abc123-long-session-key"
+        ClaudeAPI.activateCookies(sessionKey: key, cookieHeader: nil)
         let request = ClaudeAPI.makeRequest(path: "/api/test", sessionKey: key)
 
         let cookies = ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: request!.url!) ?? []
