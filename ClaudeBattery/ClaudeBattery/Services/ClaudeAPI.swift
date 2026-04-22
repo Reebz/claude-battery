@@ -68,7 +68,9 @@ enum ClaudeAPI {
     /// `activateCookies`).
     private static func injectCookies(from headerString: String) {
         guard let url = URL(string: baseURL) else { return }
-        for pair in headerString.components(separatedBy: "; ") {
+        // Split on ";" (not "; ") then trim — bare semicolons without trailing space
+        // are valid per RFC 6265 and must not silently drop subsequent cookies.
+        for pair in headerString.components(separatedBy: ";") {
             let trimmed = pair.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
             let parts = trimmed.split(separator: "=", maxSplits: 1).map(String.init)
@@ -95,10 +97,14 @@ enum ClaudeAPI {
     static func makeRequest(path: String, sessionKey: String, cookieHeader: String? = nil) -> URLRequest? {
         guard let url = URL(string: "\(baseURL)\(path)") else { return nil }
 
+        // Prime the jar only when the caller explicitly provides a cookieHeader
+        // (e.g., AuthManager.fetchOrganizationId right after capture). All other
+        // callers rely on activateCookies at account-activation boundaries.
+        // Removed the fallback "jar has no sessionKey → re-prime" branch because
+        // it caused a TOCTOU: concurrent callers could clobber each other's cookies
+        // in the shared HTTPCookieStorage (see ADV-007).
         if let cookieHeader, !cookieHeader.isEmpty {
             activateCookies(sessionKey: sessionKey, cookieHeader: cookieHeader)
-        } else if cookieStorage.cookies(for: url)?.contains(where: { $0.name == "sessionKey" }) != true {
-            activateCookies(sessionKey: sessionKey, cookieHeader: nil)
         }
 
         var request = URLRequest(url: url)

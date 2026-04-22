@@ -181,9 +181,7 @@ class UsageService: NSObject, ObservableObject {
                     let creditsBody = String(data: creditsData, encoding: .utf8) ?? "(non-utf8)"
                     logger.info("Prepaid credits response (\(creditsData.count) bytes): \(creditsBody.prefix(500))")
                     #endif
-                    let creditsDecoder = JSONDecoder()
-                    creditsDecoder.keyDecodingStrategy = .convertFromSnakeCase
-                    prepaidCredits = try? creditsDecoder.decode(PrepaidCreditsResponse.self, from: creditsData)
+                    prepaidCredits = try? decoder.decode(PrepaidCreditsResponse.self, from: creditsData)
                 }
             }
 
@@ -356,18 +354,9 @@ struct UsageData {
 // MARK: - Prepaid Credits
 
 /// Raw API response from /api/organizations/{orgId}/prepaid/credits.
-/// Uses lenient decoding — fields may be absent for accounts without prepaid.
+/// Optional fields decode to nil automatically for accounts without prepaid.
 struct PrepaidCreditsResponse: Codable {
     let amount: Double?
-
-    enum CodingKeys: String, CodingKey {
-        case amount
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        amount = try? container.decode(Double.self, forKey: .amount)
-    }
 }
 
 /// Display model for prepaid credit balance. Separate from ExtraUsageData

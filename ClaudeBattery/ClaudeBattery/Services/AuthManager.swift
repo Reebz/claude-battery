@@ -63,7 +63,8 @@ class AuthManager: NSObject, ObservableObject {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
 
-        // Debug DMG instrumentation - capture every fetch / XHR inside the login webview
+        #if DEBUG
+        // Debug instrumentation - capture every fetch / XHR inside the login webview
         // so we can see which claude.ai request fails when a user reports "error logging you in"
         // inside the UI (e.g., samuelgjekic, issue #7). Logs arrive via os_log with subsystem
         // "com.claudebattery.app", category "Auth", visible in Console.app or `log stream`.
@@ -117,16 +118,17 @@ class AuthManager: NSObject, ObservableObject {
         let userScript = WKUserScript(source: netLogScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
         config.userContentController.addUserScript(userScript)
         config.userContentController.add(self, name: "claudebatteryNetLog")
+        #endif
 
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 640), configuration: config)
         webView.customUserAgent = ClaudeAPI.safariUserAgent
         webView.navigationDelegate = self
         webView.uiDelegate = self
-        // Lets users open the Web Inspector on the login webview via Safari > Develop menu
-        // (or via a right-click context menu on macOS 13.3+). Debug-DMG-only - never ship enabled.
+        #if DEBUG
         if #available(macOS 13.3, *) {
             webView.isInspectable = true
         }
+        #endif
         self.loginWebView = webView
 
         config.websiteDataStore.httpCookieStore.add(self)
@@ -239,6 +241,9 @@ class AuthManager: NSObject, ObservableObject {
         popupWebView = nil
         loginWebView?.stopLoading()
         loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
+        #if DEBUG
+        loginWebView?.configuration.userContentController.removeScriptMessageHandler(forName: "claudebatteryNetLog")
+        #endif
         loginWebView = nil
         loginWindowController?.close()
         loginWindowController = nil
@@ -250,12 +255,12 @@ class AuthManager: NSObject, ObservableObject {
         (cookie.domain == "claude.ai" || cookie.domain == ".claude.ai")
     }
 
-    /// Any cookie scoped to claude.ai (exact, leading-dot, or any sub-domain).
+    /// Any cookie scoped to claude.ai (exact or leading-dot only).
     /// Used when building the full Cookie header after capture.
+    /// Per Critical Pattern #2: never use hasSuffix for domain validation -
+    /// hasSuffix(".claude.ai") would match evil-claude.ai.
     static func isClaudeCookie(_ cookie: HTTPCookie) -> Bool {
-        cookie.domain == "claude.ai" ||
-        cookie.domain == ".claude.ai" ||
-        cookie.domain.hasSuffix(".claude.ai")
+        cookie.domain == "claude.ai" || cookie.domain == ".claude.ai"
     }
 
     // internal for @testable access in AuthManagerTests
@@ -280,9 +285,12 @@ class AuthManager: NSObject, ObservableObject {
         // Enumerate every `.claude.ai` cookie into a Cookie header string so authenticated
         // API requests carry the full set (including Cloudflare `__cf_bm`) - not `sessionKey`
         // alone. Then kick off org discovery.
+        // Capture loginWebView before the first await so a concurrent stopLoginWindow call
+        // that nils the property does not cause us to skip cookie enumeration (COR-002).
+        let capturedWebView = self.loginWebView
         Task { [weak self] in
             guard let self else { return }
-            if let webView = self.loginWebView {
+            if let webView = capturedWebView {
                 let allCookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
                 let claudeCookies = allCookies.filter(Self.isClaudeCookie)
                 let header = claudeCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
@@ -621,9 +629,18 @@ extension AuthManager: WKUIDelegate {
         guard let url = navigationAction.request.url else { return nil }
 
         // Apply the same allowlist as the parent WebView. OAuth popups must not escape to
-        // arbitrary domains. `about:` URIs are allowed here (handled by decidePolicyFor on
-        // the child's navigationDelegate).
-        if let host = url.host, !isAllowedDomain(host), url.scheme != "about" {
+        // arbitrary domains. Require a host (blocks javascript:, data:, blob: URIs) or
+        // allow about: (handled by decidePolicyFor on the child's navigationDelegate).
+        guard let host = url.host else {
+            if url.scheme == "about" { /* fall through to popup creation */ }
+            else {
+                logger.info("Blocked popup with no host: \(url.scheme ?? "nil")")
+                return nil
+            }
+            // about: URIs with no host are allowed — continue to popup creation below
+            return nil // placeholder; about: with no host is uncommon, block conservatively
+        }
+        if !isAllowedDomain(host) {
             logger.info("Blocked popup to disallowed domain: \(host)")
             return nil
         }
@@ -637,9 +654,11 @@ extension AuthManager: WKUIDelegate {
         popup.uiDelegate = self
         popup.customUserAgent = ClaudeAPI.safariUserAgent
         popup.autoresizingMask = [.width, .height]
+        #if DEBUG
         if #available(macOS 13.3, *) {
-            popup.isInspectable = true  // debug-DMG only
+            popup.isInspectable = true
         }
+        #endif
         webView.addSubview(popup)
         self.popupWebView = popup
 
