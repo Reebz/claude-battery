@@ -162,6 +162,9 @@ final class AuthManagerTests: XCTestCase {
 
         await auth.fetchOrganizationId()
 
+        // With multiple orgs and no login window (test context), the org picker
+        // returns nil because loginWindowController is nil. This triggers
+        // handleOrgDiscoveryFailure, so no account is created.
         let store = auth.accountStore
         XCTAssertEqual(store.accounts.count, 0,
                        "No account created when org picker has no window")
@@ -344,6 +347,96 @@ final class AuthManagerTests: XCTestCase {
     func testIsDashboardURL_httpScheme() {
         let url = URL(string: "http://claude.ai/chat")!
         XCTAssertFalse(AuthManager.isDashboardURL(url))
+    }
+
+    // MARK: - onAuthSuccess callback
+
+    @MainActor
+    func testOnAuthSuccess_firesAfterSingleOrgAuth() async {
+        let auth = makeAuthManager()
+        var callbackFired = false
+        auth.onAuthSuccess = { callbackFired = true }
+
+        let json = """
+        [{"uuid": "org-success-111"}]
+        """.data(using: .utf8)!
+
+        mockSession.responseData = json
+        mockSession.responseStatusCode = 200
+        auth.pendingSessionKey = "sk-new"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertTrue(callbackFired, "onAuthSuccess should fire after single-org auth")
+    }
+
+    @MainActor
+    func testOnAuthSuccess_firesAfterReAuthToSameOrg() async {
+        let auth = makeAuthManager()
+        let store = auth.accountStore
+
+        // Pre-populate an account
+        let existing = Account(email: "test@test.com", sessionKey: "sk-old", organizationId: "org-reauth-789")
+        _ = store.addAccount(existing)
+
+        var callbackFired = false
+        auth.onAuthSuccess = { callbackFired = true }
+
+        let json = """
+        [{"uuid": "org-reauth-789"}]
+        """.data(using: .utf8)!
+
+        mockSession.responseData = json
+        mockSession.responseStatusCode = 200
+        auth.pendingSessionKey = "sk-refreshed"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertTrue(callbackFired, "onAuthSuccess should fire after re-auth to same org")
+    }
+
+    @MainActor
+    func testOnAuthSuccess_doesNotFireOnFailure() async {
+        let auth = makeAuthManager()
+        var callbackFired = false
+        auth.onAuthSuccess = { callbackFired = true }
+
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 401
+        auth.pendingSessionKey = "sk-bad"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertFalse(callbackFired, "onAuthSuccess should NOT fire on auth failure")
+    }
+
+    @MainActor
+    func testOnAuthSuccess_doesNotFireOnEmptyOrgs() async {
+        let auth = makeAuthManager()
+        var callbackFired = false
+        auth.onAuthSuccess = { callbackFired = true }
+
+        mockSession.responseData = "[]".data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        auth.pendingSessionKey = "sk-empty"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertFalse(callbackFired, "onAuthSuccess should NOT fire when no orgs found")
+    }
+
+    @MainActor
+    func testOnAuthSuccess_doesNotFireOnNetworkError() async {
+        let auth = makeAuthManager()
+        var callbackFired = false
+        auth.onAuthSuccess = { callbackFired = true }
+
+        mockSession.responseError = URLError(.notConnectedToInternet)
+        auth.pendingSessionKey = "sk-offline"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertFalse(callbackFired, "onAuthSuccess should NOT fire on network error")
     }
 
     // MARK: - LoginState equality
