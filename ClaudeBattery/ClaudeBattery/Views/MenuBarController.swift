@@ -97,10 +97,10 @@ class MenuBarController: NSObject {
         // Without these, every @Published write (even identical values) triggers updateIcon().
         usageService.$latestUsage
             .combineLatest(usageService.$consecutiveFailures, accountStore.$activeAccountId)
-            .throttle(for: .milliseconds(500), scheduler: RunLoop.main, latest: true)
             .removeDuplicates { prev, next in
                 prev.0 == next.0 && prev.1 == next.1 && prev.2 == next.2
             }
+            .throttle(for: .milliseconds(500), scheduler: RunLoop.main, latest: true)
             .receive(on: RunLoop.main)
             .sink { [weak self] usage, _, activeId in
                 self?.updateIcon(usage, isAuthenticated: activeId != nil)
@@ -159,16 +159,22 @@ class MenuBarController: NSObject {
                 self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated)
             }
         }
+        stalenessTimer?.tolerance = 30
 
-        // Per-minute counter flush. Emits counts via os_log .notice so the values
+        // Per-minute counter flush, offset by 30 seconds from the staleness timer so
+        // counter windows capture the staleness timer's work mid-window rather than
+        // resetting at the same moment. Emits counts via os_log .notice so the values
         // survive in the persistent log store and can be retrieved from affected
         // users via `log show` or Console.app filtered by subsystem + category.
-        counterFlushTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        counterFlushTimer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.flushCounters()
             }
         }
+        counterFlushTimer?.tolerance = 30
+        counterFlushTimer?.fireDate = Date(timeIntervalSinceNow: 30)
+        if let counterFlushTimer { RunLoop.main.add(counterFlushTimer, forMode: .common) }
     }
 
     private func flushCounters() {
@@ -359,8 +365,9 @@ struct IconSignature: Equatable {
 
 extension MenuBarController {
     /// Pure mapping from updateIcon inputs to the render branch that will be drawn.
-    /// Mirrors updateIcon's if-chain exactly so the signature composed from this
-    /// output is a faithful representation of what appears on screen.
+    /// Intentionally checks error (>=10 failures) before stale — 10+ failures is an
+    /// error state regardless of staleness. This differs from the pre-refactor ordering
+    /// where stale was checked first, but error-first is more correct semantically.
     nonisolated static func renderState(
         isAuthenticated: Bool,
         usage: UsageData?,
