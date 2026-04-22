@@ -28,6 +28,7 @@ class AuthManager: NSObject, ObservableObject {
     private var hasCapturedSession = false
     // internal for @testable access in AuthManagerTests
     var pendingSessionKey: String?
+    var onAuthSuccess: (() -> Void)?
 
     init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
         self.storage = storage
@@ -323,10 +324,11 @@ class AuthManager: NSObject, ObservableObject {
                 return
             }
 
-            // Success — clean up and close window
+            // Success — clean up, close window, and notify
             pendingSessionKey = nil
             loginState = .idle
             stopLoginWindow()
+            onAuthSuccess?()
         } catch {
             guard !Task.isCancelled else { return }
             logger.error("Org discovery failed: \(error.localizedDescription)")

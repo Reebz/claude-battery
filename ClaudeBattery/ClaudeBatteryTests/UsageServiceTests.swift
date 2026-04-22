@@ -460,6 +460,57 @@ final class UsageServicePollTests: XCTestCase {
         XCTAssertEqual(extra.percentage, 75.0, accuracy: 0.01)
     }
 
+    // MARK: - Auth failure clears latestUsage
+
+    @MainActor
+    func testPoll401_clearsLatestUsage() async {
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        // First, get some usage data
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        await service.pollUsage()
+        XCTAssertNotNil(service.latestUsage, "Should have usage data after successful poll")
+
+        // Now simulate auth failure
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 401
+        await service.pollUsage()
+
+        XCTAssertTrue(service.authFailed)
+        XCTAssertNil(service.latestUsage,
+                     "latestUsage should be cleared on auth failure so popover shows re-auth screen")
+    }
+
+    // MARK: - switchAccount resets authFailed
+
+    @MainActor
+    func testSwitchAccount_resetsAuthFailedAndConsecutiveFailures() async {
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        // Simulate auth failure state
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 401
+        await service.pollUsage()
+        XCTAssertTrue(service.authFailed)
+        XCTAssertEqual(service.consecutiveFailures, 1)
+
+        // switchAccount should reset everything
+        service.switchAccount()
+
+        XCTAssertFalse(service.authFailed, "switchAccount should clear authFailed")
+        XCTAssertEqual(service.consecutiveFailures, 0, "switchAccount should reset consecutiveFailures")
+        XCTAssertNil(service.latestUsage, "switchAccount should clear latestUsage")
+    }
+
     // MARK: - Helpers
 
     private func fixtureData(_ name: String) -> Data {
