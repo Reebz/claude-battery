@@ -280,6 +280,7 @@ final class UsageServicePollTests: XCTestCase {
     private var storage: StorageService!
     private var accountStore: AccountStore!
 
+    /// Shared test account.
     private let testAccount = Account(
         email: "test@example.com",
         sessionKey: "sk-ant-test-key",

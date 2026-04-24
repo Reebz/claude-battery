@@ -167,7 +167,7 @@ final class AuthManagerTests: XCTestCase {
         // handleOrgDiscoveryFailure, so no account is created.
         let store = auth.accountStore
         XCTAssertEqual(store.accounts.count, 0,
-                       "No account is created when the org picker has no window to attach to")
+                       "No account created when org picker has no window")
     }
 
     // MARK: - fetchOrganizationId: Error Path — 401 sets error state
