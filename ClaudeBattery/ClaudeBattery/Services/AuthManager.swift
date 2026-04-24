@@ -23,6 +23,7 @@ class AuthManager: NSObject, ObservableObject {
     private var loginWindowController: NSWindowController?
     private var loginTimeoutTask: Task<Void, Never>?
     private var orgDiscoveryTask: Task<Void, Never>?
+    private var cookieEnumerationTask: Task<Void, Never>?
     private var cookiePollTimer: Timer?
     private var urlObservation: NSKeyValueObservation?
     private var hasCapturedSession = false
@@ -232,6 +233,10 @@ class AuthManager: NSObject, ObservableObject {
     private func stopLoginWindow() {
         loginTimeoutTask?.cancel()
         loginTimeoutTask = nil
+        cookieEnumerationTask?.cancel()
+        cookieEnumerationTask = nil
+        orgDiscoveryTask?.cancel()
+        orgDiscoveryTask = nil
         cookiePollTimer?.invalidate()
         cookiePollTimer = nil
         urlObservation?.invalidate()
@@ -288,15 +293,17 @@ class AuthManager: NSObject, ObservableObject {
         // Capture loginWebView before the first await so a concurrent stopLoginWindow call
         // that nils the property does not cause us to skip cookie enumeration (COR-002).
         let capturedWebView = self.loginWebView
-        Task { [weak self] in
+        cookieEnumerationTask = Task { [weak self] in
             guard let self else { return }
             if let webView = capturedWebView {
                 let allCookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
+                guard !Task.isCancelled else { return }
                 let claudeCookies = allCookies.filter(Self.isClaudeCookie)
                 let header = claudeCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
                 self.pendingCookieHeader = header.isEmpty ? nil : header
                 logger.info("Captured \(claudeCookies.count) .claude.ai cookies for API requests")
             }
+            guard !Task.isCancelled else { return }
             self.orgDiscoveryTask = Task { await self.fetchOrganizationId() }
         }
     }
@@ -628,21 +635,20 @@ extension AuthManager: WKUIDelegate {
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard let url = navigationAction.request.url else { return nil }
 
-        // Apply the same allowlist as the parent WebView. OAuth popups must not escape to
-        // arbitrary domains. Require a host (blocks javascript:, data:, blob: URIs) or
-        // allow about: (handled by decidePolicyFor on the child's navigationDelegate).
-        guard let host = url.host else {
-            if url.scheme == "about" { /* fall through to popup creation */ }
-            else {
-                logger.info("Blocked popup with no host: \(url.scheme ?? "nil")")
+        // Allow about:blank/about:srcdoc (Google OAuth bootstraps popups at about:blank
+        // before navigating to accounts.google.com). For all other URLs, apply the same
+        // domain allowlist as the parent WebView.
+        if url.scheme == "about" {
+            let abs = url.absoluteString
+            guard abs == "about:blank" || abs.hasPrefix("about:blank") || abs.hasPrefix("about:srcdoc") else {
+                logger.info("Blocked popup to unusual about: URI: \(abs)")
                 return nil
             }
-            // about: URIs with no host are allowed — continue to popup creation below
-            return nil // placeholder; about: with no host is uncommon, block conservatively
-        }
-        if !isAllowedDomain(host) {
-            logger.info("Blocked popup to disallowed domain: \(host)")
-            return nil
+        } else {
+            guard let host = url.host, isAllowedDomain(host) else {
+                logger.info("Blocked popup to disallowed domain: \(url.host ?? url.scheme ?? "nil")")
+                return nil
+            }
         }
 
         // Tear down any previous popup before creating a new one.
@@ -707,6 +713,7 @@ extension AuthManager: WKUIDelegate {
 
 // MARK: - WKScriptMessageHandler (debug-DMG netlog)
 
+#if DEBUG
 extension AuthManager: WKScriptMessageHandler {
     nonisolated func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "claudebatteryNetLog" else { return }
@@ -716,11 +723,10 @@ extension AuthManager: WKScriptMessageHandler {
         } else {
             body = String(describing: message.body)
         }
-        // `.public` formatting so Release builds emit the literal payload to Console.app,
-        // not the `<private>` placeholder that Logger applies by default.
         logger.info("NetLog: \(body, privacy: .public)")
     }
 }
+#endif
 
 // MARK: - WKHTTPCookieStoreObserver
 
@@ -740,10 +746,6 @@ extension AuthManager: WKHTTPCookieStoreObserver {
 
 extension AuthManager: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
-        // Cancel in-flight org discovery if user closes window
-        orgDiscoveryTask?.cancel()
-        orgDiscoveryTask = nil
-
         // Reset auth state so user can try again
         if loginState == .signingIn {
             hasCapturedSession = false
@@ -752,19 +754,8 @@ extension AuthManager: NSWindowDelegate {
         }
         loginState = .idle
 
-        loginTimeoutTask?.cancel()
-        loginTimeoutTask = nil
-        cookiePollTimer?.invalidate()
-        cookiePollTimer = nil
-        urlObservation?.invalidate()
-        urlObservation = nil
-        popupWebView?.stopLoading()
-        popupWebView?.removeFromSuperview()
-        popupWebView = nil
-        loginWebView?.stopLoading()
-        loginWebView?.configuration.websiteDataStore.httpCookieStore.remove(self)
-        loginWebView = nil
-        loginWindowController = nil
+        // Delegate all resource cleanup to stopLoginWindow (single teardown path)
+        stopLoginWindow()
     }
 }
 

@@ -54,7 +54,7 @@ enum ClaudeAPI {
     /// Used at sign-out and as the first step of `activateCookies`.
     static func clearClaudeCookies() {
         cookieStorage.cookies?.forEach { cookie in
-            if cookie.domain == "claude.ai" || cookie.domain == ".claude.ai" || cookie.domain.hasSuffix(".claude.ai") {
+            if cookie.domain == "claude.ai" || cookie.domain == ".claude.ai" {
                 cookieStorage.deleteCookie(cookie)
             }
         }

@@ -185,6 +185,8 @@ class UsageService: NSObject, ObservableObject {
                 }
             }
 
+            guard !Task.isCancelled else { return }
+
             latestUsage = UsageData(from: usage, prepaidCredits: prepaidCredits)
             lastSuccessfulFetch = Date()
             consecutiveFailures = 0
