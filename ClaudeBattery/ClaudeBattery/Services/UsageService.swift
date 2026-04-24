@@ -190,8 +190,8 @@ class UsageService: NSObject, ObservableObject {
 
             latestUsage = UsageData(from: usage, prepaidCredits: prepaidCredits)
             lastSuccessfulFetch = Date()
-            consecutiveFailures = 0
-            authFailed = false
+            if consecutiveFailures != 0 { consecutiveFailures = 0 }
+            if authFailed { authFailed = false }
 
             if let weeklyRemaining = latestUsage?.weeklyRemaining {
                 checkAndNotify(account: account, remaining: weeklyRemaining)
@@ -311,7 +311,7 @@ struct UsageTier: Codable {
     }
 }
 
-struct ExtraUsageData {
+struct ExtraUsageData: Equatable {
     let spent: Double
     let limit: Double
     let percentage: Double
@@ -328,7 +328,7 @@ struct ExtraUsageData {
     }
 }
 
-struct UsageData {
+struct UsageData: Equatable {
     let weeklyRemaining: Double
     let weeklyResetDate: Date?
     let sessionRemaining: Double
