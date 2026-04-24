@@ -756,7 +756,11 @@ extension AuthManager: NSWindowDelegate {
         }
         loginState = .idle
 
-        // Delegate all resource cleanup to stopLoginWindow (single teardown path)
+        // Nil the window controller BEFORE calling stopLoginWindow to break the
+        // recursion cycle: stopLoginWindow calls close() which triggers windowWillClose.
+        loginWindowController = nil
+
+        // Delegate remaining resource cleanup to stopLoginWindow (single teardown path)
         stopLoginWindow()
     }
 }
