@@ -42,6 +42,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.authManager.handleAuthFailure()
         }
 
+        // Wire auth success callback — restarts polling after any successful
+        // authentication, including re-auth to the same org where $activeAccountId
+        // doesn't change and the Combine subscriber below won't fire.
+        authManager.onAuthSuccess = { [weak self] in
+            self?.usageService.switchAccount()
+        }
+
         updateChecker = UpdateChecker()
         updateChecker.startChecking()
 
@@ -55,9 +62,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Set notification delegate early
         UNUserNotificationCenter.current().delegate = usageService
 
-        // Start polling if we have an active account
+        // Start polling if we have an active account, or auto-present
+        // sign-in if this is a fresh install with no accounts
         if accountStore.activeAccount != nil {
             usageService.startPolling()
+        } else if accountStore.accounts.isEmpty {
+            authManager.presentLogin()
         }
 
         // Observe active account changes to start/stop polling

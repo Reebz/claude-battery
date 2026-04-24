@@ -162,6 +162,9 @@ final class AuthManagerTests: XCTestCase {
 
         await auth.fetchOrganizationId()
 
+        // With multiple orgs and no login window (test context), the org picker
+        // returns nil because loginWindowController is nil. This triggers
+        // handleOrgDiscoveryFailure, so no account is created.
         let store = auth.accountStore
         XCTAssertEqual(store.accounts.count, 0,
                        "No account is created when the org picker has no window to attach to")

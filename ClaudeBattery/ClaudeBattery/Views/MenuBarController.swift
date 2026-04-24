@@ -73,9 +73,11 @@ class MenuBarController: NSObject {
     private func setupObservers() {
         usageService.$latestUsage
             .combineLatest(usageService.$consecutiveFailures, accountStore.$activeAccountId)
+            .combineLatest(usageService.$authFailed)
             .receive(on: RunLoop.main)
-            .sink { [weak self] usage, _, activeId in
-                self?.updateIcon(usage, isAuthenticated: activeId != nil)
+            .sink { [weak self] combined, authFailed in
+                let (usage, _, activeId) = combined
+                self?.updateIcon(usage, isAuthenticated: activeId != nil, authFailed: authFailed)
             }
             .store(in: &cancellables)
 
@@ -87,7 +89,7 @@ class MenuBarController: NSObject {
                 guard let self else { return }
                 let currentStyle = UserDefaults.standard.string(forKey: "iconStyle") ?? IconStyle.dualHorizontal.rawValue
                 guard currentStyle != self.lastRenderedStyle else { return }
-                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated)
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
             }
         }
 
@@ -99,7 +101,7 @@ class MenuBarController: NSObject {
             guard change.oldValue?.name != change.newValue?.name else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated)
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
             }
         }
     }
@@ -193,7 +195,7 @@ class MenuBarController: NSObject {
 
     // MARK: - Icon Rendering
 
-    private func updateIcon(_ usage: UsageData?, isAuthenticated: Bool) {
+    private func updateIcon(_ usage: UsageData?, isAuthenticated: Bool, authFailed: Bool = false) {
         let style = IconStyle(rawValue: iconStyleRaw) ?? .dualHorizontal
         let renderer = style.renderer
         let color = iconColor
@@ -201,6 +203,8 @@ class MenuBarController: NSObject {
 
         if !isAuthenticated {
             image = renderer.makeUnauthenticatedIcon(color: color)
+        } else if authFailed {
+            image = renderer.makeStatusIcon(text: "!", color: color, alpha: 0.5)
         } else if let usage = usage {
             image = renderer.makeBatteryIcon(usage: usage, color: color)
         } else if usageService.consecutiveFailures >= 10 {

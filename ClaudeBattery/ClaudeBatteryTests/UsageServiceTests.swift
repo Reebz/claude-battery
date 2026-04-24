@@ -544,7 +544,6 @@ final class UsageServicePollTests: XCTestCase {
     func testPoll200WithPrepaidCredits_populatesPrepaidBalance() async {
         mockSession.responseData = fixtureData("usage_full")
         mockSession.responseStatusCode = 200
-        // Override the prepaid credits endpoint to return valid credits
         mockSession.urlOverrides["prepaid/credits"] = (
             data: """
             {"amount": 2500}
@@ -574,7 +573,6 @@ final class UsageServicePollTests: XCTestCase {
     func testPoll200WithCredits401_prepaidBalanceIsNil() async {
         mockSession.responseData = fixtureData("usage_full")
         mockSession.responseStatusCode = 200
-        // Override credits endpoint to return 401
         mockSession.urlOverrides["prepaid/credits"] = (
             data: Data(),
             statusCode: 401
@@ -599,7 +597,6 @@ final class UsageServicePollTests: XCTestCase {
     func testPoll200WithMalformedCredits_prepaidBalanceIsNil() async {
         mockSession.responseData = fixtureData("usage_full")
         mockSession.responseStatusCode = 200
-        // Override credits endpoint to return malformed JSON
         mockSession.urlOverrides["prepaid/credits"] = (
             data: "not json".data(using: .utf8)!,
             statusCode: 200
@@ -616,6 +613,57 @@ final class UsageServicePollTests: XCTestCase {
         XCTAssertNotNil(service.latestUsage)
         XCTAssertNil(service.latestUsage?.prepaidBalance,
                      "Prepaid balance should be nil when credits response is malformed")
+    }
+
+    // MARK: - Auth failure clears latestUsage
+
+    @MainActor
+    func testPoll401_clearsLatestUsage() async {
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        // First, get some usage data
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        await service.pollUsage()
+        XCTAssertNotNil(service.latestUsage, "Should have usage data after successful poll")
+
+        // Now simulate auth failure
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 401
+        await service.pollUsage()
+
+        XCTAssertTrue(service.authFailed)
+        XCTAssertNil(service.latestUsage,
+                     "latestUsage should be cleared on auth failure so popover shows re-auth screen")
+    }
+
+    // MARK: - switchAccount resets authFailed
+
+    @MainActor
+    func testSwitchAccount_resetsAuthFailedAndConsecutiveFailures() async {
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        // Simulate auth failure state
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 401
+        await service.pollUsage()
+        XCTAssertTrue(service.authFailed)
+        XCTAssertEqual(service.consecutiveFailures, 1)
+
+        // switchAccount should reset everything
+        service.switchAccount()
+
+        XCTAssertFalse(service.authFailed, "switchAccount should clear authFailed")
+        XCTAssertEqual(service.consecutiveFailures, 0, "switchAccount should reset consecutiveFailures")
+        XCTAssertNil(service.latestUsage, "switchAccount should clear latestUsage")
     }
 
     // MARK: - Helpers
