@@ -279,4 +279,40 @@ final class UpdateCheckerTests: XCTestCase {
         XCTAssertTrue(mockSession.capturedRequests.isEmpty)
         XCTAssertNil(checker.availableVersion)
     }
+
+    // MARK: - Version Comparison Tests
+
+    func testIsNewerVersion_newerMajor() {
+        XCTAssertTrue(UpdateChecker.isNewerVersion("2.0", than: "1.45"))
+    }
+
+    func testIsNewerVersion_newerMinor() {
+        XCTAssertTrue(UpdateChecker.isNewerVersion("1.46", than: "1.45"))
+    }
+
+    func testIsNewerVersion_newerPatch() {
+        XCTAssertTrue(UpdateChecker.isNewerVersion("1.45.1", than: "1.45"))
+    }
+
+    func testIsNewerVersion_equal() {
+        XCTAssertFalse(UpdateChecker.isNewerVersion("1.45", than: "1.45"))
+    }
+
+    func testIsNewerVersion_equalWithPrecisionMismatch() {
+        XCTAssertFalse(UpdateChecker.isNewerVersion("1.45.0", than: "1.45"),
+                       "1.45.0 and 1.45 should be equal — the reported bug")
+    }
+
+    func testIsNewerVersion_older() {
+        XCTAssertFalse(UpdateChecker.isNewerVersion("1.44", than: "1.45"))
+    }
+
+    func testIsNewerVersion_numericNotLexicographic() {
+        XCTAssertTrue(UpdateChecker.isNewerVersion("2.0", than: "1.9"),
+                      "2.0 > 1.9 numerically (not '2.0' < '1.9' lexicographically)")
+    }
+
+    func testIsNewerVersion_threeComponentEqual() {
+        XCTAssertFalse(UpdateChecker.isNewerVersion("1.45.0", than: "1.45.0"))
+    }
 }

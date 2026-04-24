@@ -108,7 +108,7 @@ class UpdateChecker: NSObject, ObservableObject {
                 return
             }
 
-            if remoteVersion.compare(currentVersion, options: .numeric) == .orderedDescending {
+            if Self.isNewerVersion(remoteVersion, than: currentVersion) {
                 availableVersion = remoteVersion
                 downloadURL = parsedURL
                 logger.info("Update available: v\(remoteVersion)")
@@ -123,6 +123,25 @@ class UpdateChecker: NSObject, ObservableObject {
 
     private func isValidVersion(_ version: String) -> Bool {
         version.range(of: #"^\d+\.\d+(\.\d+)?$"#, options: .regularExpression) != nil
+    }
+
+    /// Component-wise version comparison. Splits on ".", pads to equal length with
+    /// zeros, then compares each component as an integer. Returns true if `remote`
+    /// is strictly newer than `current`. Handles precision mismatches correctly:
+    /// "1.45" vs "1.45.0" → equal (not newer).
+    static func isNewerVersion(_ remote: String, than current: String) -> Bool {
+        var remoteComponents = remote.split(separator: ".").compactMap { Int($0) }
+        var currentComponents = current.split(separator: ".").compactMap { Int($0) }
+
+        let maxLength = max(remoteComponents.count, currentComponents.count)
+        while remoteComponents.count < maxLength { remoteComponents.append(0) }
+        while currentComponents.count < maxLength { currentComponents.append(0) }
+
+        for (r, c) in zip(remoteComponents, currentComponents) {
+            if r > c { return true }
+            if r < c { return false }
+        }
+        return false // equal
     }
 
     // MARK: - Wake
