@@ -1,5 +1,16 @@
 # Change Log
 
+### v1.47
+
+**Sign-In Hardening, Bug Fixes & Prepaid Balance**
+- Fixed "Can't get signed in" (issue #7): Google OAuth popups now work correctly, full cookie header capture for Cloudflare compatibility, debug network logging for diagnosis
+- Fixed invisible menu bar icon after upgrade (issue #10): polling now restarts after re-authentication to the same org, icon shows "!" on auth failure, auto-login on first launch
+- Fixed 99.5% CPU usage with external monitors (issue #11): appearance KVO guard uses bestMatch to collapse sub-variants, IconSignature dedup prevents redundant renders, diagnostic counters for remote debugging
+- Fixed update checker false positive when comparing "1.45" vs "1.45.0"
+- Added prepaid credit balance display in the popover
+- Hardened cookie capture with dashboard URL detection for SPA navigation
+- 155 automated tests (up from 92)
+
 ### v1.45
 
 **Multi-Org Support & Login Fixes**
