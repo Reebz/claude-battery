@@ -365,7 +365,7 @@ struct PrepaidCreditsResponse: Codable {
 /// Display model for prepaid credit balance. Separate from ExtraUsageData
 /// because these are different financial concepts — prepaid is a pre-purchased
 /// balance that depletes, extra usage is pay-as-you-go overage against a cap.
-struct PrepaidBalance {
+struct PrepaidBalance: Equatable {
     let dollars: Double
 
     init?(from response: PrepaidCreditsResponse?) {
