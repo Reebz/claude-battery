@@ -198,6 +198,79 @@ final class ExtraUsageDataTests: XCTestCase {
     }
 }
 
+// MARK: - PrepaidBalance Tests
+
+final class PrepaidBalanceTests: XCTestCase {
+
+    func testPositiveAmount_convertsCentsToDollars() {
+        let response = makePrepaidResponse(amount: 3750)
+        let balance = PrepaidBalance(from: response)
+        XCTAssertNotNil(balance)
+        XCTAssertEqual(balance!.dollars, 37.50, accuracy: 0.01)
+    }
+
+    func testLargeAmount_convertsCentsToDollars() {
+        let response = makePrepaidResponse(amount: 50000)
+        let balance = PrepaidBalance(from: response)
+        XCTAssertNotNil(balance)
+        XCTAssertEqual(balance!.dollars, 500.00, accuracy: 0.01)
+    }
+
+    func testZeroAmount_returnsNil() {
+        let response = makePrepaidResponse(amount: 0)
+        XCTAssertNil(PrepaidBalance(from: response))
+    }
+
+    func testNegativeAmount_returnsNil() {
+        let response = makePrepaidResponse(amount: -100)
+        XCTAssertNil(PrepaidBalance(from: response))
+    }
+
+    func testNilResponse_returnsNil() {
+        XCTAssertNil(PrepaidBalance(from: nil))
+    }
+
+    func testNilAmount_returnsNil() {
+        let response = makePrepaidResponse(amount: nil)
+        XCTAssertNil(PrepaidBalance(from: response))
+    }
+
+    func testDecodesFromJSON() {
+        let json = """
+        {"amount": 1250}
+        """.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try! decoder.decode(PrepaidCreditsResponse.self, from: json)
+        let balance = PrepaidBalance(from: response)
+        XCTAssertNotNil(balance)
+        XCTAssertEqual(balance!.dollars, 12.50, accuracy: 0.01)
+    }
+
+    func testDecodesFromEmptyJSON() {
+        let json = "{}".data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try! decoder.decode(PrepaidCreditsResponse.self, from: json)
+        XCTAssertNil(response.amount)
+        XCTAssertNil(PrepaidBalance(from: response))
+    }
+
+    private func makePrepaidResponse(amount: Double?) -> PrepaidCreditsResponse {
+        if let amount {
+            let json = "{\"amount\": \(amount)}".data(using: .utf8)!
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try! decoder.decode(PrepaidCreditsResponse.self, from: json)
+        } else {
+            let json = "{}".data(using: .utf8)!
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try! decoder.decode(PrepaidCreditsResponse.self, from: json)
+        }
+    }
+}
+
 // MARK: - UsageService.pollUsage() Tests
 
 final class UsageServicePollTests: XCTestCase {
@@ -207,7 +280,6 @@ final class UsageServicePollTests: XCTestCase {
     private var storage: StorageService!
     private var accountStore: AccountStore!
 
-    /// Shared test account.
     private let testAccount = Account(
         email: "test@example.com",
         sessionKey: "sk-ant-test-key",
@@ -279,10 +351,16 @@ final class UsageServicePollTests: XCTestCase {
         let request = mockSession.lastRequest
         XCTAssertNotNil(request)
         XCTAssertTrue(request!.url!.absoluteString.contains("org-test-123"))
-        XCTAssertEqual(
-            request!.value(forHTTPHeaderField: "Cookie"),
-            "sessionKey=sk-ant-test-key"
-        )
+
+        // Cookie is managed via ClaudeAPI's per-session jar (primed in setUp via
+        // accountStore.addAccount -> ClaudeAPI.activateCookies). URLSession constructs
+        // the Cookie header on dispatch, so URLRequest.Cookie is nil here by design.
+        XCTAssertNil(request!.value(forHTTPHeaderField: "Cookie"))
+
+        let cookies = ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: request!.url!) ?? []
+        let sessionCookie = cookies.first { $0.name == "sessionKey" }
+        XCTAssertNotNil(sessionCookie, "Cookie jar should have been primed with sessionKey on account activation")
+        XCTAssertEqual(sessionCookie?.value, "sk-ant-test-key")
     }
 
     // MARK: - 401 auth failure
@@ -458,6 +536,86 @@ final class UsageServicePollTests: XCTestCase {
         XCTAssertEqual(extra.limit, 100.0, accuracy: 0.01)
         // 7500 / 10000 * 100 = 75%
         XCTAssertEqual(extra.percentage, 75.0, accuracy: 0.01)
+    }
+
+    // MARK: - Prepaid credits integration
+
+    @MainActor
+    func testPoll200WithPrepaidCredits_populatesPrepaidBalance() async {
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        // Override the prepaid credits endpoint to return valid credits
+        mockSession.urlOverrides["prepaid/credits"] = (
+            data: """
+            {"amount": 2500}
+            """.data(using: .utf8)!,
+            statusCode: 200
+        )
+
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        await service.pollUsage()
+
+        XCTAssertNotNil(service.latestUsage)
+        let balance = service.latestUsage?.prepaidBalance
+        XCTAssertNotNil(balance,
+                        "Prepaid balance should be populated when credits endpoint returns valid data")
+        if let dollars = balance?.dollars {
+            XCTAssertEqual(dollars, 25.0, accuracy: 0.01,
+                           "2500 cents should convert to $25.00")
+        }
+    }
+
+    @MainActor
+    func testPoll200WithCredits401_prepaidBalanceIsNil() async {
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        // Override credits endpoint to return 401
+        mockSession.urlOverrides["prepaid/credits"] = (
+            data: Data(),
+            statusCode: 401
+        )
+
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        await service.pollUsage()
+
+        XCTAssertNotNil(service.latestUsage)
+        XCTAssertNil(service.latestUsage?.prepaidBalance,
+                     "Prepaid balance should be nil when credits endpoint returns 401")
+        XCTAssertEqual(service.consecutiveFailures, 0,
+                       "Credits 401 should not affect consecutiveFailures")
+    }
+
+    @MainActor
+    func testPoll200WithMalformedCredits_prepaidBalanceIsNil() async {
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        // Override credits endpoint to return malformed JSON
+        mockSession.urlOverrides["prepaid/credits"] = (
+            data: "not json".data(using: .utf8)!,
+            statusCode: 200
+        )
+
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        await service.pollUsage()
+
+        XCTAssertNotNil(service.latestUsage)
+        XCTAssertNil(service.latestUsage?.prepaidBalance,
+                     "Prepaid balance should be nil when credits response is malformed")
     }
 
     // MARK: - Helpers
