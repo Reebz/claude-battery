@@ -142,6 +142,7 @@ class UsageService: NSObject, ObservableObject {
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
                 consecutiveFailures += 1
                 authFailed = true
+                latestUsage = nil
                 logger.warning("Auth failure (HTTP \(httpResponse.statusCode)) for \(account.displayName)")
                 onAuthFailure?()
                 return

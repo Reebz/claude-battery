@@ -40,6 +40,7 @@ class AuthManager: NSObject, ObservableObject {
     /// shutdown. Required for "Continue with Google" - without it, `window.open()` returns nil
     /// and Google OAuth fails immediately.
     private var popupWebView: WKWebView?
+    var onAuthSuccess: (() -> Void)?
 
     init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
         self.storage = storage
@@ -413,11 +414,12 @@ class AuthManager: NSObject, ObservableObject {
                 return
             }
 
-            // Success — clean up and close window
+            // Success — clean up, close window, and notify
             pendingSessionKey = nil
             pendingCookieHeader = nil
             loginState = .idle
             stopLoginWindow()
+            onAuthSuccess?()
         } catch {
             guard !Task.isCancelled else { return }
             logger.error("Org discovery failed: \(error.localizedDescription)")
