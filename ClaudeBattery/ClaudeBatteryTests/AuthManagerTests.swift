@@ -146,7 +146,7 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(auth.loginState, .idle, "Should return to idle after success")
     }
 
-    // MARK: - fetchOrganizationId: Happy Path — multiple orgs uses first
+    // MARK: - fetchOrganizationId: Edge Case — multiple orgs with no window fails gracefully
 
     @MainActor
     func testFetchOrganizationId_multipleOrgsWithNoWindowFailsGracefully() async {
@@ -302,6 +302,48 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(store.accounts.first?.sessionKey, "sk-refreshed-key",
                        "Session key should be updated on re-auth")
         XCTAssertEqual(auth.loginState, .idle)
+    }
+
+    // MARK: - isDashboardURL
+
+    func testIsDashboardURL_chatPath() {
+        let url = URL(string: "https://claude.ai/chat")!
+        XCTAssertTrue(AuthManager.isDashboardURL(url))
+    }
+
+    func testIsDashboardURL_chatSubpath() {
+        let url = URL(string: "https://claude.ai/chat/abc-123")!
+        XCTAssertTrue(AuthManager.isDashboardURL(url))
+    }
+
+    func testIsDashboardURL_newPath() {
+        let url = URL(string: "https://claude.ai/new")!
+        XCTAssertTrue(AuthManager.isDashboardURL(url))
+    }
+
+    func testIsDashboardURL_rootPath() {
+        let url = URL(string: "https://claude.ai/")!
+        XCTAssertTrue(AuthManager.isDashboardURL(url))
+    }
+
+    func testIsDashboardURL_nonDashboardPath() {
+        let url = URL(string: "https://claude.ai/api/organizations")!
+        XCTAssertFalse(AuthManager.isDashboardURL(url))
+    }
+
+    func testIsDashboardURL_loginPath() {
+        let url = URL(string: "https://claude.ai/login")!
+        XCTAssertFalse(AuthManager.isDashboardURL(url))
+    }
+
+    func testIsDashboardURL_wrongHost() {
+        let url = URL(string: "https://other.com/chat")!
+        XCTAssertFalse(AuthManager.isDashboardURL(url))
+    }
+
+    func testIsDashboardURL_httpScheme() {
+        let url = URL(string: "http://claude.ai/chat")!
+        XCTAssertFalse(AuthManager.isDashboardURL(url))
     }
 
     // MARK: - LoginState equality
