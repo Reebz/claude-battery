@@ -170,7 +170,24 @@ class UsageService: NSObject, ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            latestUsage = UsageData(from: usage)
+            // Fetch prepaid credit balance (separate endpoint, optional — silently nil if unavailable)
+            var prepaidCredits: PrepaidCreditsResponse?
+            let creditsPath = "/api/organizations/\(account.organizationId)/prepaid/credits"
+            if let creditsRequest = ClaudeAPI.makeRequest(path: creditsPath, sessionKey: account.sessionKey) {
+                if let (creditsData, creditsResponse) = try? await session.data(for: creditsRequest),
+                   let creditsHttp = creditsResponse as? HTTPURLResponse,
+                   (200...299).contains(creditsHttp.statusCode) {
+                    #if DEBUG
+                    let creditsBody = String(data: creditsData, encoding: .utf8) ?? "(non-utf8)"
+                    logger.info("Prepaid credits response (\(creditsData.count) bytes): \(creditsBody.prefix(500))")
+                    #endif
+                    prepaidCredits = try? decoder.decode(PrepaidCreditsResponse.self, from: creditsData)
+                }
+            }
+
+            guard !Task.isCancelled else { return }
+
+            latestUsage = UsageData(from: usage, prepaidCredits: prepaidCredits)
             lastSuccessfulFetch = Date()
             consecutiveFailures = 0
             authFailed = false
@@ -320,8 +337,9 @@ struct UsageData {
     let sonnetRemaining: Double
     let sonnetResetDate: Date?
     let extraUsage: ExtraUsageData?
+    let prepaidBalance: PrepaidBalance?
 
-    init(from response: UsageResponse) {
+    init(from response: UsageResponse, prepaidCredits: PrepaidCreditsResponse? = nil) {
         weeklyRemaining = max(0, min(100, 100 - (response.sevenDay?.utilization ?? 0)))
         weeklyResetDate = response.sevenDay?.resetsAt
         sessionRemaining = max(0, min(100, 100 - (response.fiveHour?.utilization ?? 0)))
@@ -331,5 +349,26 @@ struct UsageData {
         sonnetRemaining = max(0, min(100, 100 - (response.sevenDaySonnet?.utilization ?? 0)))
         sonnetResetDate = response.sevenDaySonnet?.resetsAt
         extraUsage = ExtraUsageData(from: response.extraUsage)
+        prepaidBalance = PrepaidBalance(from: prepaidCredits)
+    }
+}
+
+// MARK: - Prepaid Credits
+
+/// Raw API response from /api/organizations/{orgId}/prepaid/credits.
+/// Optional fields decode to nil automatically for accounts without prepaid.
+struct PrepaidCreditsResponse: Codable {
+    let amount: Double?
+}
+
+/// Display model for prepaid credit balance. Separate from ExtraUsageData
+/// because these are different financial concepts — prepaid is a pre-purchased
+/// balance that depletes, extra usage is pay-as-you-go overage against a cap.
+struct PrepaidBalance {
+    let dollars: Double
+
+    init?(from response: PrepaidCreditsResponse?) {
+        guard let response, let amountCents = response.amount, amountCents > 0 else { return nil }
+        self.dollars = amountCents / 100.0
     }
 }

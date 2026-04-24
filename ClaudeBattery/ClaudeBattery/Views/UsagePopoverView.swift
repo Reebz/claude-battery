@@ -49,6 +49,10 @@ struct UsagePopoverView: View {
                 extraUsageBar(extraUsage: extraUsage)
             }
 
+            if let prepaid = usage.prepaidBalance {
+                prepaidBalanceRow(balance: prepaid)
+            }
+
             LazyVGrid(columns: columns, spacing: 8) {
                 resetsCard(usage: usage)
                 modelsCard(usage: usage)
@@ -214,6 +218,24 @@ struct UsagePopoverView: View {
                 }
             }
             .frame(height: 6)
+        }
+        .padding(10)
+        .background(Color(white: 0.15))
+        .cornerRadius(12)
+    }
+
+    private func prepaidBalanceRow(balance: PrepaidBalance) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("Prepaid")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(Color(white: 0.6))
+            Spacer()
+            Text(formatCurrency(balance.dollars))
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundColor(.white)
+            Text(" balance")
+                .font(.system(size: 10, weight: .regular))
+                .foregroundColor(Color(white: 0.45))
         }
         .padding(10)
         .background(Color(white: 0.15))
