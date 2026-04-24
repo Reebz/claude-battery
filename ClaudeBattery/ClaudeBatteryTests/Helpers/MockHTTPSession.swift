@@ -11,6 +11,10 @@ final class MockHTTPSession: HTTPDataFetching, @unchecked Sendable {
     var responseStatusCode: Int = 200
     var responseError: Error?
 
+    /// URL-based response overrides. When a request URL contains a matching key,
+    /// the corresponding (data, statusCode) is returned instead of the default.
+    var urlOverrides: [String: (data: Data, statusCode: Int)] = [:]
+
     // MARK: - Request capture (actor-isolated for async safety)
 
     private let _storage = RequestStorage()
@@ -28,6 +32,21 @@ final class MockHTTPSession: HTTPDataFetching, @unchecked Sendable {
         }
 
         let url = request.url ?? URL(string: "https://claude.ai")!
+
+        // Check URL-based overrides first
+        let urlString = url.absoluteString
+        for (key, override) in urlOverrides {
+            if urlString.contains(key) {
+                let response = HTTPURLResponse(
+                    url: url,
+                    statusCode: override.statusCode,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: nil
+                )!
+                return (override.data, response)
+            }
+        }
+
         let response = HTTPURLResponse(
             url: url,
             statusCode: responseStatusCode,

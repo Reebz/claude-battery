@@ -538,6 +538,86 @@ final class UsageServicePollTests: XCTestCase {
         XCTAssertEqual(extra.percentage, 75.0, accuracy: 0.01)
     }
 
+    // MARK: - Prepaid credits integration
+
+    @MainActor
+    func testPoll200WithPrepaidCredits_populatesPrepaidBalance() async {
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        // Override the prepaid credits endpoint to return valid credits
+        mockSession.urlOverrides["prepaid/credits"] = (
+            data: """
+            {"amount": 2500}
+            """.data(using: .utf8)!,
+            statusCode: 200
+        )
+
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        await service.pollUsage()
+
+        XCTAssertNotNil(service.latestUsage)
+        let balance = service.latestUsage?.prepaidBalance
+        XCTAssertNotNil(balance,
+                        "Prepaid balance should be populated when credits endpoint returns valid data")
+        if let dollars = balance?.dollars {
+            XCTAssertEqual(dollars, 25.0, accuracy: 0.01,
+                           "2500 cents should convert to $25.00")
+        }
+    }
+
+    @MainActor
+    func testPoll200WithCredits401_prepaidBalanceIsNil() async {
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        // Override credits endpoint to return 401
+        mockSession.urlOverrides["prepaid/credits"] = (
+            data: Data(),
+            statusCode: 401
+        )
+
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        await service.pollUsage()
+
+        XCTAssertNotNil(service.latestUsage)
+        XCTAssertNil(service.latestUsage?.prepaidBalance,
+                     "Prepaid balance should be nil when credits endpoint returns 401")
+        XCTAssertEqual(service.consecutiveFailures, 0,
+                       "Credits 401 should not affect consecutiveFailures")
+    }
+
+    @MainActor
+    func testPoll200WithMalformedCredits_prepaidBalanceIsNil() async {
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        // Override credits endpoint to return malformed JSON
+        mockSession.urlOverrides["prepaid/credits"] = (
+            data: "not json".data(using: .utf8)!,
+            statusCode: 200
+        )
+
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        await service.pollUsage()
+
+        XCTAssertNotNil(service.latestUsage)
+        XCTAssertNil(service.latestUsage?.prepaidBalance,
+                     "Prepaid balance should be nil when credits response is malformed")
+    }
+
     // MARK: - Helpers
 
     private func fixtureData(_ name: String) -> Data {
