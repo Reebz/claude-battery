@@ -53,6 +53,8 @@ struct UsagePopoverView: View {
                 prepaidBalanceRow(balance: prepaid)
             }
 
+            claudeDesignRow()
+
             LazyVGrid(columns: columns, spacing: 8) {
                 resetsCard(usage: usage)
                 modelsCard(usage: usage)
@@ -179,6 +181,46 @@ struct UsagePopoverView: View {
         return .cyan
     }
 
+    static func batteryColor(remainingPercent: Double) -> Color {
+        let clamped = max(0, min(100, remainingPercent))
+        if clamped < 20 { return .red }
+        if clamped < 50 { return .orange }
+        return .green
+    }
+
+    @ViewBuilder
+    private func unifiedBarRow<Trailing: View>(
+        label: String,
+        remainingPercent: Double?,
+        @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(label)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(Color(white: 0.6))
+                Spacer()
+                trailing()
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color(white: 0.25))
+                    if let remaining = remainingPercent {
+                        let clamped = max(0, min(100, remaining))
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Self.batteryColor(remainingPercent: clamped))
+                            .frame(width: max(0, geo.size.width * clamped / 100))
+                    }
+                }
+            }
+            .frame(height: 6)
+        }
+        .padding(10)
+        .background(Color(white: 0.15))
+        .cornerRadius(12)
+    }
+
     static func makeUSDCurrencyFormatter(locale: Locale = .current) -> NumberFormatter {
         let formatter = NumberFormatter()
         formatter.numberStyle = .currency
@@ -196,53 +238,54 @@ struct UsagePopoverView: View {
     }
 
     private func extraUsageBar(extraUsage: ExtraUsageData) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Extra Usage")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(Color(white: 0.6))
-                Spacer()
-                HStack(spacing: 0) {
-                    Text(formatCurrency(extraUsage.spent))
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundColor(.white)
-                    Text(" / \(formatCurrency(extraUsage.limit))")
-                        .font(.system(size: 10, weight: .regular))
-                        .foregroundColor(Color(white: 0.45))
-                }
+        let remaining = max(0, extraUsage.limit - extraUsage.spent)
+        let remainingPercent = extraUsage.limit > 0
+            ? max(0, min(100, remaining / extraUsage.limit * 100))
+            : 0
+
+        return unifiedBarRow(label: "Extra Usage", remainingPercent: remainingPercent) {
+            HStack(spacing: 0) {
+                Text(formatCurrency(remaining))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white)
+                Text(" remaining of \(formatCurrency(extraUsage.limit))")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundColor(Color(white: 0.45))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color(white: 0.25))
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(spendColor(for: extraUsage.percentage))
-                        .frame(width: max(0, geo.size.width * extraUsage.percentage / 100))
-                }
-            }
-            .frame(height: 6)
         }
-        .padding(10)
-        .background(Color(white: 0.15))
-        .cornerRadius(12)
     }
 
-    private func prepaidBalanceRow(balance: PrepaidBalance) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text("Prepaid")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(Color(white: 0.6))
-            Spacer()
-            Text(formatCurrency(balance.dollars))
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
-                .foregroundColor(.white)
-            Text(" balance")
+    private func claudeDesignRow() -> some View {
+        unifiedBarRow(label: "Claude Design", remainingPercent: nil) {
+            Text("Coming soon")
                 .font(.system(size: 10, weight: .regular))
                 .foregroundColor(Color(white: 0.45))
         }
-        .padding(10)
-        .background(Color(white: 0.15))
-        .cornerRadius(12)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Claude Design, coming soon, no usage data yet")
+        .accessibilityHint("Claude Design usage will appear here when Anthropic exposes the API")
+    }
+
+    private func prepaidBalanceRow(balance: PrepaidBalance) -> some View {
+        let maximum = balance.maximum ?? balance.dollars
+        let remainingPercent = maximum > 0
+            ? max(0, min(100, balance.dollars / maximum * 100))
+            : 100
+
+        return unifiedBarRow(label: "Prepaid", remainingPercent: remainingPercent) {
+            HStack(spacing: 0) {
+                Text(formatCurrency(balance.dollars))
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundColor(.white)
+                Text(" remaining of \(formatCurrency(maximum))")
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundColor(Color(white: 0.45))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
     }
 
     // MARK: - States

@@ -595,6 +595,83 @@ final class UsageServicePollTests: XCTestCase {
     }
 
     @MainActor
+    func testPoll200WithPrepaidCredits_setsMaximumToObservedBalanceOnFirstPoll() async {
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        mockSession.urlOverrides["prepaid/credits"] = (
+            data: """
+            {"amount": 20000}
+            """.data(using: .utf8)!,
+            statusCode: 200
+        )
+
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        await service.pollUsage()
+
+        let balance = service.latestUsage?.prepaidBalance
+        XCTAssertNotNil(balance)
+        XCTAssertEqual(balance?.dollars ?? .nan, 200.0, accuracy: 0.01)
+        XCTAssertEqual(balance?.maximum ?? .nan, 200.0, accuracy: 0.01,
+                       "On first observation, maximum equals current balance")
+    }
+
+    @MainActor
+    func testPoll200WithPrepaidCredits_carriesPriorMaximumWhenBalanceDrops() async {
+        let activeId = accountStore.activeAccount!.id
+        storage.recordPrepaidObservation(accountId: activeId, balance: 300.0)
+
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        mockSession.urlOverrides["prepaid/credits"] = (
+            data: """
+            {"amount": 18000}
+            """.data(using: .utf8)!,
+            statusCode: 200
+        )
+
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        await service.pollUsage()
+
+        let balance = service.latestUsage?.prepaidBalance
+        XCTAssertEqual(balance?.dollars ?? .nan, 180.0, accuracy: 0.01)
+        XCTAssertEqual(balance?.maximum ?? .nan, 300.0, accuracy: 0.01,
+                       "Maximum should hold at prior HWM when current balance is lower")
+    }
+
+    @MainActor
+    func testPoll200WithCredits401_doesNotRecordPrepaidObservation() async {
+        let activeId = accountStore.activeAccount!.id
+
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        mockSession.urlOverrides["prepaid/credits"] = (
+            data: Data(),
+            statusCode: 401
+        )
+
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        await service.pollUsage()
+
+        XCTAssertNil(storage.prepaidHighWaterMark(accountId: activeId),
+                     "401 on prepaid endpoint must not write history")
+    }
+
+    @MainActor
     func testPoll200WithMalformedCredits_prepaidBalanceIsNil() async {
         mockSession.responseData = fixtureData("usage_full")
         mockSession.responseStatusCode = 200

@@ -50,6 +50,15 @@ final class StorageService {
         static let accounts = "accounts"
         static let activeAccountId = "activeAccountId"
         static let migrated = "migrated"
+        static let prepaidHistoryPrefix = "prepaidHistory."
+    }
+
+    /// One entry per calendar day per account. `date` is the start-of-day boundary
+    /// in the writer's current calendar; `maxDollars` is the highest balance observed
+    /// during that day. Window trimmed to 100 days on every write.
+    struct PrepaidHistoryEntry: Codable, Equatable {
+        let date: Date
+        let maxDollars: Double
     }
 
     init(defaults: UserDefaults = .standard, prefix: String = "cb_") {
@@ -107,6 +116,62 @@ final class StorageService {
         } else {
             defaults.removeObject(forKey: prefix + Keys.activeAccountId)
         }
+    }
+
+    // MARK: - Prepaid Balance History
+
+    /// Records an observed prepaid balance. Coalesces same-day observations to the day's
+    /// max, appends a new entry for a new day, then trims entries older than 100 days.
+    /// `@MainActor` isolated so the read-modify-write does not race when multiple
+    /// accounts poll concurrently.
+    @MainActor
+    func recordPrepaidObservation(accountId: UUID, balance: Double, observedAt: Date = Date()) {
+        guard balance >= 0 else { return }
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: observedAt)
+        guard let cutoff = calendar.date(byAdding: .day, value: -100, to: today) else { return }
+
+        var entries = readPrepaidHistory(accountId: accountId)
+        entries.removeAll { $0.date < cutoff }
+
+        if let lastIdx = entries.indices.last, entries[lastIdx].date == today {
+            if balance > entries[lastIdx].maxDollars {
+                entries[lastIdx] = PrepaidHistoryEntry(date: today, maxDollars: balance)
+            }
+        } else {
+            entries.append(PrepaidHistoryEntry(date: today, maxDollars: balance))
+        }
+
+        writePrepaidHistory(accountId: accountId, entries: entries)
+    }
+
+    /// Returns the highest observed balance within the 100-day window, or nil if no
+    /// observations have been recorded for the account.
+    @MainActor
+    func prepaidHighWaterMark(accountId: UUID) -> Double? {
+        let entries = readPrepaidHistory(accountId: accountId)
+        return entries.map { $0.maxDollars }.max()
+    }
+
+    private func prepaidHistoryStorageKey(accountId: UUID) -> String {
+        prefix + Keys.prepaidHistoryPrefix + accountId.uuidString
+    }
+
+    private func readPrepaidHistory(accountId: UUID) -> [PrepaidHistoryEntry] {
+        guard let data = defaults.data(forKey: prepaidHistoryStorageKey(accountId: accountId)) else { return [] }
+        guard let entries = try? JSONDecoder().decode([PrepaidHistoryEntry].self, from: data) else {
+            logger.error("Failed to decode prepaid history for \(accountId)")
+            return []
+        }
+        return entries
+    }
+
+    private func writePrepaidHistory(accountId: UUID, entries: [PrepaidHistoryEntry]) {
+        guard let data = try? JSONEncoder().encode(entries) else {
+            logger.error("Failed to encode prepaid history for \(accountId)")
+            return
+        }
+        defaults.set(data, forKey: prepaidHistoryStorageKey(accountId: accountId))
     }
 
     // MARK: - Migration
