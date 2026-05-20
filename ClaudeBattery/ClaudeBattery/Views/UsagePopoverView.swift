@@ -179,15 +179,17 @@ struct UsagePopoverView: View {
         return .cyan
     }
 
-    private static let currencyFormatter: NumberFormatter = {
+    static func makeUSDCurrencyFormatter(locale: Locale = .current) -> NumberFormatter {
         let formatter = NumberFormatter()
         formatter.numberStyle = .currency
-        formatter.locale = Locale.current
+        formatter.locale = locale
         formatter.currencyCode = "USD"
         formatter.maximumFractionDigits = 2
         formatter.minimumFractionDigits = 2
         return formatter
-    }()
+    }
+
+    private static let currencyFormatter: NumberFormatter = makeUSDCurrencyFormatter()
 
     private func formatCurrency(_ value: Double) -> String {
         Self.currencyFormatter.string(from: NSNumber(value: value)) ?? String(format: "$%.2f", value)
