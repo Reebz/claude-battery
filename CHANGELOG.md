@@ -1,5 +1,14 @@
 # Change Log
 
+### v1.48
+
+**Unified Usage Bars, USD Currency Fix, Claude Design Preview**
+- Extra Usage and Prepaid rows now render as battery-direction bars: green when remaining is high, transitioning to red as it depletes. Right-side text reads "$X remaining of $Y" so the meaningful number is the one in front of you.
+- Prepaid gets a real denominator: each successful poll records the observed balance into a per-account 100-day rolling high-water-mark, so the bar fills against your maximum-observed balance instead of a guess.
+- Added a "Claude Design" placeholder row between Prepaid and the Resets card. It currently shows "Coming soon" and an empty track; the row will display Claude Design usage once Anthropic exposes the data via the claude.ai usage API. Until then it is a deliberate stub.
+- Fixed currency display for users on non-USD locales (thanks to @AllDmeat for issue and patch). Anthropic charges in USD; the popover now pins the currency code to USD so ru_RU and similar users see "$" instead of their local currency code. Number separators stay locale-aware.
+- 173 automated tests (up from 155).
+
 ### v1.47
 
 **Sign-In Hardening, Bug Fixes & Prepaid Balance**
