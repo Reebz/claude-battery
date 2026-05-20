@@ -11,6 +11,13 @@ set -euo pipefail
 #        --apple-id "your@email.com" \
 #        --team-id "YOUR_TEAM_ID" \
 #        --password "app-specific-password"
+#
+# Run in the foreground. Do NOT background this with a pipe (e.g.
+# `./scripts/release.sh | tee log &`). Some harnesses report the pipeline
+# as "completed" the moment the parent shell detaches, even though the
+# script keeps running for the 5-30 min notarization wait. The script
+# writes /tmp/ClaudeBattery-build/RELEASE_COMPLETE_v$VERSION on success;
+# poll that path if you need an external done-signal.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR/../ClaudeBattery"
@@ -105,12 +112,12 @@ tell application "Finder"
         set current view of container window to icon view
         set toolbar visible of container window to false
         set statusbar visible of container window to false
-        set bounds of container window to {100, 100, 640, 400}
+        set bounds of container window to {100, 100, 820, 580}
         set theViewOptions to icon view options of container window
         set arrangement of theViewOptions to not arranged
         set icon size of theViewOptions to 128
-        set position of item "$APP_NAME.app" of container window to {140, 150}
-        set position of item "Applications" of container window to {400, 150}
+        set position of item "$APP_NAME.app" of container window to {180, 240}
+        set position of item "Applications" of container window to {540, 240}
         close
         open
         update without registering applications
@@ -163,10 +170,14 @@ else
   echo "    Manually update sha256 to: $DMG_SHA256"
 fi
 
+SENTINEL="$BUILD_DIR/RELEASE_COMPLETE_v$VERSION"
+date -u +"%Y-%m-%dT%H:%M:%SZ" > "$SENTINEL"
+
 echo ""
 echo "=== Release complete ==="
 echo "DMG: $DMG_PATH"
 echo "Downloads: $DOWNLOADS_DIR/$DMG_NAME"
+echo "Sentinel: $SENTINEL"
 echo ""
 echo "Upload to GitHub Releases:"
 echo "  gh release create v$VERSION '$DMG_PATH' --title 'v$VERSION' --notes 'Release notes here'"
