@@ -539,6 +539,27 @@ class AuthManager: NSObject, ObservableObject {
 
     // MARK: - Allowed Domains
 
+    private func isGoogleOAuthDomain(_ host: String) -> Bool {
+        if host == "google.com" ||
+            host.hasSuffix(".google.com") ||
+            host == "accounts.google.com" ||
+            host.hasSuffix(".accounts.google.com") {
+            return true
+        }
+
+        // Google OAuth may redirect to localized account hosts such as
+        // accounts.google.com.tr, accounts.google.co.uk, or accounts.google.de.
+        let labels = host.split(separator: ".")
+        guard labels.count == 3 || labels.count == 4,
+              labels[0] == "accounts",
+              labels[1] == "google",
+              labels.last?.count == 2 else {
+            return false
+        }
+
+        return labels.count == 3 || labels[2] == "com" || labels[2] == "co"
+    }
+
     private func isAllowedDomain(_ host: String) -> Bool {
         // Exact match plus `".X"` suffix for multi-label domains - rejects
         // attacker-injected prefixes like `evil.googleapis.com.attacker.com`
@@ -546,10 +567,7 @@ class AuthManager: NSObject, ObservableObject {
         host == "claude.ai" ||
         host.hasSuffix(".claude.ai") ||
         host.hasSuffix(".anthropic.com") ||
-        host == "accounts.google.com" ||
-        host.hasSuffix(".accounts.google.com") ||
-        host == "google.com" ||
-        host.hasSuffix(".google.com") ||
+        isGoogleOAuthDomain(host) ||
         host.hasSuffix(".gstatic.com") ||
         host.hasSuffix(".googleapis.com") ||
         host.hasSuffix(".googleusercontent.com") ||
