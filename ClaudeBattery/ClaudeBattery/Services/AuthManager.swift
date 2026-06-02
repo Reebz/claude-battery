@@ -551,7 +551,8 @@ class AuthManager: NSObject, ObservableObject {
         host == "accounts.google.com.tr" ||
         host.hasSuffix(".accounts.google.com.tr") ||
         host == "google.com" ||
-        host.hasSuffix(".google.com") ||host.hasSuffix(".gstatic.com") ||
+        host.hasSuffix(".google.com") ||
+        host.hasSuffix(".gstatic.com") ||
         host.hasSuffix(".googleapis.com") ||
         host.hasSuffix(".googleusercontent.com") ||
         host == "youtube.com" ||
