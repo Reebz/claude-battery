@@ -13,8 +13,8 @@ import Foundation
 ///    bearer/basic tokens, bare email addresses, cookie headers, URL query strings,
 ///    URL fragments, and UUID-shaped path segments.
 ///
-/// This is the producer-side redaction guarantee for the diagnostic log (`DiagnosticsLogger`,
-/// `OSLogStoreDumper`). Every emitted line passes through here before it is written.
+/// This is the producer-side redaction guarantee for the diagnostic log (`DiagnosticsLogger`).
+/// Every emitted line passes through here before it is written.
 enum SecretRedactor {
     /// Case-insensitive credential keys whose string values get redacted to
     /// `REDACTED_LEN_<N>`. UUID-shaped path segments are handled by the regex pass.
@@ -107,12 +107,14 @@ enum SecretRedactor {
         return nonScalarRedactionMarker
     }
 
-    /// Marker an already-redacted value carries, e.g. `REDACTED_LEN_25` or
-    /// `457f11ea...REDACTED_LEN_25`. Used to make redaction idempotent: a second pass over a
-    /// value that is already a marker must return it unchanged, otherwise the `__cf_bm` SHA
-    /// prefix and the `REDACTED_LEN_N` count would both drift each pass.
+    /// Whether `value` is EXACTLY a redaction marker this redactor produces: either the bare
+    /// `REDACTED_LEN_<n>` form, or the rotation form `<8 lowercase hex>...REDACTED_LEN_<n>`.
+    /// Anchored at both ends so an attacker-supplied value that merely ENDS in
+    /// `…REDACTED_LEN_<n>` (e.g. `myprefix...REDACTED_LEN_99`) does NOT slip through unredacted —
+    /// the prefix must be exactly an 8-hex SHA chunk or absent. Used to keep redaction idempotent
+    /// (a real marker re-redacted to itself would otherwise drift the count / SHA prefix).
     private static func isAlreadyRedacted(_ value: String) -> Bool {
-        value.range(of: "(^|\\.\\.\\.)REDACTED_LEN_[0-9]+$", options: .regularExpression) != nil
+        value.range(of: "^([0-9a-f]{8}\\.\\.\\.)?REDACTED_LEN_[0-9]+$", options: .regularExpression) != nil
     }
 
     private static func redactValue(forKey key: String, value: String) -> String {
@@ -144,17 +146,27 @@ enum SecretRedactor {
         options: []
     )
 
+    /// Query string on ANY `<scheme>://…` URL (not just http/https): an OAuth redirect on a
+    /// custom scheme (`com.app.oauth://cb?code=…`) carries the same `code=`/`token=` secrets, so
+    /// the scheme is generalized to `[a-z][a-z0-9+.-]*` (RFC 3986 scheme grammar).
     private static let urlWithQueryRegex = try! NSRegularExpression(
-        pattern: "(https?://[^\\s?#]+)\\?[^\\s#]+",
+        pattern: "([a-zA-Z][a-zA-Z0-9+.\\-]*://[^\\s?#]+)\\?[^\\s#]+",
         options: []
     )
 
-    /// Any non-empty fragment on an http(s) URL. Generalized from a `sessionKey`-keyword-only
-    /// match to the WHOLE fragment, mirroring the query pass: OAuth/implicit-flow redirects carry
-    /// access/id tokens in the fragment under arbitrary names (`access_token`, `id_token`, `code`),
-    /// so keying on `sessionKey` alone left opaque fragment tokens exposed.
+    /// Whole fragment on ANY `<scheme>://…` URL. Generalized from a `sessionKey`-keyword-only
+    /// http(s) match: implicit-flow / custom-scheme redirects carry access/id tokens in the
+    /// fragment under arbitrary names (`access_token`, `id_token`, `code`).
     private static let urlFragmentRegex = try! NSRegularExpression(
-        pattern: "(https?://[^\\s#]+)#[^\\s]+",
+        pattern: "([a-zA-Z][a-zA-Z0-9+.\\-]*://[^\\s#]+)#[^\\s]+",
+        options: []
+    )
+
+    /// Opaque-body URIs that have no `//` authority: `data:` and `mailto:`. A `data:` URI can
+    /// embed an arbitrary payload and a `mailto:` carries an email; redact everything after the
+    /// scheme to a marker. Anchored on the scheme so ordinary prose containing the words is safe.
+    private static let opaqueURIRegex = try! NSRegularExpression(
+        pattern: "(?i)\\b(data|mailto):[^\\s]+",
         options: []
     )
 
@@ -216,11 +228,10 @@ enum SecretRedactor {
     // MARK: - Regex pass
 
     /// Per-call input cap. Several passes (`emailRegex`, `cookiePairRegex`) are O(n^2) on long
-    /// non-matching input, and `OSLogStoreDumper` feeds arbitrary `composedMessage` lines (base64
-    /// blobs, long hosts) through `redact`. A single large pathological line would stall the
-    /// synchronous export. Lines this long carry no diagnostic value, so we hard-truncate before
-    /// the regex passes. The marker makes the truncation auditable. The cheap pre-filters below
-    /// (skip a pass when its trigger char is absent) keep even the capped worst case near-linear.
+    /// non-matching input. A single large pathological line would stall redaction; lines this
+    /// long carry no diagnostic value, so we hard-truncate before the regex passes. The marker
+    /// makes the truncation auditable. The cheap pre-filters below (skip a pass when its trigger
+    /// char is absent) keep even the capped worst case near-linear.
     static let maxRedactInputLength = 4_096
 
     private static func regexRedact(_ input: String) -> String {
@@ -252,8 +263,10 @@ enum SecretRedactor {
             result = redactCookieHeader(result)
         }
 
-        // 4. URLs (query strings + fragments) — only when a URL scheme is present.
-        if result.contains("://") {
+        // 4. URLs (query strings + fragments on any <scheme>://, plus opaque data:/mailto: URIs)
+        //    — run when a `://` authority OR a `data:`/`mailto:` scheme could be present. The
+        //    `:` covers `data:`/`mailto:`; gate on it (and `//`) so non-URL prose is skipped.
+        if result.contains("://") || hasKVDelim {
             result = redactURLs(result)
         }
 
@@ -349,7 +362,7 @@ enum SecretRedactor {
     private static func redactURLs(_ input: String) -> String {
         var result = input
 
-        // Whole-fragment redaction for any http(s) URL (access_token/id_token/code/etc.).
+        // Whole-fragment redaction for any <scheme>:// URL (access_token/id_token/code/etc.).
         let fragNS = result as NSString
         let fragMatches = urlFragmentRegex.matches(in: result, range: NSRange(location: 0, length: fragNS.length))
         for match in fragMatches.reversed() {
@@ -364,6 +377,15 @@ enum SecretRedactor {
             guard match.numberOfRanges >= 2 else { continue }
             let urlOnly = (result as NSString).substring(with: match.range(at: 1))
             result = (result as NSString).replacingCharacters(in: match.range, with: urlOnly + "?[REDACTED]")
+        }
+
+        // Opaque-body URIs (data:, mailto:) — redact the whole body after the scheme.
+        let opaqueNS = result as NSString
+        let opaqueMatches = opaqueURIRegex.matches(in: result, range: NSRange(location: 0, length: opaqueNS.length))
+        for match in opaqueMatches.reversed() {
+            guard match.numberOfRanges >= 2 else { continue }
+            let scheme = (result as NSString).substring(with: match.range(at: 1))
+            result = (result as NSString).replacingCharacters(in: match.range, with: scheme + ":[REDACTED]")
         }
 
         return result

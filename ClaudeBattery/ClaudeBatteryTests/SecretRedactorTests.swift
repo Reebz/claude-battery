@@ -323,6 +323,33 @@ final class SecretRedactorTests: XCTestCase {
         XCTAssertTrue(out.contains("#[REDACTED]"), out)
     }
 
+    // MARK: - Any-scheme URL + opaque data:/mailto: redaction (defense-in-depth)
+
+    func testCustomSchemeURLQuery_redacted() {
+        // A custom-scheme OAuth redirect carries `code=` just like http(s).
+        let out = SecretRedactor.redact("redirect com.app.oauth://callback?code=SECRETCODE123&state=x")
+        XCTAssertFalse(out.contains("SECRETCODE123"), "custom-scheme query secret survived: \(out)")
+        XCTAssertTrue(out.contains("?[REDACTED]"), out)
+    }
+
+    func testCustomSchemeURLFragment_redacted() {
+        let out = SecretRedactor.redact("msauth.com.x://auth#access_token=SECRETFRAG")
+        XCTAssertFalse(out.contains("SECRETFRAG"), out)
+        XCTAssertTrue(out.contains("#[REDACTED]"), out)
+    }
+
+    func testDataURI_redacted() {
+        let out = SecretRedactor.redact("avatar data:image/png;base64,SECRETPAYLOADBLOB rest")
+        XCTAssertFalse(out.contains("SECRETPAYLOADBLOB"), "data: URI payload survived: \(out)")
+        XCTAssertTrue(out.contains("data:[REDACTED]"), out)
+    }
+
+    func testMailtoURI_redacted() {
+        let out = SecretRedactor.redact("link mailto:victim@example.com?subject=hi")
+        XCTAssertFalse(out.contains("victim@example.com"), "mailto address survived: \(out)")
+        XCTAssertTrue(out.contains("mailto:[REDACTED]"), out)
+    }
+
     // MARK: - isAlreadyRedacted both alternations (bare-^ and SHA-prefix)
 
     func testIdempotenceGuard_bareLenMarkerUnderCredentialKey() {
@@ -337,6 +364,27 @@ final class SecretRedactorTests: XCTestCase {
 
     func testIdempotenceGuard_bareLenInKeyValueProse() {
         XCTAssertEqual(SecretRedactor.redact("token=REDACTED_LEN_25"), "token=REDACTED_LEN_25")
+    }
+
+    /// BREAKER FIX: a value that merely ENDS in `…REDACTED_LEN_<n>` (an attacker-crafted prefix)
+    /// must NOT be waved through by the idempotence guard — the `SECRET` prefix must be redacted.
+    func testIsAlreadyRedacted_doesNotPassThroughCraftedPrefix() {
+        let out = SecretRedactor.redact(#"{"token":"SECRET...REDACTED_LEN_5"}"#)
+        XCTAssertFalse(out.contains("SECRET"), "crafted prefix survived the idempotence guard: \(out)")
+        XCTAssertTrue(out.contains("REDACTED_LEN_"), out)
+    }
+
+    func testIsAlreadyRedacted_doesNotPassThroughLongPrefix() {
+        // A non-8-hex prefix before `...REDACTED_LEN_` must be treated as a real (unredacted) value.
+        let out = SecretRedactor.redact(#"{"token":"myprefix...REDACTED_LEN_99"}"#)
+        XCTAssertFalse(out.contains("myprefix"), "crafted prefix survived: \(out)")
+    }
+
+    func testIsAlreadyRedacted_genuineMarkersStillIdempotent() {
+        // The real bare and 8-hex-SHA marker forms must still pass through unchanged.
+        XCTAssertEqual(SecretRedactor.redact(#"{"token":"REDACTED_LEN_25"}"#), #"{"token":"REDACTED_LEN_25"}"#)
+        XCTAssertEqual(SecretRedactor.redact(#"{"__cf_bm":"457f11ea...REDACTED_LEN_25"}"#),
+                       #"{"__cf_bm":"457f11ea...REDACTED_LEN_25"}"#)
     }
 
     // MARK: - ReDoS: pathological non-matching input completes quickly + is truncated
