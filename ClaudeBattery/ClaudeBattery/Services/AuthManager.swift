@@ -188,8 +188,57 @@ class AuthManager: NSObject, ObservableObject {
             }
         }
 
-        if let url = URL(string: "https://claude.ai/login") {
+        // U3: arm a fallback timeout BEFORE the modal so a never-dismissed modal cannot wedge
+        // the window open (the didFinish timeout cannot arm until the page actually loads).
+        armLoginTimeout()
+
+        // U3: steer the user to the email-code path before the page loads. The claude.ai login
+        // page load is deferred until the user acknowledges the sheet.
+        presentEmailCodeModal { [weak self] in
+            guard let self, let webView = self.loginWebView,
+                  let url = URL(string: "https://claude.ai/login") else { return }
             webView.load(URLRequest(url: url))
+        }
+    }
+
+    /// Present the forced "use an email code" sheet on the login window (KTD-1), then run
+    /// `onDismiss`. The sheet renders above the `.floating` login window and has exactly one
+    /// button with no click-away dismissal, so the page load can be deferred safely until the
+    /// user acknowledges. If there is no window to host it, `onDismiss` runs immediately.
+    private func presentEmailCodeModal(then onDismiss: @escaping () -> Void) {
+        guard let window = loginWindowController?.window else {
+            onDismiss()
+            return
+        }
+        Self.makeEmailCodeAlert().beginSheetModal(for: window) { _ in onDismiss() }
+    }
+
+    /// The forced email-code sheet's copy (KTD-1). Static + pure so the exact button title and
+    /// guidance (including the manual-fallback pointer) are unit-testable and drift-protected.
+    static func makeEmailCodeAlert() -> NSAlert {
+        let alert = NSAlert()
+        alert.messageText = "Sign in with an email code"
+        alert.informativeText = "To sign in, choose \"Continue with email\" and enter the code Claude sends you. Google and passkey sign-in aren't available in this sign-in window. If you get stuck, you can sign in manually under Settings."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Ok, I'll login with email code")
+        return alert
+    }
+
+    /// Arm (or re-arm) the 10-minute inactivity timeout that tears down the login window.
+    /// Armed before the U3 modal so an un-dismissed modal cannot wedge the window, and re-armed
+    /// on every `didFinish` so an actively-signing-in user is never timed out mid-flow.
+    private func armLoginTimeout() {
+        loginTimeoutTask?.cancel()
+        loginTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 10 * 60 * 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.orgDiscoveryTask?.cancel()
+            self.orgDiscoveryTask = nil
+            self.loginState = .idle
+            self.hasCapturedSession = false
+            self.pendingSessionKey = nil
+            self.pendingCookieHeader = nil
+            self.stopLoginWindow()
         }
     }
 
@@ -787,18 +836,7 @@ extension AuthManager: WKNavigationDelegate {
 
         // Reset timeout on every navigation — proves user is still actively signing in.
         // Prevents the window from closing while the user checks email for their code.
-        loginTimeoutTask?.cancel()
-        loginTimeoutTask = Task {
-            try? await Task.sleep(nanoseconds: 10 * 60 * 1_000_000_000)
-            guard !Task.isCancelled else { return }
-            self.orgDiscoveryTask?.cancel()
-            self.orgDiscoveryTask = nil
-            self.loginState = .idle
-            self.hasCapturedSession = false
-            self.pendingSessionKey = nil
-            self.pendingCookieHeader = nil
-            self.stopLoginWindow()
-        }
+        armLoginTimeout()
     }
 }
 

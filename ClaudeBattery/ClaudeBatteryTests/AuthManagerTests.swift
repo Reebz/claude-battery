@@ -257,6 +257,33 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(auth.loginState, .idle)
     }
 
+    // MARK: - Forced email-code modal copy (U3)
+    // The sheet presentation (z-order, deferred load, re-entrancy) needs a live window and is
+    // covered by manual QA; the drift-prone copy is locked down here.
+
+    @MainActor
+    func testEmailCodeAlert_buttonTitleExact() {
+        let alert = AuthManager.makeEmailCodeAlert()
+        XCTAssertEqual(alert.buttons.count, 1, "Exactly one button, no click-away dismissal (KTD-1)")
+        XCTAssertEqual(alert.buttons.first?.title, "Ok, I'll login with email code")
+    }
+
+    @MainActor
+    func testEmailCodeAlert_copyGuidesToEmailAndManualFallback() {
+        let copy = AuthManager.makeEmailCodeAlert().informativeText
+        XCTAssertTrue(copy.contains("enter the code Claude sends you"),
+                      "Copy must steer to the email-code path")
+        XCTAssertTrue(copy.lowercased().contains("manually under settings"),
+                      "Copy must point stuck users (Google/passkey accounts) to the paste floor (G1-B-safe)")
+    }
+
+    @MainActor
+    func testEmailCodeAlert_copyHasNoEmDash() {
+        let alert = AuthManager.makeEmailCodeAlert()
+        XCTAssertFalse(alert.informativeText.contains("\u{2014}"), "No em dashes in user-facing copy")
+        XCTAssertFalse(alert.messageText.contains("\u{2014}"))
+    }
+
     // MARK: - isSessionCookie: Happy Path — valid sessionKey on claude.ai
 
     @MainActor
