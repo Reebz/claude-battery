@@ -757,7 +757,9 @@ class AuthManager: NSObject, ObservableObject {
                       let match = orgs.first(where: { $0.uuid == existingAccount.organizationId }) {
                 // Re-auth: auto-select if any existing account's org is in the list
                 chosenOrg = match
-                logger.info("Re-auth auto-selected org for account \(existingAccount.displayName): \(match.displayName)")
+                // Log the non-PII account id, not displayName (= email when no nickname) or the
+                // org name — both can carry PII that OSLogStoreDumper would otherwise recover.
+                logger.info("Re-auth auto-selected org for account \(existingAccount.id.uuidString)")
             } else {
                 // Multiple orgs, no auto-select match — show picker
                 guard let picked = await showOrgPicker(orgs: orgs) else {
@@ -782,14 +784,15 @@ class AuthManager: NSObject, ObservableObject {
 
             if accountStore.addAccount(account) {
                 accountStore.switchTo(account.id)
-                logger.info("Account added and activated: \(account.displayName)")
+                // Non-PII id, not displayName (= email by default) — recovered by OSLogStoreDumper.
+                logger.info("Account added and activated: \(account.id.uuidString)")
             } else if let existing = accountStore.accounts.first(where: { $0.organizationId == chosenOrg.uuid }) {
                 // Re-authentication: update session key AND the full cookie header so the next
                 // API call primes the jar with the fresh Cloudflare / CSRF cookies, not the stale
                 // pair that was paired with the previous sessionKey.
                 accountStore.updateSessionKey(existing.id, sessionKey, cookieHeader: pendingCookieHeader)
                 accountStore.switchTo(existing.id)
-                logger.info("Re-authenticated existing account: \(existing.displayName)")
+                logger.info("Re-authenticated existing account: \(existing.id.uuidString)")
             } else {
                 logger.warning("Failed to add account (limit reached)")
                 handleOrgDiscoveryFailure("Account limit reached.")

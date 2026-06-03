@@ -67,7 +67,9 @@ class AccountStore: ObservableObject {
             switchTo(account.id)
         }
 
-        logger.info("Added account: \(account.displayName)")
+        // Non-PII id, not displayName (= email when no nickname); OSLogStoreDumper recovers
+        // these lines, so an email here would land in the diagnostic dump.
+        logger.info("Added account: \(account.id.uuidString)")
         return true
     }
 
