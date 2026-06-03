@@ -90,4 +90,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Write the diagnostic session-end marker + final synchronize on quit. No-op when
+        // diagnostic logging is disabled (the gate inside flush handles it).
+        DiagnosticsLogger.shared.flush()
+    }
 }

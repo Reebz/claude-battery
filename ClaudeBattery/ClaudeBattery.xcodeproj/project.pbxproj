@@ -53,6 +53,8 @@
 		FB000000000000000000FB01 /* SecretRedactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA000000000000000000FA01 /* SecretRedactorTests.swift */; };
 		FB000000000000000000FB02 /* DiagnosticsLoggerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA000000000000000000FA02 /* DiagnosticsLoggerTests.swift */; };
 		FB000000000000000000FB03 /* LogsExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA000000000000000000FA03 /* LogsExporterTests.swift */; };
+		FB000000000000000000FB04 /* OSLogStoreDumperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA000000000000000000FA04 /* OSLogStoreDumperTests.swift */; };
+		FB000000000000000000FB05 /* NoSecretsExportGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA000000000000000000FA05 /* NoSecretsExportGateTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -116,6 +118,8 @@
 		FA000000000000000000FA01 /* SecretRedactorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = SecretRedactorTests.swift; path = SecretRedactorTests.swift; sourceTree = "<group>"; };
 		FA000000000000000000FA02 /* DiagnosticsLoggerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = DiagnosticsLoggerTests.swift; path = DiagnosticsLoggerTests.swift; sourceTree = "<group>"; };
 		FA000000000000000000FA03 /* LogsExporterTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = LogsExporterTests.swift; path = LogsExporterTests.swift; sourceTree = "<group>"; };
+		FA000000000000000000FA04 /* OSLogStoreDumperTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = OSLogStoreDumperTests.swift; path = OSLogStoreDumperTests.swift; sourceTree = "<group>"; };
+		FA000000000000000000FA05 /* NoSecretsExportGateTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = NoSecretsExportGateTests.swift; path = NoSecretsExportGateTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -178,6 +182,8 @@
 				FA000000000000000000FA01 /* SecretRedactorTests.swift */,
 				FA000000000000000000FA02 /* DiagnosticsLoggerTests.swift */,
 				FA000000000000000000FA03 /* LogsExporterTests.swift */,
+				FA000000000000000000FA04 /* OSLogStoreDumperTests.swift */,
+				FA000000000000000000FA05 /* NoSecretsExportGateTests.swift */,
 			);
 			name = ClaudeBatteryTests;
 			path = ClaudeBatteryTests;
@@ -437,6 +443,8 @@
 				FB000000000000000000FB01 /* SecretRedactorTests.swift in Sources */,
 				FB000000000000000000FB02 /* DiagnosticsLoggerTests.swift in Sources */,
 				FB000000000000000000FB03 /* LogsExporterTests.swift in Sources */,
+				FB000000000000000000FB04 /* OSLogStoreDumperTests.swift in Sources */,
+				FB000000000000000000FB05 /* NoSecretsExportGateTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

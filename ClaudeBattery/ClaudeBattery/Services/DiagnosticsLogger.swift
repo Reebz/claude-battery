@@ -71,11 +71,18 @@ final class DiagnosticsLogger: @unchecked Sendable {
 
     // MARK: - Public API
 
+    /// The single redaction chokepoint for BOTH emit paths: serialize then `SecretRedactor`.
+    /// Internal so a test can assert a planted secret is redacted here, proving the wiring for
+    /// the hot path (which writes only to os_log and so leaves no file artifact to read).
+    func redactedLine(kind: String, payload: [String: Any]) -> String {
+        SecretRedactor.redact(serialize(kind: kind, payload: payload))
+    }
+
     /// Hot path: `os.Logger.notice` only (recovered at export by OSLogStoreDumper). Use for
     /// high-volume events. No-op when the gate is off.
     func emitHot(kind: String, payload: [String: Any]) {
         guard diagnosticLoggingEnabled else { return }
-        let line = SecretRedactor.redact(serialize(kind: kind, payload: payload))
+        let line = redactedLine(kind: kind, payload: payload)
         logger.notice("[\(kind, privacy: .public)] \(line, privacy: .public)")
     }
 
@@ -84,7 +91,7 @@ final class DiagnosticsLogger: @unchecked Sendable {
     /// is off; opens the file and writes session-start on the first gated call.
     func emitMilestone(kind: String, payload: [String: Any]) {
         guard diagnosticLoggingEnabled else { return }
-        let line = SecretRedactor.redact(serialize(kind: kind, payload: payload))
+        let line = redactedLine(kind: kind, payload: payload)
         logger.notice("[\(kind, privacy: .public)] \(line, privacy: .public)")
         writeQueue.async { [weak self] in
             guard let self else { return }

@@ -142,6 +142,21 @@ final class DiagnosticsLoggerTests: XCTestCase {
         XCTAssertTrue(content.contains("REDACTED_LEN_"), "expected redaction marker: \(content)")
     }
 
+    /// The hot path (`emitHot`) writes only to os_log, so its redaction cannot be read from a
+    /// file. It shares `redactedLine` with the milestone path; asserting that chokepoint redacts
+    /// proves the hot path is covered too. If the redact call were dropped, this fails.
+    func testHotPathRedactionChokepoint_redactsSecrets() {
+        let logger = makeEnabledLogger()
+        let line = logger.redactedLine(kind: "cookie-store-poll", payload: [
+            "sessionKey": "sk-ant-HOTLEAK",
+            "names": "sessionKey=.claude.ai, __cf_bm=.claude.ai",
+            "note": "from hot@leak.com"
+        ])
+        XCTAssertFalse(line.contains("sk-ant-HOTLEAK"), "hot-path sessionKey survived: \(line)")
+        XCTAssertFalse(line.contains("hot@leak.com"), "hot-path email survived: \(line)")
+        XCTAssertTrue(line.contains("REDACTED_LEN_"), "hot-path line not redacted: \(line)")
+    }
+
     // MARK: - Volume
 
     func testEmitMilestone_writes100Entries() {

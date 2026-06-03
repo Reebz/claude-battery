@@ -11,11 +11,12 @@ import System
 ///
 /// - Archives the **container** Logs dir IN-PROCESS via AppleArchive (LZFSE `.aar`), no
 ///   subprocess. AppleArchive is available macOS 11+ (within the 13.5 floor).
-/// - Includes ONLY `diag-*.jsonl` files created at/after the production install (records
-///   produced by the U6 redacting producer) and **excludes `oslogstore-*.txt` dumps** and any
-///   other file — those may carry pre-production `#if DEBUG` debug output (e.g. a raw-cookie
-///   `logger.debug` line). The eligibility filter is a pure function (`eligibleLogFiles`) so the
-///   exclusion is unit-testable without invoking AppleArchive.
+/// - Includes ONLY this build's redacting-producer artifacts created at/after the production
+///   install: `diag-*.jsonl` (DiagnosticsLogger) and `oslogstore-*.txt` (OSLogStoreDumper,
+///   generated on demand right before export). Every other file — stray files, or a prior,
+///   weaker-redacting build's records (older than the install date) — is excluded, so a
+///   pre-production debug artifact can never ride along. The post-install date floor is the
+///   wall; `eligibleLogFiles` is a pure function so the exclusion is unit-testable.
 /// - Lets the user save the archive via `NSSavePanel` (sandbox-safe with the
 ///   `com.apple.security.files.user-selected.read-write` entitlement).
 /// - On success, surfaces the saved location **and** a link to the GitHub issues page so the
@@ -43,6 +44,12 @@ enum LogsExporter {
         logsDirectory: URL = defaultLogDirectory(),
         installDate: Date = productionInstallDate()
     ) -> Result {
+        // Recover the os_log hot-path events (nav-decision, cookie-store-poll) and the
+        // production os.Logger lines into an on-disk `oslogstore-*.txt` so the archive carries
+        // them. Gated: a no-op when diagnostics are disabled. Runs before eligibility so the
+        // freshly written dump is picked up. Every dumped line is SecretRedactor-processed.
+        OSLogStoreDumper.dump(directoryOverride: logsDirectory)
+
         let eligible = eligibleLogFiles(in: logsDirectory, installedAfter: installDate)
         guard !eligible.isEmpty else { return .nothingToExport }
 
@@ -78,9 +85,18 @@ enum LogsExporter {
 
     // MARK: - Eligibility (pure, unit-testable)
 
-    /// The curated file list: only `diag-*.jsonl` whose modification date is at/after
-    /// `installedAfter`. Everything else — `oslogstore-*.txt`, stray files, older diag files
-    /// from a prior build — is excluded, so a pre-production debug artifact can never ride along.
+    /// True for a filename produced by THIS build's redacting producers: `diag-*.jsonl`
+    /// (DiagnosticsLogger) and `oslogstore-*.txt` (OSLogStoreDumper). Both are run through
+    /// `SecretRedactor`; any other name (stray files, unknown artifacts) is excluded.
+    static func isEligibleName(_ name: String) -> Bool {
+        (name.hasPrefix("diag-") && name.hasSuffix(".jsonl")) ||
+        (name.hasPrefix("oslogstore-") && name.hasSuffix(".txt"))
+    }
+
+    /// The curated file list: producer artifacts (`diag-*.jsonl`, `oslogstore-*.txt`) whose
+    /// modification date is at/after `installedAfter`. Older files from a prior build, and any
+    /// non-producer file, are excluded — so a pre-production debug artifact can never ride along.
+    /// The post-install date floor is the wall that keeps a weaker prior build's records out.
     static func eligibleLogFiles(in directory: URL, installedAfter installDate: Date) -> [URL] {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
@@ -90,13 +106,12 @@ enum LogsExporter {
         ) else { return [] }
 
         return entries.filter { url in
-            let name = url.lastPathComponent
-            guard name.hasPrefix("diag-"), name.hasSuffix(".jsonl") else { return false }
+            guard isEligibleName(url.lastPathComponent) else { return false }
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
             guard values?.isRegularFile == true else { return false }
             guard let mtime = values?.contentModificationDate else { return false }
-            // `>=` with a tiny tolerance: the diag file is created moments after the bundle is
-            // laid down, but clock granularity / copy timing can make them equal.
+            // `>=` with a tiny tolerance: the file is created moments after the bundle is laid
+            // down, but clock granularity / copy timing can make them equal.
             return mtime >= installDate.addingTimeInterval(-1)
         }.sorted { $0.lastPathComponent < $1.lastPathComponent }
     }
@@ -180,13 +195,18 @@ enum LogsExporter {
     }
 
     /// Best-effort "when was this build installed": the app bundle's creation date. Files
-    /// older than this are pre-production artifacts and are excluded. Falls back to
-    /// `.distantPast` (include everything eligible by name) if the date can't be read.
+    /// older than this are pre-production artifacts and are excluded.
+    ///
+    /// FAILS CLOSED: if the bundle creation date is unreadable (App Translocation, `cp -p`,
+    /// quarantine relocation), return `.distantFuture` so EVERY name-eligible file is excluded
+    /// and the export yields `.nothingToExport`. For a P0 redaction exporter the safe failure
+    /// direction is to ship nothing rather than risk admitting a prior, weaker-redacting build's
+    /// records. (The previous `.distantPast` fallback failed open — it admitted all history.)
     static func productionInstallDate() -> Date {
         guard let bundleURL = Bundle.main.bundleURL as URL?,
               let values = try? bundleURL.resourceValues(forKeys: [.creationDateKey]),
               let created = values.creationDate else {
-            return .distantPast
+            return .distantFuture
         }
         return created
     }

@@ -16,11 +16,25 @@ import OSLog
 /// any pre-Round-10 raw cookie/email line would otherwise leak; the redactor (now including
 /// the bare-email pass) is the defense-in-depth catch.
 enum OSLogStoreDumper {
+    /// Render one OSLog entry's fields into a single redacted line. Pure + internal so the
+    /// render+redact step (the P0 redaction guarantee) is unit-testable without constructing a
+    /// real `OSLogEntryLog` (which has no public initializer). Every caller of the dump path
+    /// goes through here, so a test that plants a secret in `composedMessage` and asserts the
+    /// output is redacted directly proves the dumper's redaction fires.
+    static func renderRedacted(date: Date, category: String, level: String, composedMessage: String,
+                               dateFormatter: ISO8601DateFormatter = ISO8601DateFormatter()) -> String {
+        let dateStr = dateFormatter.string(from: date)
+        let rendered = "\(dateStr) [\(category)] \(level) \(composedMessage)"
+        return SecretRedactor.redact(rendered)
+    }
+
     /// Dump the last `hoursBack` hours of own-process OSLog entries to disk. Default 6 hours —
     /// reporters may wait through multiple sign-in attempts before reproduction.
-    /// No-op when diagnostics are disabled.
-    static func dump(hoursBack: Int = 6, directoryOverride: URL? = nil) {
-        guard DiagnosticsLogger.shared.diagnosticLoggingEnabled else { return }
+    /// No-op when diagnostics are disabled. `enabledOverride` lets tests force the gate without
+    /// touching the shared UserDefaults domain.
+    static func dump(hoursBack: Int = 6, directoryOverride: URL? = nil, enabledOverride: Bool? = nil) {
+        let enabled = enabledOverride ?? DiagnosticsLogger.shared.diagnosticLoggingEnabled
+        guard enabled else { return }
 
         let outputDir = directoryOverride ?? defaultLogDirectory()
         do {
@@ -65,12 +79,12 @@ enum OSLogStoreDumper {
             defer { try? handle.close() }
 
             for entry in entries {
-                let dateStr = dateFormatter.string(from: entry.date)
-                let category = entry.category
-                let level = String(describing: entry.level)
-                let rendered = "\(dateStr) [\(category)] \(level) \(entry.composedMessage)"
-                let redacted = SecretRedactor.redact(rendered)
-                if redacted != rendered { redactedCount += 1 }
+                let rawRendered = "\(dateFormatter.string(from: entry.date)) [\(entry.category)] \(String(describing: entry.level)) \(entry.composedMessage)"
+                let redacted = renderRedacted(date: entry.date, category: entry.category,
+                                              level: String(describing: entry.level),
+                                              composedMessage: entry.composedMessage,
+                                              dateFormatter: dateFormatter)
+                if redacted != rawRendered { redactedCount += 1 }
                 if let data = (redacted + "\n").data(using: .utf8) {
                     try handle.write(contentsOf: data)
                     lineCount += 1
