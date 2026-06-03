@@ -18,6 +18,22 @@ enum LoginOverlayKind: Equatable {
     case error
 }
 
+/// Outcome of the manual paste sign-in (U5). Drives the Settings UI's inline status.
+enum ManualSignInResult: Equatable {
+    /// Account added/reactivated; associated value is its display name.
+    case success(String)
+    /// Multiple orgs with no existing match — the user must pick one (pattern #6).
+    case needsOrgChoice([Organization])
+    /// The paste did not contain a usable `sessionKey`.
+    case invalidInput
+    /// 401/403 from claude.ai. `suggestFullHeader` is true when only a bare key was pasted,
+    /// so the likely cause is a missing HttpOnly `__cf_bm` (Cloudflare block).
+    case authFailed(suggestFullHeader: Bool)
+    case noOrganizations
+    case accountLimitReached
+    case connectionError
+}
+
 @MainActor
 class AuthManager: NSObject, ObservableObject {
     @Published var loginState: LoginState = .idle {
@@ -43,6 +59,9 @@ class AuthManager: NSObject, ObservableObject {
     /// Passed to `ClaudeAPI` alongside `pendingSessionKey` so authenticated API calls during
     /// org discovery carry the full cookie set instead of `sessionKey` alone.
     private var pendingCookieHeader: String?
+    /// Context stashed between `manualSignIn` and `completeManualSignIn` when a paste resolves
+    /// to multiple orgs and the user must pick one (U5, pattern #6).
+    private var pendingManualSignIn: (sessionKey: String, cookieHeader: String?, email: String)?
     /// Child WebView hosting OAuth popups spawned by `window.open()`. Added as a subview of
     /// the primary `loginWebView` so the OAuth provider's callback can `postMessage` back to
     /// the claude.ai page via `window.opener`. Torn down on `webViewDidClose` or login-window
@@ -789,6 +808,112 @@ class AuthManager: NSObject, ObservableObject {
         return nil
     }
 
+    // MARK: - Manual sign-in (U5 — the universal paste floor)
+
+    /// Validate a pasted credential (a full `name=value; …` cookie header or a bare `sessionKey`)
+    /// and add the account. This is the universal floor (#5): it works without the login WebView,
+    /// so it covers accounts the embedded flow can't complete (Google-federated, passkey-only).
+    /// Reuses `ClaudeAPI.activateCookies` and the same org-discovery + account-add semantics as
+    /// the WebView path, including the multi-org picker contract (pattern #6).
+    func manualSignIn(_ pasted: String) async -> ManualSignInResult {
+        guard let parsed = Self.parsePastedCredentials(pasted) else {
+            return .invalidInput
+        }
+        return await discoverAndAddManualAccount(sessionKey: parsed.sessionKey, cookieHeader: parsed.cookieHeader)
+    }
+
+    /// Finish a manual sign-in after the user picks an org (the multi-org, no-existing-match case).
+    func completeManualSignIn(org: Organization) -> ManualSignInResult {
+        guard let ctx = pendingManualSignIn else { return .invalidInput }
+        pendingManualSignIn = nil
+        return addOrReactivateManualAccount(org: org, sessionKey: ctx.sessionKey, cookieHeader: ctx.cookieHeader, email: ctx.email)
+    }
+
+    /// Parse a pasted credential into a `sessionKey` and (when present) the full cookie header.
+    /// Returns nil when no usable `sessionKey` can be extracted. Pure + static for unit testing.
+    static func parsePastedCredentials(_ raw: String) -> (sessionKey: String, cookieHeader: String?)? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        // Full cookie header: contains a `sessionKey=…` pair somewhere in the string.
+        if trimmed.contains("sessionKey=") {
+            for pair in trimmed.components(separatedBy: ";") {
+                let kv = pair.trimmingCharacters(in: .whitespaces)
+                guard kv.hasPrefix("sessionKey=") else { continue }
+                let value = String(kv.dropFirst("sessionKey=".count))
+                guard !value.isEmpty else { return nil }
+                // Keep the full header when other cookies are present (carries HttpOnly `__cf_bm`);
+                // otherwise treat it as a bare key.
+                let hasOtherCookies = trimmed.contains(";")
+                return (value, hasOtherCookies ? trimmed : nil)
+            }
+            return nil
+        }
+
+        // Bare `sessionKey`: a single token with no cookie syntax or whitespace.
+        if !trimmed.contains(";"), !trimmed.contains(" ") {
+            return (trimmed, nil)
+        }
+
+        return nil
+    }
+
+    private func discoverAndAddManualAccount(sessionKey: String, cookieHeader: String?) async -> ManualSignInResult {
+        ClaudeAPI.activateCookies(sessionKey: sessionKey, cookieHeader: cookieHeader)
+
+        guard let request = ClaudeAPI.makeRequest(path: "/api/organizations", sessionKey: sessionKey, cookieHeader: cookieHeader) else {
+            return .connectionError
+        }
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return .connectionError }
+
+            if http.statusCode == 401 || http.statusCode == 403 {
+                // 403 with only a bare key is most often a Cloudflare block (missing HttpOnly
+                // `__cf_bm`) — steer the user to paste the full header. Pattern #5: the server is
+                // authoritative; we do not guess validity client-side.
+                return .authFailed(suggestFullHeader: cookieHeader == nil)
+            }
+
+            let orgs = try JSONDecoder().decode([Organization].self, from: data)
+            guard !orgs.isEmpty else { return .noOrganizations }
+
+            let email = extractEmail(from: orgs, rawData: data) ?? "Account \(accountStore.accounts.count + 1)"
+
+            // Org choice (pattern #6): never blindly take orgs[0] for multi-org users.
+            if orgs.count == 1 {
+                return addOrReactivateManualAccount(org: orgs[0], sessionKey: sessionKey, cookieHeader: cookieHeader, email: email)
+            }
+            if let existing = accountStore.accounts.first(where: { acct in orgs.contains(where: { $0.uuid == acct.organizationId }) }),
+               let match = orgs.first(where: { $0.uuid == existing.organizationId }) {
+                return addOrReactivateManualAccount(org: match, sessionKey: sessionKey, cookieHeader: cookieHeader, email: email)
+            }
+            pendingManualSignIn = (sessionKey, cookieHeader, email)
+            return .needsOrgChoice(orgs)
+        } catch {
+            logger.error("Manual sign-in org discovery failed: \(error.localizedDescription)")
+            return .connectionError
+        }
+    }
+
+    private func addOrReactivateManualAccount(org: Organization, sessionKey: String, cookieHeader: String?, email: String) -> ManualSignInResult {
+        let account = Account(email: email, sessionKey: sessionKey, organizationId: org.uuid, allCookieHeader: cookieHeader)
+        if accountStore.addAccount(account) {
+            accountStore.switchTo(account.id)
+            logger.info("Manual sign-in added account: \(account.displayName)")
+            onAuthSuccess?()
+            return .success(account.displayName)
+        } else if let existing = accountStore.accounts.first(where: { $0.organizationId == org.uuid }) {
+            accountStore.updateSessionKey(existing.id, sessionKey, cookieHeader: cookieHeader)
+            accountStore.switchTo(existing.id)
+            logger.info("Manual sign-in reactivated account: \(existing.displayName)")
+            onAuthSuccess?()
+            return .success(existing.displayName)
+        }
+        return .accountLimitReached
+    }
+
     // MARK: - Sign Out
 
     func signOut(accountId: UUID) {
@@ -1073,7 +1198,7 @@ extension AuthManager: NSWindowDelegate {
 
 // MARK: - Models
 
-struct Organization: Codable {
+struct Organization: Codable, Equatable {
     let uuid: String
     let name: String?
     let billingType: String?

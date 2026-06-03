@@ -244,6 +244,12 @@ class MenuBarController: NSObject {
         }
     }
 
+    /// Open (or focus) the Settings window. Exposed so the manual-sign-in hook can route a
+    /// stuck user from the login error overlay straight to the paste section (U5).
+    func showSettings() {
+        openSettings()
+    }
+
     @objc private func openSettings() {
         if let wc = settingsWindowController {
             wc.window?.makeKeyAndOrderFront(nil)

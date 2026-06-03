@@ -325,6 +325,126 @@ final class AuthManagerTests: XCTestCase {
                        "Must not use a subtree MutationObserver — CPU hot-loop risk (issue #11)")
     }
 
+    // MARK: - Manual paste sign-in (U5 — the universal floor)
+
+    @MainActor
+    func testParsePastedCredentials_fullHeader() {
+        let parsed = AuthManager.parsePastedCredentials("sessionKey=sk-123; __cf_bm=cf-abc; other=x")
+        XCTAssertEqual(parsed?.sessionKey, "sk-123")
+        XCTAssertEqual(parsed?.cookieHeader, "sessionKey=sk-123; __cf_bm=cf-abc; other=x")
+    }
+
+    @MainActor
+    func testParsePastedCredentials_bareKey() {
+        let parsed = AuthManager.parsePastedCredentials("  sk-ant-sid01-bare  ")
+        XCTAssertEqual(parsed?.sessionKey, "sk-ant-sid01-bare")
+        XCTAssertNil(parsed?.cookieHeader, "A bare key carries no full header")
+    }
+
+    @MainActor
+    func testParsePastedCredentials_garbageReturnsNil() {
+        XCTAssertNil(AuthManager.parsePastedCredentials("hello there this is not a cookie"))
+        XCTAssertNil(AuthManager.parsePastedCredentials(""))
+        XCTAssertNil(AuthManager.parsePastedCredentials("sessionKey="), "Empty sessionKey value is unusable")
+    }
+
+    @MainActor
+    func testManualSignIn_garbageDoesNotHitNetwork() async {
+        let auth = makeAuthManager()
+        let result = await auth.manualSignIn("not a cookie header")
+        XCTAssertEqual(result, .invalidInput)
+        XCTAssertEqual(mockSession.capturedRequests.count, 0, "Invalid input must short-circuit before any request")
+        XCTAssertEqual(auth.accountStore.accounts.count, 0)
+    }
+
+    @MainActor
+    func testManualSignIn_fullHeaderSingleOrgAddsAccountWithFullHeader() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid": "org-manual-1"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        let result = await auth.manualSignIn("sessionKey=sk-manual; __cf_bm=cf-xyz")
+
+        XCTAssertEqual(result, .success("Account 1"))
+        XCTAssertEqual(auth.accountStore.accounts.count, 1)
+        XCTAssertEqual(auth.accountStore.accounts.first?.sessionKey, "sk-manual")
+        XCTAssertEqual(auth.accountStore.accounts.first?.allCookieHeader,
+                       "sessionKey=sk-manual; __cf_bm=cf-xyz",
+                       "Full header must be persisted so HttpOnly __cf_bm survives")
+    }
+
+    @MainActor
+    func testManualSignIn_bareKey403SuggestsFullHeader() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 403
+
+        let result = await auth.manualSignIn("sk-ant-bare-key")
+
+        XCTAssertEqual(result, .authFailed(suggestFullHeader: true),
+                       "Bare key + 403 is most likely a Cloudflare block; steer to the full header")
+        XCTAssertEqual(auth.accountStore.accounts.count, 0)
+    }
+
+    @MainActor
+    func testManualSignIn_fullHeader403DoesNotSuggestFullHeader() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 403
+
+        let result = await auth.manualSignIn("sessionKey=sk-x; __cf_bm=cf")
+
+        XCTAssertEqual(result, .authFailed(suggestFullHeader: false),
+                       "A full header already has __cf_bm; a 403 means stale credentials, not a missing cookie")
+    }
+
+    @MainActor
+    func testManualSignIn_401AuthFailed() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 401
+        let result = await auth.manualSignIn("sessionKey=sk-x; __cf_bm=cf")
+        XCTAssertEqual(result, .authFailed(suggestFullHeader: false))
+    }
+
+    @MainActor
+    func testManualSignIn_emptyOrgs() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = "[]".data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        let result = await auth.manualSignIn("sessionKey=sk-x; __cf_bm=cf")
+        XCTAssertEqual(result, .noOrganizations)
+        XCTAssertEqual(auth.accountStore.accounts.count, 0)
+    }
+
+    @MainActor
+    func testManualSignIn_multiOrgRequiresPickerNotOrgsZero() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid": "org-a"}, {"uuid": "org-b"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        let result = await auth.manualSignIn("sessionKey=sk-multi; __cf_bm=cf")
+
+        guard case .needsOrgChoice(let orgs) = result else {
+            return XCTFail("Expected needsOrgChoice, got \(result)")
+        }
+        XCTAssertEqual(orgs.count, 2)
+        XCTAssertEqual(auth.accountStore.accounts.count, 0, "Must NOT auto-add orgs[0] for multi-org (pattern #6)")
+
+        // User picks the second org from the SwiftUI picker.
+        let completed = auth.completeManualSignIn(org: orgs[1])
+        XCTAssertEqual(completed, .success("Account 1"))
+        XCTAssertEqual(auth.accountStore.accounts.first?.organizationId, "org-b")
+    }
+
+    @MainActor
+    func testCompleteManualSignIn_withoutPendingContextIsInvalid() {
+        let auth = makeAuthManager()
+        let org = Organization(uuid: "org-x", name: nil, billingType: nil, emailAddress: nil)
+        XCTAssertEqual(auth.completeManualSignIn(org: org), .invalidInput,
+                       "Completing with no stashed context is a programming error, surfaced as invalid")
+    }
+
     // MARK: - isSessionCookie: Happy Path — valid sessionKey on claude.ai
 
     @MainActor
