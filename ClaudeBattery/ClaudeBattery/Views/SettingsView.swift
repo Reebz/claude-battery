@@ -12,6 +12,9 @@ struct SettingsView: View {
     @AppStorage("notificationsEnabled") private var notificationsEnabled = false
     @AppStorage("iconStyle") private var iconStyleRaw: String = IconStyle.dualHorizontal.rawValue
     @State private var confirmRemoveId: UUID?
+    /// Scales the decorative coffee-button font with Dynamic Type (the only fixed-size SwiftUI font
+    /// in this view); the rest use semantic styles.
+    @ScaledMetric(relativeTo: .body) private var coffeeFontSize: CGFloat = 20
 
     var body: some View {
         Form {
@@ -90,7 +93,7 @@ struct SettingsView: View {
                         Image(systemName: "cup.and.saucer.fill")
                             .foregroundColor(.black)
                         Text("Buy me a coffee!")
-                            .font(.custom("Cookie-Regular", size: 20))
+                            .font(.custom("Cookie-Regular", size: coffeeFontSize))
                             .foregroundColor(.black)
                         Spacer()
                     }
@@ -111,9 +114,12 @@ struct SettingsView: View {
     }
 
     private var settingsHeight: CGFloat {
-        // Base height covers toggles + coffee button + collapsed manual sign-in section +
-        // the always-shown collapsed Diagnostics section (~70pt) + padding.
-        let base: CGFloat = accountStore.canAddAccount ? 570 : 440
+        // Base height covers toggles + coffee button + the manual sign-in and Diagnostics sections,
+        // INCLUDING headroom for their post-interaction growth — the diagnostics export status +
+        // issues link, and the manual-sign-in status + org picker + button — which are subview
+        // @State not visible to this calc. The 90% screen cap below is the backstop on small
+        // displays. (The +110/+30 over the prior 570/440 is that headroom.)
+        let base: CGFloat = accountStore.canAddAccount ? 680 : 470
         // Each account row: ~40pt, plus ~45pt for threshold slider when notifications on
         let perAccount: CGFloat = notificationsEnabled ? 85 : 40
         let accountCount = CGFloat(max(accountStore.accounts.count, 1))
@@ -306,12 +312,12 @@ private struct ManualSignInSection: View {
 // MARK: - Diagnostics (U7 — opt-in redacted log export)
 
 /// Settings section for the Phase 2 diagnostic export. The toggle drives the same
-/// `@AppStorage("diagnosticLoggingEnabled")` flag the `DiagnosticsLogger` reads at runtime
-/// (default false), so the producer stays inert unless the user opts in. The export builds a
-/// redacted, in-process archive (no secrets, no prior-build artifacts) and saves it via
-/// `NSSavePanel`.
+/// `DiagnosticsDefaults.loggingEnabledKey` flag the `DiagnosticsLogger` reads at runtime
+/// (default false), so the producer stays inert unless the user opts in. Both sides reference the
+/// shared constant so the toggle and the reader cannot drift. The export builds a redacted,
+/// in-process archive (no secrets, no prior-build artifacts) and saves it via `NSSavePanel`.
 private struct DiagnosticsSection: View {
-    @AppStorage("diagnosticLoggingEnabled") private var diagnosticLoggingEnabled = false
+    @AppStorage(DiagnosticsDefaults.loggingEnabledKey) private var diagnosticLoggingEnabled = false
 
     @State private var statusText: String?
     @State private var statusIsError = false

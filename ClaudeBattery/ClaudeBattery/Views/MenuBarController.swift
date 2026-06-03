@@ -229,7 +229,7 @@ class MenuBarController: NSObject {
 
     private func showContextMenu() {
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
 
@@ -244,13 +244,10 @@ class MenuBarController: NSObject {
         }
     }
 
-    /// Open (or focus) the Settings window. Exposed so the manual-sign-in hook can route a
-    /// stuck user from the login error overlay straight to the paste section (U5).
-    func showSettings() {
-        openSettings()
-    }
-
-    @objc private func openSettings() {
+    /// Open (or focus) the Settings window. Internal + `@objc` so it serves BOTH the menu-item
+    /// selector and the manual-sign-in hook that routes a stuck user from the login error overlay
+    /// to the paste section (U5) — no thin passthrough wrapper.
+    @objc func showSettings() {
         if let wc = settingsWindowController {
             wc.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
