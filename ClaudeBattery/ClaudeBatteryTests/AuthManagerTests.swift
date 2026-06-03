@@ -703,6 +703,37 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(auth.loginState, .idle)
     }
 
+    // MARK: - selectOrg (pure org-selection rule shared by both sign-in paths, MAINT-3)
+
+    func testSelectOrg_singleOrg_takesIt() {
+        let a = Organization(uuid: "org-a", name: nil, billingType: nil, emailAddress: nil)
+        guard case .single(let org) = AuthManager.selectOrg(orgs: [a], accounts: []) else {
+            return XCTFail("a single org should be selected directly")
+        }
+        XCTAssertEqual(org.uuid, "org-a")
+    }
+
+    func testSelectOrg_multiOrg_autoMatchesExistingAccountOrg() {
+        let a = Organization(uuid: "org-a", name: nil, billingType: nil, emailAddress: nil)
+        let b = Organization(uuid: "org-b", name: nil, billingType: nil, emailAddress: nil)
+        let acct = Account(email: "x@test.com", sessionKey: "sk", organizationId: "org-b", allCookieHeader: nil)
+        guard case .autoMatched(let org, let accountId) = AuthManager.selectOrg(orgs: [a, b], accounts: [acct]) else {
+            return XCTFail("an existing account's org present in the list should auto-match")
+        }
+        XCTAssertEqual(org.uuid, "org-b")
+        XCTAssertEqual(accountId, acct.id)
+    }
+
+    func testSelectOrg_multiOrg_noExistingMatch_requiresChoice_neverOrgsZero() {
+        let a = Organization(uuid: "org-a", name: nil, billingType: nil, emailAddress: nil)
+        let b = Organization(uuid: "org-b", name: nil, billingType: nil, emailAddress: nil)
+        let unrelated = Account(email: "x@test.com", sessionKey: "sk", organizationId: "org-z", allCookieHeader: nil)
+        guard case .needsChoice(let choices) = AuthManager.selectOrg(orgs: [a, b], accounts: [unrelated]) else {
+            return XCTFail("multi-org with no existing match must require a choice, never blindly orgs[0]")
+        }
+        XCTAssertEqual(choices.map(\.uuid), ["org-a", "org-b"])
+    }
+
     // MARK: - fetchOrganizationId: Happy Path — single org creates account
 
     @MainActor

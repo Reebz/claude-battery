@@ -353,6 +353,12 @@ class AuthManager: NSObject, ObservableObject {
     /// JS `document.cookie` fallback was deleted: `sessionKey` is HttpOnly, so `document.cookie`
     /// can never see it — it was dead code that could only ever capture via the store
     /// enumeration below.
+    ///
+    /// `lastPolledCookieNames` dedupes the 0.2s poll: a `cookie-store-poll` line is emitted only
+    /// when the cookie set changes (REL-03), so a stalled login does not drive a per-line fsync
+    /// storm. Capture still runs every tick.
+    private var lastPolledCookieNames: String?
+
     private func reReadCookieStore(_ webView: WKWebView) {
         guard !hasCapturedSession else { return }
 
@@ -370,10 +376,19 @@ class AuthManager: NSObject, ObservableObject {
             #if DEBUG
             logger.debug("Cookie store poll — \(cookies.count) cookies: \(names)")
             #endif
-            DiagnosticsLogger.shared.emitMilestone(kind: "cookie-store-poll", payload: [
-                "count": cookies.count,
-                "names": names
-            ])
+            // REL-03: emit only when the cookie set changes (the poll fires every 0.2s).
+            if names != lastPolledCookieNames {
+                lastPolledCookieNames = names
+                // DI-04: emit name+domain as STRUCTURED pairs, not a `name=domain` string. The
+                // string form is key=value shaped, so the redactor rewrites the domain of
+                // credential-named cookies (sessionKey=.claude.ai -> sessionKey=REDACTED_LEN_n);
+                // structured pairs keep the domain as diagnostic signal. The cookie VALUE is never read.
+                let cookiePairs = cookies.map { ["name": $0.name, "domain": $0.domain] }
+                DiagnosticsLogger.shared.emitMilestone(kind: "cookie-store-poll", payload: [
+                    "count": cookies.count,
+                    "names": cookiePairs
+                ])
+            }
 
             self.captureSessionCookie(from: cookies)
         }
@@ -494,7 +509,7 @@ class AuthManager: NSObject, ObservableObject {
         spinner.setAccessibilityLabel("Finishing sign-in")
 
         let label = NSTextField(labelWithString: "Finishing sign-in…")
-        label.font = .systemFont(ofSize: 15, weight: .medium)
+        label.font = .preferredFont(forTextStyle: .title3) // scales with Dynamic Type (was fixed 15pt)
         label.alignment = .center
 
         let stack = NSStackView(views: [spinner, label])
@@ -523,11 +538,11 @@ class AuthManager: NSObject, ObservableObject {
         container.setAccessibilityLabel("Sign-in problem")
 
         let title = NSTextField(labelWithString: "Couldn’t finish sign-in")
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.font = .preferredFont(forTextStyle: .title3) // scales with Dynamic Type (was fixed 15pt)
         title.alignment = .center
 
         let detail = NSTextField(wrappingLabelWithString: message)
-        detail.font = .systemFont(ofSize: 12)
+        detail.font = .preferredFont(forTextStyle: .callout) // scales with Dynamic Type (was fixed 12pt)
         detail.textColor = .secondaryLabelColor
         detail.alignment = .center
         detail.preferredMaxLayoutWidth = 320
@@ -683,6 +698,29 @@ class AuthManager: NSObject, ObservableObject {
 
     // MARK: - Org Discovery
 
+    /// Pure org-selection rule (pattern #6: never blindly take orgs[0]) shared by the WebView and
+    /// manual-paste sign-in paths. Single org -> take it; else if an existing account's org is in
+    /// the list -> auto-select that match; else the caller must show a picker. Unit-tested in
+    /// isolation; each call site supplies its own side-effect shell (NSAlert vs ManualSignInResult).
+    enum OrgSelection {
+        case single(Organization)
+        case autoMatched(Organization, accountId: UUID)
+        case needsChoice([Organization])
+    }
+
+    // `nonisolated`: a pure rule over value types, so it needs no main-actor isolation and can be
+    // unit-tested (and called from any context) directly.
+    nonisolated static func selectOrg(orgs: [Organization], accounts: [Account]) -> OrgSelection {
+        if orgs.count == 1 {
+            return .single(orgs[0])
+        }
+        if let existing = accounts.first(where: { acct in orgs.contains(where: { $0.uuid == acct.organizationId }) }),
+           let match = orgs.first(where: { $0.uuid == existing.organizationId }) {
+            return .autoMatched(match, accountId: existing.id)
+        }
+        return .needsChoice(orgs)
+    }
+
     // internal for @testable access in AuthManagerTests
     func fetchOrganizationId() async {
         guard let sessionKey = pendingSessionKey else {
@@ -744,25 +782,20 @@ class AuthManager: NSObject, ObservableObject {
                 return
             }
 
-            // Determine which org to use (pattern #6: never blindly take orgs[0]).
-            // NOTE: the manual paste path reimplements this same selection rule in
-            // discoverAndAddManualAccount. The two are intentionally separate - this path is
-            // async/imperative and drives the NSAlert picker + login window state machine, while
-            // the manual path is pure and returns ManualSignInResult for a SwiftUI picker. If the
-            // auto-select rule changes here, update discoverAndAddManualAccount too.
+            // Determine which org to use via the pure, unit-tested `Self.selectOrg` (shared with
+            // the manual-paste path). This site supplies the imperative shell: the NSAlert picker
+            // and the login-window state machine.
             let chosenOrg: Organization
-            if orgs.count == 1 {
-                chosenOrg = orgs[0]
-            } else if let existingAccount = accountStore.accounts.first(where: { acct in orgs.contains(where: { $0.uuid == acct.organizationId }) }),
-                      let match = orgs.first(where: { $0.uuid == existingAccount.organizationId }) {
-                // Re-auth: auto-select if any existing account's org is in the list
-                chosenOrg = match
+            switch Self.selectOrg(orgs: orgs, accounts: accountStore.accounts) {
+            case .single(let org):
+                chosenOrg = org
+            case .autoMatched(let org, let accountId):
+                chosenOrg = org
                 // Log the non-PII account id, not displayName (= email when no nickname) or the
                 // org name — both can carry PII, and os_log lines can be read off-device.
-                logger.info("Re-auth auto-selected org for account \(existingAccount.id.uuidString)")
-            } else {
-                // Multiple orgs, no auto-select match — show picker
-                guard let picked = await showOrgPicker(orgs: orgs) else {
+                logger.info("Re-auth auto-selected org for account \(accountId.uuidString)")
+            case .needsChoice(let choices):
+                guard let picked = await showOrgPicker(orgs: choices) else {
                     // User cancelled the picker
                     handleOrgDiscoveryFailure("Sign-in cancelled.")
                     return
@@ -994,19 +1027,20 @@ class AuthManager: NSObject, ObservableObject {
 
             let email = extractEmail(from: orgs, rawData: data) ?? "Account \(accountStore.accounts.count + 1)"
 
-            // Org choice (pattern #6): never blindly take orgs[0] for multi-org users.
+            // Org choice via the same pure `Self.selectOrg` rule as the WebView path; this site
+            // returns a ManualSignInResult for the SwiftUI picker instead of driving an NSAlert.
             let selectedOrg: Organization
-            if orgs.count == 1 {
-                selectedOrg = orgs[0]
-            } else if let existing = accountStore.accounts.first(where: { acct in orgs.contains(where: { $0.uuid == acct.organizationId }) }),
-                      let match = orgs.first(where: { $0.uuid == existing.organizationId }) {
-                selectedOrg = match
-            } else {
+            switch Self.selectOrg(orgs: orgs, accounts: accountStore.accounts) {
+            case .single(let org):
+                selectedOrg = org
+            case .autoMatched(let org, _):
+                selectedOrg = org
+            case .needsChoice(let choices):
                 // Restore the active account's jar while the picker is shown; completeManualSignIn
                 // re-primes the jar to the chosen account via switchTo.
                 restoreActiveJar()
                 pendingManualSignIn = (sessionKey, cookieHeader, email)
-                return .needsOrgChoice(orgs)
+                return .needsOrgChoice(choices)
             }
 
             let result = addOrReactivateManualAccount(org: selectedOrg, sessionKey: sessionKey, cookieHeader: cookieHeader, email: email)
