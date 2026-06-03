@@ -11,19 +11,17 @@ import os
 /// emit, and `path-resolved` / `session-start` are written there once. This is the
 /// no-regression invariant: with the toggle off, the producer leaves no artifact on disk.
 ///
-/// Two paths:
+/// Single path: every gated event (nav decisions, cookie NAMES, capture trigger, loginState
+/// transitions, org-discovery HTTP status, session-start/end) is written to the on-disk
+/// `diag-*.jsonl` synchronously with `synchronize()` so a crash near the failure point preserves
+/// the line, AND mirrored to `os.Logger.notice` for live Console.app debugging. Only the
+/// `diag-*.jsonl` file is ever exported (uncontrolled OSLog content is never harvested into the
+/// archive — a denylist redactor cannot prove absence-of-secrets over arbitrary log text).
 ///
-/// - **Hot path** (high-volume page traffic): `os.Logger.notice` only, recovered into the
-///   on-disk artifact by `OSLogStoreDumper` at export time.
-/// - **Milestone path** (capture-lifecycle events: nav decisions, cookie NAMES, capture
-///   trigger, loginState transitions, org-discovery HTTP status, session-start/end):
-///   JSONL written synchronously with `synchronize()` so a crash near the failure point
-///   preserves the line.
-///
-/// **Redaction (P0).** Every emitted line — hot and milestone — is run through
-/// `SecretRedactor.redact(_:)` before BOTH the os_log write and the file write. Producers
-/// must still pass only non-secret signal (the contract below); the redactor is the
-/// defense-in-depth catch. Never emit `account.displayName` / email.
+/// **Redaction (P0).** Every emitted line is run through `SecretRedactor.redact(_:)` before
+/// BOTH the os_log write and the file write. Producers must still pass only non-secret signal
+/// (the contract below); the redactor is the defense-in-depth catch. Never emit
+/// `account.displayName` / email.
 ///
 /// Output: container `Library/Logs/ClaudeBattery/diag-<YYYY-MM-DD>.jsonl` (never
 /// `homeDirectoryForCurrentUser`).
@@ -71,24 +69,15 @@ final class DiagnosticsLogger: @unchecked Sendable {
 
     // MARK: - Public API
 
-    /// The single redaction chokepoint for BOTH emit paths: serialize then `SecretRedactor`.
-    /// Internal so a test can assert a planted secret is redacted here, proving the wiring for
-    /// the hot path (which writes only to os_log and so leaves no file artifact to read).
+    /// The redaction chokepoint: serialize then `SecretRedactor`. Internal so a test can assert
+    /// a planted secret is redacted here.
     func redactedLine(kind: String, payload: [String: Any]) -> String {
         SecretRedactor.redact(serialize(kind: kind, payload: payload))
     }
 
-    /// Hot path: `os.Logger.notice` only (recovered at export by OSLogStoreDumper). Use for
-    /// high-volume events. No-op when the gate is off.
-    func emitHot(kind: String, payload: [String: Any]) {
-        guard diagnosticLoggingEnabled else { return }
-        let line = redactedLine(kind: kind, payload: payload)
-        logger.notice("[\(kind, privacy: .public)] \(line, privacy: .public)")
-    }
-
-    /// Milestone path: synchronous file write + parallel os.Logger.notice. Use for the
-    /// low-frequency capture-lifecycle events that must survive a crash. No-op when the gate
-    /// is off; opens the file and writes session-start on the first gated call.
+    /// Emit a gated event: synchronous file write to `diag-*.jsonl` + parallel os.Logger.notice
+    /// (live Console only). No-op when the gate is off; opens the file and writes session-start
+    /// on the first gated call. Every event uses this path — only the file is exported.
     func emitMilestone(kind: String, payload: [String: Any]) {
         guard diagnosticLoggingEnabled else { return }
         let line = redactedLine(kind: kind, payload: payload)

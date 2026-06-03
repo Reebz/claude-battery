@@ -45,7 +45,6 @@ final class DiagnosticsLoggerTests: XCTestCase {
     func testDisabled_noFileNoDirectoryNoURL() {
         let logger = makeDisabledLogger()
         logger.emitMilestone(kind: "should-not-write", payload: ["a": 1])
-        logger.emitHot(kind: "should-not-write-hot", payload: ["b": 2])
 
         Thread.sleep(forTimeInterval: 0.05)
 
@@ -142,19 +141,18 @@ final class DiagnosticsLoggerTests: XCTestCase {
         XCTAssertTrue(content.contains("REDACTED_LEN_"), "expected redaction marker: \(content)")
     }
 
-    /// The hot path (`emitHot`) writes only to os_log, so its redaction cannot be read from a
-    /// file. It shares `redactedLine` with the milestone path; asserting that chokepoint redacts
-    /// proves the hot path is covered too. If the redact call were dropped, this fails.
-    func testHotPathRedactionChokepoint_redactsSecrets() {
+    /// `redactedLine` is the single redaction chokepoint every emit goes through. Asserting it
+    /// redacts a planted secret proves the wiring; if the redact call were dropped, this fails.
+    func testRedactionChokepoint_redactsSecrets() {
         let logger = makeEnabledLogger()
         let line = logger.redactedLine(kind: "cookie-store-poll", payload: [
             "sessionKey": "sk-ant-HOTLEAK",
             "names": "sessionKey=.claude.ai, __cf_bm=.claude.ai",
-            "note": "from hot@leak.com"
+            "note": "from chokepoint@leak.com"
         ])
-        XCTAssertFalse(line.contains("sk-ant-HOTLEAK"), "hot-path sessionKey survived: \(line)")
-        XCTAssertFalse(line.contains("hot@leak.com"), "hot-path email survived: \(line)")
-        XCTAssertTrue(line.contains("REDACTED_LEN_"), "hot-path line not redacted: \(line)")
+        XCTAssertFalse(line.contains("sk-ant-HOTLEAK"), "sessionKey survived: \(line)")
+        XCTAssertFalse(line.contains("chokepoint@leak.com"), "email survived: \(line)")
+        XCTAssertTrue(line.contains("REDACTED_LEN_"), "line not redacted: \(line)")
     }
 
     // MARK: - Volume

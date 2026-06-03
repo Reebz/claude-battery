@@ -11,12 +11,12 @@ import System
 ///
 /// - Archives the **container** Logs dir IN-PROCESS via AppleArchive (LZFSE `.aar`), no
 ///   subprocess. AppleArchive is available macOS 11+ (within the 13.5 floor).
-/// - Includes ONLY this build's redacting-producer artifacts created at/after the production
-///   install: `diag-*.jsonl` (DiagnosticsLogger) and `oslogstore-*.txt` (OSLogStoreDumper,
-///   generated on demand right before export). Every other file — stray files, or a prior,
-///   weaker-redacting build's records (older than the install date) — is excluded, so a
-///   pre-production debug artifact can never ride along. The post-install date floor is the
-///   wall; `eligibleLogFiles` is a pure function so the exclusion is unit-testable.
+/// - Includes ONLY the controlled redacted producer artifact `diag-*.jsonl` (DiagnosticsLogger,
+///   every line through `SecretRedactor`) created at/after the production install. Uncontrolled
+///   OSLog content (`oslogstore-*.txt`) is NEVER included — a denylist redactor cannot prove
+///   absence-of-secrets over arbitrary log text. Every other file — stray files, or a prior,
+///   weaker build's records (older than the install date) — is excluded, so a pre-production
+///   artifact cannot ride along. `eligibleLogFiles` is a pure function so this is unit-testable.
 /// - Lets the user save the archive via `NSSavePanel` (sandbox-safe with the
 ///   `com.apple.security.files.user-selected.read-write` entitlement).
 /// - On success, surfaces the saved location **and** a link to the GitHub issues page so the
@@ -44,12 +44,10 @@ enum LogsExporter {
         logsDirectory: URL = defaultLogDirectory(),
         installDate: Date = productionInstallDate()
     ) -> Result {
-        // Recover the os_log hot-path events (nav-decision, cookie-store-poll) and the
-        // production os.Logger lines into an on-disk `oslogstore-*.txt` so the archive carries
-        // them. Gated: a no-op when diagnostics are disabled. Runs before eligibility so the
-        // freshly written dump is picked up. Every dumped line is SecretRedactor-processed.
-        OSLogStoreDumper.dump(directoryOverride: logsDirectory)
-
+        // Export ships ONLY the controlled, redacted `diag-*.jsonl`. Uncontrolled OSLog content
+        // is deliberately NOT recovered into the archive: a denylist redactor cannot prove
+        // absence-of-secrets over arbitrary log text, so the invariant is that no OSLog dump can
+        // ever reach the export. (See plan KTD-6 / posture decision.)
         let eligible = eligibleLogFiles(in: logsDirectory, installedAfter: installDate)
         guard !eligible.isEmpty else { return .nothingToExport }
 
@@ -85,18 +83,19 @@ enum LogsExporter {
 
     // MARK: - Eligibility (pure, unit-testable)
 
-    /// True for a filename produced by THIS build's redacting producers: `diag-*.jsonl`
-    /// (DiagnosticsLogger) and `oslogstore-*.txt` (OSLogStoreDumper). Both are run through
-    /// `SecretRedactor`; any other name (stray files, unknown artifacts) is excluded.
+    /// True ONLY for the controlled redacted producer artifact: `diag-*.jsonl` (DiagnosticsLogger,
+    /// every line through `SecretRedactor`). Crucially this EXCLUDES `oslogstore-*.txt` and every
+    /// other name — uncontrolled OSLog content must never reach the export archive, because a
+    /// denylist redactor cannot prove absence-of-secrets over arbitrary log text.
     static func isEligibleName(_ name: String) -> Bool {
-        (name.hasPrefix("diag-") && name.hasSuffix(".jsonl")) ||
-        (name.hasPrefix("oslogstore-") && name.hasSuffix(".txt"))
+        name.hasPrefix("diag-") && name.hasSuffix(".jsonl")
     }
 
-    /// The curated file list: producer artifacts (`diag-*.jsonl`, `oslogstore-*.txt`) whose
-    /// modification date is at/after `installedAfter`. Older files from a prior build, and any
-    /// non-producer file, are excluded — so a pre-production debug artifact can never ride along.
-    /// The post-install date floor is the wall that keeps a weaker prior build's records out.
+    /// The curated file list: `diag-*.jsonl` files whose modification date is at/after
+    /// `installedAfter`. Older files from a prior build, and EVERY non-`diag-*.jsonl` file
+    /// (including any OSLog dump), are excluded — so neither a pre-production artifact nor any
+    /// uncontrolled OSLog content can ride along. The post-install date floor is the wall that
+    /// keeps a weaker prior build's records out.
     static func eligibleLogFiles(in directory: URL, installedAfter installDate: Date) -> [URL] {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(
@@ -185,7 +184,7 @@ enum LogsExporter {
 
     // MARK: - Locations
 
-    /// Container Library Logs dir (matches DiagnosticsLogger / OSLogStoreDumper).
+    /// Container Library Logs dir (matches DiagnosticsLogger).
     static func defaultLogDirectory() -> URL {
         let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory

@@ -48,12 +48,10 @@
 		E60B83499A3692A0D57124E8 /* HTTPDataFetching.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40FA3E7941EBB6529BB0D867 /* HTTPDataFetching.swift */; };
 		F1000000000000000000F101 /* SecretRedactor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000000000000000000F201 /* SecretRedactor.swift */; };
 		F1000000000000000000F102 /* DiagnosticsLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000000000000000000F202 /* DiagnosticsLogger.swift */; };
-		F1000000000000000000F103 /* OSLogStoreDumper.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000000000000000000F203 /* OSLogStoreDumper.swift */; };
 		F1000000000000000000F104 /* LogsExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000000000000000000F204 /* LogsExporter.swift */; };
 		FB000000000000000000FB01 /* SecretRedactorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA000000000000000000FA01 /* SecretRedactorTests.swift */; };
 		FB000000000000000000FB02 /* DiagnosticsLoggerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA000000000000000000FA02 /* DiagnosticsLoggerTests.swift */; };
 		FB000000000000000000FB03 /* LogsExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA000000000000000000FA03 /* LogsExporterTests.swift */; };
-		FB000000000000000000FB04 /* OSLogStoreDumperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA000000000000000000FA04 /* OSLogStoreDumperTests.swift */; };
 		FB000000000000000000FB05 /* NoSecretsExportGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA000000000000000000FA05 /* NoSecretsExportGateTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -113,12 +111,10 @@
 		D20000050000000000000005 /* orgs_empty.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = orgs_empty.json; path = Fixtures/orgs_empty.json; sourceTree = "<group>"; };
 		F2000000000000000000F201 /* SecretRedactor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretRedactor.swift; sourceTree = "<group>"; };
 		F2000000000000000000F202 /* DiagnosticsLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsLogger.swift; sourceTree = "<group>"; };
-		F2000000000000000000F203 /* OSLogStoreDumper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSLogStoreDumper.swift; sourceTree = "<group>"; };
 		F2000000000000000000F204 /* LogsExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogsExporter.swift; sourceTree = "<group>"; };
 		FA000000000000000000FA01 /* SecretRedactorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = SecretRedactorTests.swift; path = SecretRedactorTests.swift; sourceTree = "<group>"; };
 		FA000000000000000000FA02 /* DiagnosticsLoggerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = DiagnosticsLoggerTests.swift; path = DiagnosticsLoggerTests.swift; sourceTree = "<group>"; };
 		FA000000000000000000FA03 /* LogsExporterTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = LogsExporterTests.swift; path = LogsExporterTests.swift; sourceTree = "<group>"; };
-		FA000000000000000000FA04 /* OSLogStoreDumperTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = OSLogStoreDumperTests.swift; path = OSLogStoreDumperTests.swift; sourceTree = "<group>"; };
 		FA000000000000000000FA05 /* NoSecretsExportGateTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = NoSecretsExportGateTests.swift; path = NoSecretsExportGateTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -182,7 +178,6 @@
 				FA000000000000000000FA01 /* SecretRedactorTests.swift */,
 				FA000000000000000000FA02 /* DiagnosticsLoggerTests.swift */,
 				FA000000000000000000FA03 /* LogsExporterTests.swift */,
-				FA000000000000000000FA04 /* OSLogStoreDumperTests.swift */,
 				FA000000000000000000FA05 /* NoSecretsExportGateTests.swift */,
 			);
 			name = ClaudeBatteryTests;
@@ -231,7 +226,6 @@
 				40FA3E7941EBB6529BB0D867 /* HTTPDataFetching.swift */,
 				F2000000000000000000F201 /* SecretRedactor.swift */,
 				F2000000000000000000F202 /* DiagnosticsLogger.swift */,
-				F2000000000000000000F203 /* OSLogStoreDumper.swift */,
 				F2000000000000000000F204 /* LogsExporter.swift */,
 			);
 			path = Services;
@@ -419,7 +413,6 @@
 				E60B83499A3692A0D57124E8 /* HTTPDataFetching.swift in Sources */,
 				F1000000000000000000F101 /* SecretRedactor.swift in Sources */,
 				F1000000000000000000F102 /* DiagnosticsLogger.swift in Sources */,
-				F1000000000000000000F103 /* OSLogStoreDumper.swift in Sources */,
 				F1000000000000000000F104 /* LogsExporter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -443,7 +436,6 @@
 				FB000000000000000000FB01 /* SecretRedactorTests.swift in Sources */,
 				FB000000000000000000FB02 /* DiagnosticsLoggerTests.swift in Sources */,
 				FB000000000000000000FB03 /* LogsExporterTests.swift in Sources */,
-				FB000000000000000000FB04 /* OSLogStoreDumperTests.swift in Sources */,
 				FB000000000000000000FB05 /* NoSecretsExportGateTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -6,9 +6,9 @@ import XCTest
 
 /// Tests for the redaction-respecting, sandbox-correct export (U7). Exercises the pure
 /// eligibility filter and the in-process archive WITHOUT invoking `NSSavePanel` (the panel
-/// path is a manual gate). Proves: post-install producer artifacts (`diag-*.jsonl` AND
-/// `oslogstore-*.txt`) are included; prior-build files (older than install) and stray files are
-/// excluded; the archived bytes contain only redacted producer output.
+/// path is a manual gate). Proves the posture invariant: ONLY post-install `diag-*.jsonl` is
+/// exported; oslogstore-*.txt (uncontrolled OSLog content), prior-build files, and stray files
+/// are always excluded; the archived bytes contain only the controlled redacted producer output.
 final class LogsExporterTests: XCTestCase {
     private var dir: URL!
 
@@ -46,26 +46,17 @@ final class LogsExporterTests: XCTestCase {
         XCTAssertEqual(names, ["diag-2026-06-03.jsonl", "diag-2026-06-04.jsonl"])
     }
 
-    func testEligible_includesPostInstallOslogstoreDumps() {
-        // oslogstore-*.txt produced by THIS build (post-install) is now INCLUDED — its content is
-        // SecretRedactor-processed by OSLogStoreDumper, and it carries the os_log hot-path events.
+    func testEligible_alwaysExcludesOslogstoreDumps_evenPostInstall() {
+        // POSTURE INVARIANT: uncontrolled OSLog content never reaches the export. An
+        // oslogstore-*.txt is excluded regardless of date — even a post-install one.
         let install = Date()
         write("diag-2026-06-03.jsonl", "{\"kind\":\"a\"}\n", mtime: install.addingTimeInterval(10))
         write("oslogstore-2026-06-03T00-00-00Z.txt", "[Auth] info nav-decision host=claude.ai\n", mtime: install.addingTimeInterval(10))
 
         let names = Set(LogsExporter.eligibleLogFiles(in: dir, installedAfter: install).map { $0.lastPathComponent })
-        XCTAssertEqual(names, ["diag-2026-06-03.jsonl", "oslogstore-2026-06-03T00-00-00Z.txt"])
-    }
-
-    func testEligible_excludesPriorBuildOslogstoreDumps() {
-        // A pre-install oslogstore (prior, possibly weaker-redacting build) is excluded by the
-        // post-install date floor — the wall that keeps pre-production artifacts out.
-        let install = Date()
-        write("oslogstore-old.txt", "JS document.cookie: sessionKey=sk-ant-OLDLEAK\n", mtime: install.addingTimeInterval(-86_400))
-        write("diag-2026-06-03.jsonl", "{\"new\":1}\n", mtime: install.addingTimeInterval(10))
-
-        let names = Set(LogsExporter.eligibleLogFiles(in: dir, installedAfter: install).map { $0.lastPathComponent })
-        XCTAssertEqual(names, ["diag-2026-06-03.jsonl"], "prior-build oslogstore must be excluded by date floor")
+        XCTAssertEqual(names, ["diag-2026-06-03.jsonl"], "oslogstore must NEVER be eligible for export")
+        XCTAssertFalse(LogsExporter.isEligibleName("oslogstore-2026-06-03T00-00-00Z.txt"),
+                       "isEligibleName must reject oslogstore-*.txt")
     }
 
     func testEligible_excludesPriorBuildDiagFiles() {
@@ -99,21 +90,20 @@ final class LogsExporterTests: XCTestCase {
 
     // MARK: - Archive build + content verification
 
-    func testBuildArchive_includesPostInstallProducerFiles_excludesPriorBuild() throws {
+    func testBuildArchive_shipsOnlyDiagJsonl_neverOslogstore() throws {
         let install = Date()
-        // U6 producers are the only writers; these lines are already SecretRedactor-processed.
+        // The only writer of diag-*.jsonl is DiagnosticsLogger; these lines are SecretRedactor-processed.
         let diagURL = write("diag-2026-06-03.jsonl",
             "{\"kind\":\"session-cookie-captured\",\"payload\":{\"domain\":\".claude.ai\"}}\n" +
             "{\"kind\":\"org-discovery-status\",\"payload\":{\"status\":200}}\n",
             mtime: install.addingTimeInterval(10))
-        // Post-install oslogstore (redacted by the dumper) — now INCLUDED.
-        write("oslogstore-2026-06-03T00-00-00Z.txt", "[Auth] info nav-decision host=claude.ai\n", mtime: install.addingTimeInterval(10))
-        // Prior-build oslogstore with a raw secret — excluded by the date floor, must NOT ship.
-        write("oslogstore-old.txt", "sessionKey=sk-ant-SHOULD-NOT-SHIP\n", mtime: install.addingTimeInterval(-86_400))
+        // A post-install oslogstore with a secret — must NEVER ship (posture invariant), even
+        // though it is post-install. This is the uncontrolled-OSLog content the export excludes.
+        write("oslogstore-2026-06-03T00-00-00Z.txt", "sessionKey=sk-ant-SHOULD-NOT-SHIP\n", mtime: install.addingTimeInterval(10))
 
         let eligible = LogsExporter.eligibleLogFiles(in: dir, installedAfter: install)
-        XCTAssertEqual(Set(eligible.map { $0.lastPathComponent }),
-                       ["diag-2026-06-03.jsonl", "oslogstore-2026-06-03T00-00-00Z.txt"])
+        XCTAssertEqual(eligible.map { $0.lastPathComponent }, ["diag-2026-06-03.jsonl"],
+                       "only diag-*.jsonl may be eligible")
 
         let archiveURL = try LogsExporter.buildArchive(from: eligible)
         defer { try? FileManager.default.removeItem(at: archiveURL) }
@@ -124,13 +114,12 @@ final class LogsExporterTests: XCTestCase {
 
         let extracted = try FileManager.default.contentsOfDirectory(at: extractDir, includingPropertiesForKeys: nil)
         let extractedNames = Set(extracted.map { $0.lastPathComponent })
-        XCTAssertTrue(extractedNames.contains("diag-2026-06-03.jsonl"), "diag missing: \(extractedNames)")
-        XCTAssertTrue(extractedNames.contains("oslogstore-2026-06-03T00-00-00Z.txt"), "post-install oslogstore missing: \(extractedNames)")
-        XCTAssertFalse(extractedNames.contains("oslogstore-old.txt"), "prior-build oslogstore leaked into archive")
+        XCTAssertEqual(extractedNames, ["diag-2026-06-03.jsonl"], "archive must contain ONLY diag-*.jsonl: \(extractedNames)")
+        XCTAssertFalse(extractedNames.contains { $0.hasPrefix("oslogstore-") }, "oslogstore leaked into archive")
 
         var combined = ""
         for f in extracted { combined += (try? String(contentsOf: f, encoding: .utf8)) ?? "" }
-        XCTAssertFalse(combined.contains("sk-ant-SHOULD-NOT-SHIP"), "secret from the excluded prior-build file is in the archive")
+        XCTAssertFalse(combined.contains("sk-ant-SHOULD-NOT-SHIP"), "OSLog secret reached the archive")
         XCTAssertTrue(combined.contains("session-cookie-captured"))
 
         // No mutation of the included diag file.
