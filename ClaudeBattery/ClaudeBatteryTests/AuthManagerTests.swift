@@ -500,6 +500,54 @@ final class AuthManagerTests: XCTestCase {
                        "A failed manual sign-in must restore the working account's cookie jar (P1)")
     }
 
+    @MainActor
+    func testManualSignIn_multiOrgRestoresActiveJarWhilePickerShown() async {
+        let auth = makeAuthManager()
+        let x = Account(email: "x@test.com", sessionKey: "sk-X", organizationId: "org-X",
+                        allCookieHeader: "sessionKey=sk-X; __cf_bm=cf-X")
+        _ = auth.accountStore.addAccount(x)
+        auth.accountStore.switchTo(x.id)
+        let url = URL(string: "https://claude.ai")!
+        func jarSessionKey() -> String? {
+            ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: url)?.first { $0.name == "sessionKey" }?.value
+        }
+        mockSession.responseData = #"[{"uuid": "org-a"}, {"uuid": "org-b"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        let result = await auth.manualSignIn("sessionKey=sk-Y; __cf_bm=cf-Y")
+
+        guard case .needsOrgChoice = result else { return XCTFail("Expected needsOrgChoice, got \(result)") }
+        XCTAssertEqual(jarSessionKey(), "sk-X",
+                       "While the org picker is shown, the active account's jar must be restored (P1 multi-org path)")
+
+        // Completing the pick re-primes the jar to the chosen account.
+        _ = auth.completeManualSignIn(org: Organization(uuid: "org-b", name: nil, billingType: nil, emailAddress: nil))
+        XCTAssertEqual(jarSessionKey(), "sk-Y", "After choosing an org, the jar holds the new account")
+    }
+
+    @MainActor
+    func testCapture_rejectedWhenLoginTornDownMidStoreRead() async {
+        // The post-await liveness guard's reject branch: a store read that resolves AFTER the
+        // login is torn down must not capture or sign in (the whole point of the concurrency fix).
+        let auth = makeAuthManager()
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        let webView = WKWebView(frame: .zero, configuration: config)
+        await config.websiteDataStore.httpCookieStore.setCookie(makeCookie(value: "sk-late"))
+        auth.loginWebView = webView
+        mockSession.responseData = #"[{"uuid": "org-late"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        // Trigger a re-read, then tear down (nil loginWebView) synchronously before yielding, so
+        // the spawned Task's post-await guard observes the torn-down state.
+        auth.webViewDidClose(WKWebView(frame: .zero, configuration: WKWebViewConfiguration()))
+        auth.loginWebView = nil
+
+        let captured = await waitUntil(timeout: 2) { auth.accountStore.accounts.count == 1 || auth.pendingSessionKey != nil }
+        XCTAssertFalse(captured, "A store read resolving after teardown must not capture or sign in")
+        XCTAssertEqual(auth.accountStore.accounts.count, 0)
+    }
+
     // MARK: - Domain allowlist + OAuth popup gate (pattern #2 / #7)
 
     @MainActor
