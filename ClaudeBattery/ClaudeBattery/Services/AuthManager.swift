@@ -901,13 +901,13 @@ class AuthManager: NSObject, ObservableObject {
         let account = Account(email: email, sessionKey: sessionKey, organizationId: org.uuid, allCookieHeader: cookieHeader)
         if accountStore.addAccount(account) {
             accountStore.switchTo(account.id)
-            logger.info("Manual sign-in added account: \(account.displayName)")
+            logger.info("Manual sign-in added a new account")
             onAuthSuccess?()
             return .success(account.displayName)
         } else if let existing = accountStore.accounts.first(where: { $0.organizationId == org.uuid }) {
             accountStore.updateSessionKey(existing.id, sessionKey, cookieHeader: cookieHeader)
             accountStore.switchTo(existing.id)
-            logger.info("Manual sign-in reactivated account: \(existing.displayName)")
+            logger.info("Manual sign-in reactivated an existing account")
             onAuthSuccess?()
             return .success(existing.displayName)
         }

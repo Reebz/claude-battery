@@ -175,6 +175,18 @@ final class ClaudeAPITests: XCTestCase {
         XCTAssertEqual(sk?.value, "sk-ant-abc123==", "Cookie value with = should be preserved")
     }
 
+    // MARK: - No-regression invariant (U8a): session cookie/credential semantics
+
+    func testSessionConfiguration_keepsCookieAndCredentialSemantics() {
+        let config = ClaudeAPI.session.configuration
+        // urlCredentialStorage must stay nil so URLSession never raises a Keychain dialog.
+        XCTAssertNil(config.urlCredentialStorage, "urlCredentialStorage must remain nil (no Keychain dialog)")
+        // The shared jar is retained so Cloudflare __cf_bm rotation flows through Set-Cookie.
+        XCTAssertTrue(config.httpCookieStorage === HTTPCookieStorage.shared, "Shared cookie jar must be preserved")
+        XCTAssertTrue(config.httpShouldSetCookies)
+        XCTAssertEqual(config.httpCookieAcceptPolicy, .always)
+    }
+
     func testActivateCookiesThenClearClaudeCookies() {
         ClaudeAPI.activateCookies(sessionKey: "sk-test", cookieHeader: "sessionKey=sk-test; __cf_bm=cf")
         let url = URL(string: "https://claude.ai")!
