@@ -11,9 +11,18 @@ enum LoginState: Equatable {
     case error(String)
 }
 
+/// Which overlay (if any) is currently shown over the login WebView (U2).
+enum LoginOverlayKind: Equatable {
+    case none
+    case signingIn
+    case error
+}
+
 @MainActor
 class AuthManager: NSObject, ObservableObject {
-    @Published var loginState: LoginState = .idle
+    @Published var loginState: LoginState = .idle {
+        didSet { updateLoginOverlay(for: loginState) }
+    }
 
     private let storage: StorageService
     // internal for @testable access in AuthManagerTests
@@ -41,6 +50,14 @@ class AuthManager: NSObject, ObservableObject {
     /// and Google OAuth fails immediately.
     private var popupWebView: WKWebView?
     var onAuthSuccess: (() -> Void)?
+    /// Hook the app wires to open Settings at the manual paste section (U5). Invoked by the
+    /// sign-in error overlay's "Sign in manually" button so a stuck user reaches the floor.
+    var onManualSignInRequested: (() -> Void)?
+
+    /// The overlay currently shown over the login WebView (U2).
+    // internal for @testable access in AuthManagerTests
+    private(set) var loginOverlayKind: LoginOverlayKind = .none
+    private var loginOverlay: NSView?
 
     init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
         self.storage = storage
@@ -211,6 +228,7 @@ class AuthManager: NSObject, ObservableObject {
     }
 
     private func stopLoginWindow() {
+        removeLoginOverlay()
         loginTimeoutTask?.cancel()
         loginTimeoutTask = nil
         cookieEnumerationTask?.cancel()
@@ -232,6 +250,160 @@ class AuthManager: NSObject, ObservableObject {
         loginWebView = nil
         loginWindowController?.close()
         loginWindowController = nil
+    }
+
+    // MARK: - Login Overlay (U2)
+
+    /// Drive the overlay from the login-state machine (called by `loginState.didSet`):
+    /// `.signingIn` shows "Finishing sign-in…", `.error` swaps to a recoverable error card,
+    /// `.idle` clears it. No-ops when there is no login WebView to host the overlay.
+    private func updateLoginOverlay(for state: LoginState) {
+        switch state {
+        case .signingIn:
+            showSigningInOverlay()
+        case .error(let message):
+            showLoginOverlayError(message)
+        case .idle:
+            removeLoginOverlay()
+        }
+    }
+
+    // internal for @testable access in AuthManagerTests
+    func showSigningInOverlay() {
+        guard let host = loginWebView else { return }
+        attachOverlay(Self.makeSigningInOverlay(), to: host)
+        loginOverlayKind = .signingIn
+    }
+
+    // internal for @testable access in AuthManagerTests
+    func showLoginOverlayError(_ message: String) {
+        guard let host = loginWebView else { return }
+        attachOverlay(makeErrorOverlay(message: message), to: host)
+        loginOverlayKind = .error
+    }
+
+    // internal for @testable access in AuthManagerTests
+    func removeLoginOverlay() {
+        loginOverlay?.removeFromSuperview()
+        loginOverlay = nil
+        loginOverlayKind = .none
+    }
+
+    /// Swap in `overlay` as the single overlay subview filling `host`, replacing any prior one.
+    private func attachOverlay(_ overlay: NSView, to host: NSView) {
+        loginOverlay?.removeFromSuperview()
+        overlay.frame = host.bounds
+        overlay.autoresizingMask = [.width, .height]
+        host.addSubview(overlay)
+        loginOverlay = overlay
+    }
+
+    /// The "Finishing sign-in…" overlay: a blurred panel with a spinner and label. Pure (no
+    /// `self` capture) so it is unit-testable in isolation. VoiceOver reads "Finishing sign-in".
+    /// Identifier on the overlay container so teardown and tests can find the mounted overlay.
+    static let loginOverlayIdentifier = NSUserInterfaceItemIdentifier("ClaudeBatteryLoginOverlay")
+
+    static func makeSigningInOverlay() -> NSView {
+        let container = NSVisualEffectView()
+        container.identifier = loginOverlayIdentifier
+        container.material = .hudWindow
+        container.blendingMode = .withinWindow
+        container.state = .active
+        container.setAccessibilityElement(true)
+        container.setAccessibilityRole(.group)
+        container.setAccessibilityLabel("Finishing sign-in")
+
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .regular
+        spinner.startAnimation(nil)
+        spinner.setAccessibilityLabel("Finishing sign-in")
+
+        let label = NSTextField(labelWithString: "Finishing sign-in…")
+        label.font = .systemFont(ofSize: 15, weight: .medium)
+        label.alignment = .center
+
+        let stack = NSStackView(views: [spinner, label])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ])
+        return container
+    }
+
+    /// The recoverable error overlay shown when org discovery fails: a message plus
+    /// "Try again" (reload the login flow) and "Sign in manually" (jump to the paste floor).
+    private func makeErrorOverlay(message: String) -> NSView {
+        let container = NSVisualEffectView()
+        container.identifier = Self.loginOverlayIdentifier
+        container.material = .hudWindow
+        container.blendingMode = .withinWindow
+        container.state = .active
+        container.setAccessibilityElement(true)
+        container.setAccessibilityRole(.group)
+        container.setAccessibilityLabel("Sign-in problem")
+
+        let title = NSTextField(labelWithString: "Couldn’t finish sign-in")
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.alignment = .center
+
+        let detail = NSTextField(wrappingLabelWithString: message)
+        detail.font = .systemFont(ofSize: 12)
+        detail.textColor = .secondaryLabelColor
+        detail.alignment = .center
+        detail.preferredMaxLayoutWidth = 320
+
+        let retry = NSButton(title: "Try again", target: self, action: #selector(overlayRetryTapped))
+        retry.bezelStyle = .rounded
+        retry.keyEquivalent = "\r"
+
+        let manual = NSButton(title: "Sign in manually", target: self, action: #selector(overlayManualTapped))
+        manual.bezelStyle = .rounded
+
+        let buttons = NSStackView(views: [retry, manual])
+        buttons.orientation = .horizontal
+        buttons.spacing = 12
+
+        let stack = NSStackView(views: [title, detail, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            stack.widthAnchor.constraint(lessThanOrEqualTo: container.widthAnchor, constant: -40),
+        ])
+        return container
+    }
+
+    @objc private func overlayRetryTapped() {
+        retryLogin()
+    }
+
+    @objc private func overlayManualTapped() {
+        onManualSignInRequested?()
+        loginState = .idle
+        stopLoginWindow()
+    }
+
+    /// Reset capture state and reload claude.ai/login in the existing login WebView.
+    // internal for @testable access in AuthManagerTests
+    func retryLogin() {
+        hasCapturedSession = false
+        pendingSessionKey = nil
+        pendingCookieHeader = nil
+        removeLoginOverlay()
+        loginState = .idle
+        if let url = URL(string: "https://claude.ai/login") {
+            loginWebView?.load(URLRequest(url: url))
+        }
     }
 
     // internal for @testable access in AuthManagerTests

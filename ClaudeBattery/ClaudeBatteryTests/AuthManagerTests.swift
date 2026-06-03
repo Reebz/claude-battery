@@ -162,6 +162,101 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(auth.accountStore.accounts.first?.organizationId, "org-popup-close")
     }
 
+    // MARK: - "Finishing sign-in…" overlay (U2)
+
+    @MainActor
+    private func makeLoginWebView() -> WKWebView {
+        WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 640), configuration: WKWebViewConfiguration())
+    }
+
+    @MainActor
+    private func hasMountedOverlay(_ webView: WKWebView) -> Bool {
+        webView.subviews.contains { $0.identifier == AuthManager.loginOverlayIdentifier }
+    }
+
+    @MainActor
+    func testOverlay_shownOnSigningIn() {
+        let auth = makeAuthManager()
+        let webView = makeLoginWebView()
+        auth.loginWebView = webView
+
+        auth.showSigningInOverlay()
+
+        XCTAssertEqual(auth.loginOverlayKind, .signingIn)
+        XCTAssertTrue(hasMountedOverlay(webView), "Overlay view should be mounted on the login WebView")
+    }
+
+    @MainActor
+    func testOverlay_noOpWithoutLoginWebView() {
+        let auth = makeAuthManager()
+        // No loginWebView set — overlay has nowhere to mount and must stay absent.
+        auth.showSigningInOverlay()
+        XCTAssertEqual(auth.loginOverlayKind, .none)
+    }
+
+    @MainActor
+    func testOverlay_drivenByLoginStateTransitions() {
+        let auth = makeAuthManager()
+        let webView = makeLoginWebView()
+        auth.loginWebView = webView
+
+        auth.loginState = .signingIn
+        XCTAssertEqual(auth.loginOverlayKind, .signingIn, "didSet should show the overlay on .signingIn")
+
+        auth.loginState = .error("boom")
+        XCTAssertEqual(auth.loginOverlayKind, .error, "didSet should swap to the error overlay on .error")
+
+        auth.loginState = .idle
+        XCTAssertEqual(auth.loginOverlayKind, .none, "didSet should clear the overlay on .idle")
+        XCTAssertFalse(hasMountedOverlay(webView))
+    }
+
+    @MainActor
+    func testOverlay_errorStateOnOrgDiscovery401() async {
+        let auth = makeAuthManager()
+        let webView = makeLoginWebView()
+        auth.loginWebView = webView
+        auth.pendingSessionKey = "sk-expired"
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 401
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertEqual(auth.loginOverlayKind, .error,
+                       "A 401 during org discovery should surface the recoverable error overlay")
+    }
+
+    @MainActor
+    func testOverlay_tornDownWhenWindowClosesMidSigningIn() {
+        let auth = makeAuthManager()
+        let webView = makeLoginWebView()
+        auth.loginWebView = webView
+        auth.loginState = .signingIn
+        XCTAssertEqual(auth.loginOverlayKind, .signingIn)
+
+        // User closes the login window while capture is still finishing.
+        auth.windowWillClose(Notification(name: NSWindow.willCloseNotification))
+
+        XCTAssertEqual(auth.loginOverlayKind, .none, "Overlay must be torn down on window close")
+        XCTAssertFalse(hasMountedOverlay(webView), "No overlay subview should be retained after teardown")
+        XCTAssertEqual(auth.loginState, .idle, "State resets to idle so the user can retry")
+    }
+
+    @MainActor
+    func testRetryLogin_resetsCaptureState() {
+        let auth = makeAuthManager()
+        let webView = makeLoginWebView()
+        auth.loginWebView = webView
+        auth.loginState = .signingIn
+        auth.pendingSessionKey = "sk-stale"
+
+        auth.retryLogin()
+
+        XCTAssertNil(auth.pendingSessionKey, "Retry clears the stale pending key")
+        XCTAssertEqual(auth.loginOverlayKind, .none)
+        XCTAssertEqual(auth.loginState, .idle)
+    }
+
     // MARK: - isSessionCookie: Happy Path — valid sessionKey on claude.ai
 
     @MainActor
