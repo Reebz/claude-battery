@@ -110,7 +110,7 @@ final class LogsExporterTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: archiveURL.path), "archive should be created")
 
         let extractDir = dir.appendingPathComponent("extracted", isDirectory: true)
-        try Self.decodeArchive(at: archiveURL, into: extractDir)
+        try ArchiveTestSupport.decode(at: archiveURL, into: extractDir)
 
         let extracted = try FileManager.default.contentsOfDirectory(at: extractDir, includingPropertiesForKeys: nil)
         let extractedNames = Set(extracted.map { $0.lastPathComponent })
@@ -149,6 +149,26 @@ final class LogsExporterTests: XCTestCase {
         XCTAssertTrue(names.isEmpty, "a future install floor must exclude all files (fail-closed)")
     }
 
+    @MainActor
+    func testExportWithSavePanel_installDateUnreadable_whenDistantFuture() {
+        // DI-05: an unreadable install date (.distantFuture) is distinct from an empty history, so
+        // the UI can explain the cause rather than show "no logs yet". Does not present the panel.
+        write("diag-2026-06-03.jsonl", "{\"k\":1}\n", mtime: Date())
+        let result = LogsExporter.exportWithSavePanel(logsDirectory: dir, installDate: .distantFuture)
+        XCTAssertEqual(result, .installDateUnreadable)
+    }
+
+    func testEligible_sameDayPriorLaunchFileExcludedByMtime() {
+        // ADV-001: two same-UTC-day per-launch files; the prior build's file (pre-install mtime)
+        // must be excluded so its bytes never ship, even though the date in the name matches.
+        let install = Date()
+        write("diag-2026-06-03-priorbld.jsonl", "{\"preinstall\":1}\n", mtime: install.addingTimeInterval(-60))
+        write("diag-2026-06-03-currbld.jsonl", "{\"postinstall\":1}\n", mtime: install.addingTimeInterval(10))
+        let names = Set(LogsExporter.eligibleLogFiles(in: dir, installedAfter: install).map { $0.lastPathComponent })
+        XCTAssertEqual(names, ["diag-2026-06-03-currbld.jsonl"],
+                       "a same-day prior-launch file before the install floor must be excluded")
+    }
+
     func testBuildArchive_throwsWhenSourceFileMissing() {
         // A non-existent eligible file makes staging copyItem throw → buildArchive throws, which
         // exportWithSavePanel maps to .failure(String). Locks the error contract the Settings UI
@@ -157,10 +177,14 @@ final class LogsExporterTests: XCTestCase {
         XCTAssertThrowsError(try LogsExporter.buildArchive(from: [bogus]))
     }
 
-    // MARK: - Helpers
+    // MARK: - Helpers (shared archive decode lives in ArchiveTestSupport, below)
+}
 
-    /// Decode an LZFSE `.aar` produced by `buildArchive` back onto disk.
-    private static func decodeArchive(at archiveURL: URL, into destination: URL) throws {
+/// Shared LZFSE `.aar` decode helper for the export test suites (LogsExporterTests +
+/// NoSecretsExportGateTests), hoisted from a byte-for-byte duplicate in both files. Inverse of
+/// `LogsExporter.buildArchive`: read stream → decompress → decode → extract onto disk.
+enum ArchiveTestSupport {
+    static func decode(at archiveURL: URL, into destination: URL) throws {
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         guard let archivePath = FilePath(archiveURL),
               let destPath = FilePath(destination) else {

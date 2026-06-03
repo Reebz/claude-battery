@@ -358,6 +358,10 @@ private struct DiagnosticsSection: View {
             statusIsError = false
             statusText = "No diagnostic logs yet. Turn on logging, reproduce the problem, then export."
             showIssuesLink = false
+        case .installDateUnreadable:
+            statusIsError = true
+            statusText = "Couldn't determine the install date, so export is disabled for safety. Reinstall Claude Battery from the DMG, then export again."
+            showIssuesLink = false
         case .failure(let message):
             statusIsError = true
             statusText = message

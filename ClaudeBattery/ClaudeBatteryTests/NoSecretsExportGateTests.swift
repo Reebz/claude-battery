@@ -87,7 +87,7 @@ final class NoSecretsExportGateTests: XCTestCase {
 
         // 4) Decode and scan every extracted byte.
         let extractDir = dir.appendingPathComponent("extracted", isDirectory: true)
-        try Self.decodeArchive(at: archiveURL, into: extractDir)
+        try ArchiveTestSupport.decode(at: archiveURL, into: extractDir)
 
         let extractedFiles = try FileManager.default.contentsOfDirectory(at: extractDir, includingPropertiesForKeys: nil)
         XCTAssertEqual(Set(extractedFiles.map { $0.lastPathComponent.hasPrefix("oslogstore-") }), [false],
@@ -110,29 +110,5 @@ final class NoSecretsExportGateTests: XCTestCase {
         XCTAssertTrue(combined.contains("REDACTED_LEN_"), "expected redaction markers in archive content")
     }
 
-    // MARK: - Helpers
-
-    private static func decodeArchive(at archiveURL: URL, into destination: URL) throws {
-        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        guard let archivePath = FilePath(archiveURL), let destPath = FilePath(destination) else {
-            throw LogsExporter.ExportError.pathConstruction
-        }
-        guard let readStream = ArchiveByteStream.fileStream(
-            path: archivePath, mode: .readOnly, options: [], permissions: FilePermissions(rawValue: 0o644)
-        ) else { throw LogsExporter.ExportError.streamOpen }
-        defer { try? readStream.close() }
-        guard let decompressStream = ArchiveByteStream.decompressionStream(readingFrom: readStream) else {
-            throw LogsExporter.ExportError.streamOpen
-        }
-        defer { try? decompressStream.close() }
-        guard let decodeStream = ArchiveStream.decodeStream(readingFrom: decompressStream) else {
-            throw LogsExporter.ExportError.streamOpen
-        }
-        defer { try? decodeStream.close() }
-        guard let extractStream = ArchiveStream.extractStream(extractingTo: destPath) else {
-            throw LogsExporter.ExportError.streamOpen
-        }
-        defer { try? extractStream.close() }
-        _ = try ArchiveStream.process(readingFrom: decodeStream, writingTo: extractStream)
-    }
+    // MARK: - Helpers (archive decode is shared via ArchiveTestSupport in LogsExporterTests)
 }

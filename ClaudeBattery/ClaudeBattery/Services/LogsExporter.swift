@@ -31,6 +31,10 @@ enum LogsExporter {
         case cancelled
         /// Nothing eligible to export (no `diag-*.jsonl` since install). Not an error.
         case nothingToExport
+        /// The bundle install date was unreadable, so the fail-closed floor (`.distantFuture`)
+        /// excluded everything. Distinct from `nothingToExport` so the UI can explain the cause
+        /// (reinstall from the DMG) instead of a misleading "no logs yet".
+        case installDateUnreadable
         /// Archiving or copy failed.
         case failure(String)
     }
@@ -48,6 +52,12 @@ enum LogsExporter {
         // is deliberately NOT recovered into the archive: a denylist redactor cannot prove
         // absence-of-secrets over arbitrary log text, so the invariant is that no OSLog dump can
         // ever reach the export. (See plan KTD-6 / posture decision.)
+
+        // Fail-closed install date unreadable: distinguish from a genuine empty history so the UI
+        // explains the cause (reinstall from the DMG) rather than showing "no logs yet".
+        if installDate == .distantFuture {
+            return .installDateUnreadable
+        }
         let eligible = eligibleLogFiles(in: logsDirectory, installedAfter: installDate)
         guard !eligible.isEmpty else { return .nothingToExport }
 
@@ -184,13 +194,11 @@ enum LogsExporter {
 
     // MARK: - Locations
 
-    /// Container Library Logs dir (matches DiagnosticsLogger).
+    /// Container Library Logs dir. Single source of truth shared with the producer
+    /// (`DiagnosticsDefaults.logDirectory`) so the exporter archives exactly the directory the
+    /// producer wrote into — agreement is a compile-time fact, not a comment.
     static func defaultLogDirectory() -> URL {
-        let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        return library
-            .appendingPathComponent("Logs", isDirectory: true)
-            .appendingPathComponent("ClaudeBattery", isDirectory: true)
+        DiagnosticsDefaults.logDirectory
     }
 
     /// Best-effort "when was this build installed": the app bundle's creation date. Files

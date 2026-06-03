@@ -203,23 +203,110 @@ final class DiagnosticsLoggerTests: XCTestCase {
         }
     }
 
-    // MARK: - Persistence across reopens (append to existing file)
+    // MARK: - Per-launch file isolation (a build/process boundary starts a fresh file)
 
-    func testReopeningDirectory_appendsToExistingFile() {
+    func testEachLaunchWritesItsOwnFile_noCrossLaunchAppend() {
+        // ADV-001/REL-01: each launch (process) writes its OWN diag-<date>-<launch>.jsonl rather
+        // than appending to a shared per-day file, so a build boundary's install-date floor stays
+        // accurate (a prior build's file is never re-touched and keeps its old mtime).
+        var firstURL: URL?
         do {
             let logger = makeEnabledLogger()
             logger.emitMilestone(kind: "first-session", payload: ["a": 1])
             Thread.sleep(forTimeInterval: 0.05)
+            firstURL = logger.currentSessionFileURL
             logger.flush()
         }
 
         let logger2 = makeEnabledLogger()
         logger2.emitMilestone(kind: "second-session", payload: ["b": 2])
         Thread.sleep(forTimeInterval: 0.05)
+        let secondURL = logger2.currentSessionFileURL
 
-        let lines = readAllLines(from: logger2.currentSessionFileURL!)
-        let kinds = lines.compactMap { decode($0)?["kind"] as? String }
-        XCTAssertTrue(kinds.contains("first-session"), "First-session line should persist across reinit: \(kinds)")
-        XCTAssertTrue(kinds.contains("second-session"))
+        XCTAssertNotNil(firstURL)
+        XCTAssertNotNil(secondURL)
+        XCTAssertNotEqual(firstURL, secondURL, "each launch must use its own diag file")
+
+        let secondKinds = readAllLines(from: secondURL!).compactMap { decode($0)?["kind"] as? String }
+        XCTAssertTrue(secondKinds.contains("second-session"))
+        XCTAssertFalse(secondKinds.contains("first-session"),
+                       "a per-launch file must not contain a prior launch's lines: \(secondKinds)")
+
+        // Both per-launch files remain on disk and are export-eligible.
+        let eligible = LogsExporter.eligibleLogFiles(in: tempDir, installedAfter: .distantPast)
+        XCTAssertEqual(eligible.count, 2, "both per-launch diag files should be eligible")
+    }
+
+    // MARK: - Transient open failure does not permanently disable logging (REL-02)
+
+    func testOpenFailure_noCrash_noFalseURL() {
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        // A regular file where the logger expects a directory: createDirectory(at:) fails, so the
+        // open fails. The logger must not crash, must not resolve a URL, and (because it does not
+        // latch didStartSession on failure) a later emit re-attempts rather than being disabled.
+        let blockerFile = tempDir.appendingPathComponent("blocker", isDirectory: false)
+        try? "x".data(using: .utf8)!.write(to: blockerFile)
+        let unwritable = blockerFile.appendingPathComponent("logs", isDirectory: true)
+
+        let logger = DiagnosticsLogger(directoryOverride: unwritable, enabledOverride: true)
+        logger.emitMilestone(kind: "evt1", payload: [:])
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertNil(logger.currentSessionFileURL, "a failed open must not resolve a file URL")
+
+        logger.emitMilestone(kind: "evt2", payload: [:])
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertNil(logger.currentSessionFileURL, "re-attempt after a failed open must stay crash-free")
+    }
+
+    // MARK: - Retention prunes old diag files on session start (DI-01)
+
+    func testOldDiagFilesPrunedOnSessionStart() {
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let ancient = tempDir.appendingPathComponent("diag-2000-01-01-oldtoken.jsonl")
+        try? "{\"kind\":\"ancient\"}\n".data(using: .utf8)!.write(to: ancient)
+        try? FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 0)],
+                                               ofItemAtPath: ancient.path)
+
+        let logger = makeEnabledLogger()
+        logger.emitMilestone(kind: "new-session", payload: [:])
+        Thread.sleep(forTimeInterval: 0.1)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ancient.path),
+                       "a diag file older than the retention window should be pruned on session start")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: logger.currentSessionFileURL!.path),
+                      "the current session's file must remain")
+    }
+
+    // MARK: - Production gate reads the shared defaults key (drift guard, swift-ios-001)
+
+    func testProductionGate_readsSharedDefaultsKey() {
+        let key = DiagnosticsDefaults.loggingEnabledKey
+        let original = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let original { UserDefaults.standard.set(original, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+        // A production logger (enabledOverride nil) must read the gate from the SAME key the
+        // SettingsView @AppStorage writes, so the toggle and producer cannot drift.
+        UserDefaults.standard.set(true, forKey: key)
+        let logger = DiagnosticsLogger(directoryOverride: tempDir, enabledOverride: nil)
+        XCTAssertTrue(logger.diagnosticLoggingEnabled, "production gate must read DiagnosticsDefaults.loggingEnabledKey")
+        UserDefaults.standard.set(false, forKey: key)
+        XCTAssertFalse(logger.diagnosticLoggingEnabled)
+    }
+
+    // MARK: - serialize-failed fallback preserves the kind + payload key names (DI-03)
+
+    func testSerializeFailedFallback_preservesKindAndKeys() {
+        let logger = makeEnabledLogger()
+        // A Date value is not JSON-serializable, so serialize() takes the fallback branch.
+        let line = logger.redactedLine(kind: "cookie-store-poll", payload: [
+            "count": 3,
+            "when": Date()
+        ])
+        XCTAssertTrue(line.contains("serialize-failed"), "expected the serialize-failed fallback: \(line)")
+        XCTAssertTrue(line.contains("cookie-store-poll"), "fallback must preserve the original kind: \(line)")
+        XCTAssertTrue(line.contains("count"), "fallback must preserve payload key names: \(line)")
+        XCTAssertTrue(line.contains("when"), "fallback must preserve payload key names: \(line)")
     }
 }
