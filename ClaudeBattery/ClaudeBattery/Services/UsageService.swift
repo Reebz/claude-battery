@@ -143,7 +143,9 @@ class UsageService: NSObject, ObservableObject {
                 consecutiveFailures += 1
                 authFailed = true
                 latestUsage = nil
-                logger.warning("Auth failure (HTTP \(httpResponse.statusCode)) for \(account.displayName)")
+                // Non-PII account id, not displayName (= email by default) — OSLogStoreDumper
+                // recovers these os_log lines into the diagnostic dump.
+                logger.warning("Auth failure (HTTP \(httpResponse.statusCode)) for \(account.id.uuidString)")
                 onAuthFailure?()
                 return
             }
