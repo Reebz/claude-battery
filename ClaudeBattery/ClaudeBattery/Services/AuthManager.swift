@@ -370,7 +370,7 @@ class AuthManager: NSObject, ObservableObject {
             #if DEBUG
             logger.debug("Cookie store poll — \(cookies.count) cookies: \(names)")
             #endif
-            DiagnosticsLogger.shared.emitHot(kind: "cookie-store-poll", payload: [
+            DiagnosticsLogger.shared.emitMilestone(kind: "cookie-store-poll", payload: [
                 "count": cookies.count,
                 "names": names
             ])
@@ -758,7 +758,7 @@ class AuthManager: NSObject, ObservableObject {
                 // Re-auth: auto-select if any existing account's org is in the list
                 chosenOrg = match
                 // Log the non-PII account id, not displayName (= email when no nickname) or the
-                // org name — both can carry PII that OSLogStoreDumper would otherwise recover.
+                // org name — both can carry PII, and os_log lines can be read off-device.
                 logger.info("Re-auth auto-selected org for account \(existingAccount.id.uuidString)")
             } else {
                 // Multiple orgs, no auto-select match — show picker
@@ -784,7 +784,7 @@ class AuthManager: NSObject, ObservableObject {
 
             if accountStore.addAccount(account) {
                 accountStore.switchTo(account.id)
-                // Non-PII id, not displayName (= email by default) — recovered by OSLogStoreDumper.
+                // Non-PII id, not displayName (= email by default); os_log can be read off-device.
                 logger.info("Account added and activated: \(account.id.uuidString)")
             } else if let existing = accountStore.accounts.first(where: { $0.organizationId == chosenOrg.uuid }) {
                 // Re-authentication: update session key AND the full cookie header so the next
@@ -1128,7 +1128,9 @@ extension AuthManager: WKNavigationDelegate {
                absoluteString.hasPrefix("about:srcdoc") {
                 decisionHandler(.allow)
             } else {
-                logger.info("Blocked navigation to unusual about: URI: \(absoluteString)")
+                // Log the scheme only, never the full URI — an `about:` payload (e.g.
+                // about:blank?code=…) could carry a live OAuth code in Release.
+                logger.info("Blocked navigation to unusual about: URI (scheme \(url.scheme ?? "?", privacy: .public))")
                 decisionHandler(.cancel)
             }
             return
@@ -1142,12 +1144,12 @@ extension AuthManager: WKNavigationDelegate {
         if isAllowedDomain(host) {
             logger.debug("Navigation allowed: \(host)")
             // U6 diagnostics: decision + host only (never url.absoluteString — it may carry
-            // query params). Hot path: navigation can be frequent during the SPA flow.
-            DiagnosticsLogger.shared.emitHot(kind: "nav-decision", payload: ["decision": "allow", "host": host])
+            // query params). Written to the exported diag-*.jsonl.
+            DiagnosticsLogger.shared.emitMilestone(kind: "nav-decision", payload: ["decision": "allow", "host": host])
             decisionHandler(.allow)
         } else {
             logger.info("Blocked navigation to disallowed domain: \(host)")
-            DiagnosticsLogger.shared.emitHot(kind: "nav-decision", payload: ["decision": "block", "host": host])
+            DiagnosticsLogger.shared.emitMilestone(kind: "nav-decision", payload: ["decision": "block", "host": host])
             decisionHandler(.cancel)
         }
     }
@@ -1203,7 +1205,9 @@ extension AuthManager: WKUIDelegate {
         // Pattern #7: allowsOAuthPopup checks the about: scheme BEFORE the host, so Google's
         // about:blank OAuth bootstrap (no host) is permitted while disallowed hosts are blocked.
         guard allowsOAuthPopup(for: url) else {
-            logger.info("Blocked popup to disallowed URL: \(url.absoluteString)")
+            // Scheme + host only, never absoluteString — a custom-scheme OAuth redirect can carry
+            // a live `code=` in its path/query (Release info-leak). Mirrors nav-decision logging.
+            logger.info("Blocked popup to disallowed URL (scheme \(url.scheme ?? "?", privacy: .public) host \(url.host ?? "?", privacy: .public))")
             return nil
         }
 
@@ -1229,7 +1233,9 @@ extension AuthManager: WKUIDelegate {
         webView.addSubview(popup)
         self.popupWebView = popup
 
-        logger.debug("Created OAuth popup WebView for: \(url.host ?? url.absoluteString)")
+        // Host (or scheme when hostless) only — never absoluteString, which on a custom-scheme
+        // redirect can carry a live `code=`.
+        logger.debug("Created OAuth popup WebView for host \(url.host ?? url.scheme ?? "?", privacy: .public)")
         return popup
     }
 
