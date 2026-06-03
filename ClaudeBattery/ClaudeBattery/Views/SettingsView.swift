@@ -77,6 +77,8 @@ struct SettingsView: View {
                 ManualSignInSection(authManager: authManager)
             }
 
+            DiagnosticsSection()
+
             Section {
                 Button(action: {
                     if let url = URL(string: "https://www.buymeacoffee.com/reebz") {
@@ -109,8 +111,9 @@ struct SettingsView: View {
     }
 
     private var settingsHeight: CGFloat {
-        // Base height covers toggles + coffee button + collapsed manual sign-in section + padding
-        let base: CGFloat = accountStore.canAddAccount ? 500 : 370
+        // Base height covers toggles + coffee button + collapsed manual sign-in section +
+        // the always-shown collapsed Diagnostics section (~70pt) + padding.
+        let base: CGFloat = accountStore.canAddAccount ? 570 : 440
         // Each account row: ~40pt, plus ~45pt for threshold slider when notifications on
         let perAccount: CGFloat = notificationsEnabled ? 85 : 40
         let accountCount = CGFloat(max(accountStore.accounts.count, 1))
@@ -296,6 +299,69 @@ private struct ManualSignInSection: View {
         case .connectionError:
             statusIsError = true
             statusText = "Connection error. Please try again."
+        }
+    }
+}
+
+// MARK: - Diagnostics (U7 — opt-in redacted log export)
+
+/// Settings section for the Phase 2 diagnostic export. The toggle drives the same
+/// `@AppStorage("diagnosticLoggingEnabled")` flag the `DiagnosticsLogger` reads at runtime
+/// (default false), so the producer stays inert unless the user opts in. The export builds a
+/// redacted, in-process archive (no secrets, no prior-build artifacts) and saves it via
+/// `NSSavePanel`.
+private struct DiagnosticsSection: View {
+    @AppStorage("diagnosticLoggingEnabled") private var diagnosticLoggingEnabled = false
+
+    @State private var statusText: String?
+    @State private var statusIsError = false
+    @State private var showIssuesLink = false
+
+    var body: some View {
+        Section(header: Text("Diagnostics")) {
+            Text("Records sign-in events to help diagnose problems. No passwords, tokens, or emails are saved.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Toggle("Enable diagnostic logging", isOn: $diagnosticLoggingEnabled)
+
+            Button("Export Diagnostic Logs…") { export() }
+
+            if let statusText {
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundColor(statusIsError ? .red : .green)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(statusText)
+            }
+
+            if showIssuesLink {
+                Link("Report on GitHub Issues", destination: LogsExporter.issuesURL)
+                    .font(.caption)
+            }
+        }
+    }
+
+    @MainActor
+    private func export() {
+        let result = LogsExporter.exportWithSavePanel()
+        switch result {
+        case .success(let savedURL, _):
+            statusIsError = false
+            statusText = "Saved to \(savedURL.lastPathComponent). Please attach it to a GitHub issue."
+            showIssuesLink = true
+        case .cancelled:
+            // No status change on cancel — the user chose not to save.
+            break
+        case .nothingToExport:
+            statusIsError = false
+            statusText = "No diagnostic logs yet. Turn on logging, reproduce the problem, then export."
+            showIssuesLink = false
+        case .failure(let message):
+            statusIsError = true
+            statusText = message
+            showIssuesLink = false
         }
     }
 }
