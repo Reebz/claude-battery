@@ -66,18 +66,22 @@ enum SecretRedactor {
         if let dict = value as? [String: Any] {
             var out: [String: Any] = [:]
             for (key, val) in dict {
-                let keyIsCredential = credentialKeys.contains(key.lowercased())
-                if forceRedact {
-                    // Already inside a credential subtree: redact every leaf regardless of key.
-                    out[key] = forceRedactValue(forKey: key, value: val)
-                } else if keyIsCredential {
-                    if let s = val as? String {
-                        out[key] = redactValue(forKey: key, value: s)
-                    } else {
-                        // Structured value under a credential key — recurse in force-redact mode
-                        // so every nested string becomes REDACTED_LEN_N (no verbatim survival).
-                        out[key] = redactJSON(val, forceRedact: true)
-                    }
+                if forceRedact || credentialKeys.contains(key.lowercased()) {
+                    // This key IS a credential, or we are already inside a credential subtree:
+                    // force-redact the value. `forceRedactValue` covers strings (REDACTED_LEN_N),
+                    // nested containers (recurse in force mode), AND bare non-string scalars
+                    // (REDACTED_NONSCALAR) — the last closes the fail-open where a numeric/bool
+                    // token DIRECTLY under a credential key (`{"token":1234567}`) returned verbatim
+                    // because the old non-String branch recursed into `redactJSON`, which falls
+                    // through to `return value` for a bare scalar.
+                    //
+                    // When already inside the subtree (`forceRedact`), the KEY is redacted too: a
+                    // secret can ride in a key position (`{"token":{"<secret>":1}}`) and would
+                    // otherwise survive verbatim. The credential key itself (first entry into the
+                    // subtree, where `forceRedact == false`) is a fixed name, not a secret, so it
+                    // is preserved for readability.
+                    let outKey = forceRedact ? redactKey(key) : key
+                    out[outKey] = forceRedactValue(forKey: key, value: val)
                 } else {
                     out[key] = redactJSON(val, forceRedact: false)
                 }
@@ -105,6 +109,15 @@ enum SecretRedactor {
             return redactValue(forKey: key, value: str)
         }
         return nonScalarRedactionMarker
+    }
+
+    /// Redact a dictionary KEY encountered inside a credential subtree (force mode) to a one-way
+    /// 8-char SHA prefix, so a secret in a key position (`{"token":{"<secret>":1}}`) cannot survive
+    /// verbatim. Idempotent: an already-redacted key passes through unchanged, so a second redact
+    /// pass does not drift the prefix (and keeps object payloads byte-stable under `.sortedKeys`).
+    private static func redactKey(_ key: String) -> String {
+        if key.range(of: "^REDACTED_KEY_[0-9a-f]{8}$", options: .regularExpression) != nil { return key }
+        return "REDACTED_KEY_\(sha256Prefix(key))"
     }
 
     /// Whether `value` is EXACTLY a redaction marker this redactor produces: either the bare
@@ -170,6 +183,18 @@ enum SecretRedactor {
         options: []
     )
 
+    /// OAuth redirect parameters (`code`, `access_token`, `id_token`, `refresh_token`) in a query
+    /// or fragment, redacted REGARDLESS of URL scheme — including a SCHEME-LESS relative redirect
+    /// (`/cb?code=…`) that the `<scheme>://` passes above do not match. The authorization `code`
+    /// is exchangeable for tokens, so it is redacted even though no current producer emits a
+    /// redirect URL (defense-in-depth on the OAuth-redirect surface the app actively handles).
+    /// `state` is intentionally excluded: it is a CSRF nonce, not an access credential, and the
+    /// producer uses `state` as its own (non-secret) login-state diagnostic key.
+    private static let redirectParamRegex = try! NSRegularExpression(
+        pattern: "(?i)\\b(code|access_token|id_token|refresh_token)=([^\\s&#]+)",
+        options: []
+    )
+
     private static let cookiePairRegex = try! NSRegularExpression(
         pattern: "([A-Za-z0-9_\\-]+)=([^;\\s,]+)",
         options: []
@@ -185,6 +210,12 @@ enum SecretRedactor {
     /// captured whole rather than leaving a `,def`/`:b:c` remnant. Over-capturing a following
     /// `;theme=dark` (no space) is the safe direction for a P0 redactor; real cookie headers use
     /// `; ` with a space, which still terminates the value.
+    ///
+    /// It DOES stop at `}` and `)` (and quotes) to avoid eating surrounding JSON/paren structure
+    /// on the regex (non-JSON) path. A secret containing a literal `}`/`)` would therefore leave a
+    /// post-brace remnant on this path — a non-concern in practice: real session keys / `__cf_bm` /
+    /// bearer tokens are cookie-octet/base64url and contain neither, and structured JSON payloads
+    /// are redacted whole by the JSON walker, not here. The JSON walker is the primary control.
     private static let credentialKeyValueRegex: NSRegularExpression = {
         let keys = credentialKeys.joined(separator: "|")
         return try! NSRegularExpression(
@@ -215,11 +246,27 @@ enum SecretRedactor {
     /// Classes/quantifiers are bounded to avoid quadratic backtracking (the local part is capped,
     /// the domain-label repetition is bounded, and a `\b` anchors the TLD) so a long non-email
     /// run does not stall the export.
+    ///
+    /// Scope: this pass requires a dotted TLD, so a dotless-host address (`user@localhost`) is NOT
+    /// matched. That is acceptable because this is the defense-in-depth backstop, not the primary
+    /// guarantee: the PRODUCER CONTRACT is that no email is ever emitted into a diagnostic payload
+    /// (every address originates from the claude.ai org API as a real dotted-TLD email stored only
+    /// in `Account.email`, never passed to `DiagnosticsLogger`). Broadening to dotless hosts is
+    /// deliberately avoided — it would only ever over-redact non-email `@`-bearing tokens, since no
+    /// data source produces a dotless address.
     private static let emailRegex = try! NSRegularExpression(
         pattern: "(?:\"[^\"]{0,128}\"|[\\p{L}\\p{N}._%+\\-]{1,128})@[\\p{L}\\p{N}_\\-]{1,128}(?:\\.[\\p{L}\\p{N}_\\-]{1,128}){0,16}\\.[\\p{L}]{2,24}\\b",
         options: []
     )
 
+    /// Cookie-header keys whose values are redacted by `redactCookieHeader`. Three of these
+    /// (`__cf_bm`, `anthropic-csrf-token`, `sessionkey`) are ALSO in `credentialKeys` and already
+    /// redacted by the earlier `redactCredentialPairs` pass; the overlap is intentional, not dead.
+    /// The cookie pass uses a broader value class (`[^;\s,]+` vs the credential pass's
+    /// `[^"'\s}\)]+`), so it is the backstop that catches a delimiter-bearing remnant (a value
+    /// containing `}`/`)`) the narrower credential class would leave. The other three
+    /// (`cf_clearance`, `lasturl`, `next-url`) live ONLY here and are redacted ONLY by this pass —
+    /// they have dedicated regression tests so a future edit dropping one fails CI.
     private static let cookieHeaderKeys: Set<String> = [
         "__cf_bm", "anthropic-csrf-token", "sessionkey",
         "cf_clearance", "lasturl", "next-url"
@@ -386,6 +433,20 @@ enum SecretRedactor {
             guard match.numberOfRanges >= 2 else { continue }
             let scheme = (result as NSString).substring(with: match.range(at: 1))
             result = (result as NSString).replacingCharacters(in: match.range, with: scheme + ":[REDACTED]")
+        }
+
+        // Scheme-less / relative redirect params: the `<scheme>://` passes above redact the whole
+        // query/fragment of an absolute URL, but a relative redirect (`/cb?code=…`) has no scheme
+        // and would otherwise slip through. Redact just the param value, length-preserving and
+        // idempotent (an already-redacted value is left alone so the count does not drift).
+        let redirectNS = result as NSString
+        let redirectMatches = redirectParamRegex.matches(in: result, range: NSRange(location: 0, length: redirectNS.length))
+        for match in redirectMatches.reversed() {
+            guard match.numberOfRanges >= 3 else { continue }
+            let valueRange = match.range(at: 2)
+            let value = (result as NSString).substring(with: valueRange)
+            guard !isAlreadyRedacted(value) else { continue }
+            result = (result as NSString).replacingCharacters(in: valueRange, with: "REDACTED_LEN_\(value.count)")
         }
 
         return result

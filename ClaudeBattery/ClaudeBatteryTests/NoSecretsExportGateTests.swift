@@ -39,7 +39,11 @@ final class NoSecretsExportGateTests: XCTestCase {
         "PWPLAINTEXT",                               // password
         "SIGNATUREBLOB",                             // signature
         "LEAKEDQUERYVAL",                            // url query value
-        "FRAGTOKENLEAK"                              // url fragment token
+        "FRAGTOKENLEAK",                             // url fragment token
+        "99887766554433",                            // numeric scalar under credential key
+        "CLEARANCESECRETXYZ",                        // cf_clearance cookie value
+        "OPAQUELASTURLSECRET",                       // lasturl cookie value
+        "OPAQUENEXTURLSECRET"                        // next-url cookie value
     ]
 
     func testEndToEnd_producerToArchive_hasNoSecrets() throws {
@@ -57,7 +61,11 @@ final class NoSecretsExportGateTests: XCTestCase {
             "customRedirect": "com.app.oauth://cb?code=FRAGTOKENLEAK",
             // Nested secrets under credential keys (the P0 hole this gate also guards):
             "token": ["sk-ant-PLANTED2", "sk-ant-PLANTED3"],
-            "signature": ["SIGNATUREBLOB"]
+            "signature": ["SIGNATUREBLOB"],
+            // Direct non-string scalar under a credential key (the scalar fail-open this gate guards).
+            "assertion": 99887766554433,
+            // cookieHeader-only keys: cf_clearance/lasturl/next-url live SOLELY in cookieHeaderKeys.
+            "cookieHeader": "cf_clearance=CLEARANCESECRETXYZ; lasturl=OPAQUELASTURLSECRET; next-url=OPAQUENEXTURLSECRET; theme=dark"
         ])
         logger.flush()
 

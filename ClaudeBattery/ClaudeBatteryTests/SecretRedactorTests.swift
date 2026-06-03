@@ -59,6 +59,11 @@ final class SecretRedactorTests: XCTestCase {
         let out = SecretRedactor.redact("anthropic-csrf-token=\(raw)")
         XCTAssertFalse(out.contains(raw), out)
         XCTAssertTrue(out.contains("REDACTED_LEN_"), out)
+        // The test's namesake: a rotation-detectable key keeps an 8-hex SHA prefix on the regex
+        // (non-JSON) path too, so rotation stays observable. Mirrors the JSON sibling's assertion;
+        // without this a lost rotationDetectableKeys membership would pass silently.
+        XCTAssertNotNil(out.range(of: "[0-9a-f]{8}\\.\\.\\.REDACTED_LEN_", options: .regularExpression),
+                        "expected 8-hex SHA rotation prefix: \(out)")
     }
 
     // MARK: - Bare email in prose AND in a JSON value → [EMAIL]
@@ -227,10 +232,23 @@ final class SecretRedactorTests: XCTestCase {
     }
 
     func testNonStringScalarUnderCredentialKey_redactedToMarker() {
-        // A numeric/bool leaf under a credential key is replaced with the non-scalar marker.
-        let out = SecretRedactor.redact(#"{"token":{"count":12345}}"#)
-        XCTAssertFalse(out.contains("12345"), out)
-        XCTAssertTrue(out.contains("REDACTED_NONSCALAR") || out.contains("REDACTED_LEN_"), out)
+        // A bare numeric/bool/null scalar DIRECTLY under a credential key must become the non-scalar
+        // marker. This is the fail-open that previously returned `{"token":1234567}` verbatim (the
+        // non-String branch recursed into redactJSON, which falls through to `return value` for a
+        // bare scalar). Direct shapes + an exact-marker assertion (no OR that masks a regression).
+        let cases: [(String, String)] = [
+            (#"{"token":1234567}"#, "1234567"),
+            (#"{"password":true}"#, "true"),
+            (#"{"sessionKey":987654321}"#, "987654321"),
+            (#"{"__cf_bm":999}"#, "999"),
+            // The realistic serialize() envelope: a numeric token nested in `payload`.
+            (#"{"kind":"x","payload":{"sessionKey":1234567890123456},"ts":"t"}"#, "1234567890123456")
+        ]
+        for (input, raw) in cases {
+            let out = SecretRedactor.redact(input)
+            XCTAssertFalse(out.contains(raw), "scalar '\(raw)' survived under credential key: \(out)")
+            XCTAssertTrue(out.contains("REDACTED_NONSCALAR"), "expected exact non-scalar marker: \(out)")
+        }
     }
 
     func testNestedSecret_idempotent() {
@@ -348,6 +366,50 @@ final class SecretRedactorTests: XCTestCase {
         let out = SecretRedactor.redact("link mailto:victim@example.com?subject=hi")
         XCTAssertFalse(out.contains("victim@example.com"), "mailto address survived: \(out)")
         XCTAssertTrue(out.contains("mailto:[REDACTED]"), out)
+    }
+
+    // MARK: - Scheme-less / relative redirect params (no <scheme>://)
+
+    func testSchemelessRedirectParamCode_redacted() {
+        // A relative redirect has no `<scheme>://`, so the URL passes miss it; the redirect-param
+        // pass must still redact the exchangeable authorization `code`.
+        let out = SecretRedactor.redact("nav decision for /auth/cb?code=LIVEAUTHCODE123&next=/x")
+        XCTAssertFalse(out.contains("LIVEAUTHCODE123"), "scheme-less redirect code survived: \(out)")
+        XCTAssertTrue(out.contains("REDACTED_LEN_"), out)
+    }
+
+    func testSchemelessRedirectTokensInFragment_redacted() {
+        let out = SecretRedactor.redact("/cb#access_token=OPAQUEACCESSTOKEN&id_token=OPAQUEIDTOKEN")
+        XCTAssertFalse(out.contains("OPAQUEACCESSTOKEN"), out)
+        XCTAssertFalse(out.contains("OPAQUEIDTOKEN"), out)
+    }
+
+    // MARK: - cookieHeaderKeys redacted ONLY by the cookie pass (cf_clearance / lasturl / next-url)
+
+    func testCfClearanceCookie_redactedKeepsHarmless() {
+        // cf_clearance is a genuine Cloudflare clearance token and lives ONLY in cookieHeaderKeys
+        // (not credentialKeys), so it is redacted exclusively by redactCookieHeader.
+        let out = SecretRedactor.redact("cf_clearance=CLEARANCESECRETVALUE; theme=dark")
+        XCTAssertFalse(out.contains("CLEARANCESECRETVALUE"), "cf_clearance value survived: \(out)")
+        XCTAssertTrue(out.contains("theme=dark"), "harmless cookie should survive: \(out)")
+        XCTAssertTrue(out.contains("REDACTED_LEN_"), out)
+    }
+
+    func testLastUrlAndNextUrlCookies_redacted() {
+        let out = SecretRedactor.redact("lasturl=OPAQUELASTURLSECRET; next-url=OPAQUENEXTURLSECRET; theme=dark")
+        XCTAssertFalse(out.contains("OPAQUELASTURLSECRET"), "lasturl value survived: \(out)")
+        XCTAssertFalse(out.contains("OPAQUENEXTURLSECRET"), "next-url value survived: \(out)")
+        XCTAssertTrue(out.contains("theme=dark"), out)
+    }
+
+    // MARK: - Secret in a JSON KEY position under a credential key
+
+    func testSecretAsJSONKeyUnderCredentialKey_redacted() {
+        // A secret can ride in a key, not just a value. Inside a credential subtree the key is
+        // SHA-redacted (REDACTED_KEY_<8hex>) so it cannot survive verbatim.
+        let out = SecretRedactor.redact(#"{"token":{"sk-ant-KEYSECRET":true}}"#)
+        XCTAssertFalse(out.contains("sk-ant-KEYSECRET"), "secret in key position survived: \(out)")
+        XCTAssertTrue(out.contains("REDACTED_KEY_"), out)
     }
 
     // MARK: - isAlreadyRedacted both alternations (bare-^ and SHA-prefix)
