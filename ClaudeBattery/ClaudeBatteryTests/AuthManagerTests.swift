@@ -12,9 +12,13 @@ final class AuthManagerTests: XCTestCase {
         suiteName = "test.AuthManager.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
         mockSession = MockHTTPSession()
+        // Manual-sign-in tests prime the process-wide shared cookie jar via activateCookies;
+        // start every test from a clean jar so there is no cross-test order dependency.
+        ClaudeAPI.clearClaudeCookies()
     }
 
     override func tearDown() {
+        ClaudeAPI.clearClaudeCookies()
         UserDefaults.standard.removePersistentDomain(forName: suiteName)
         defaults = nil
         suiteName = nil
@@ -51,14 +55,17 @@ final class AuthManagerTests: XCTestCase {
         return HTTPCookie(properties: properties)!
     }
 
-    /// Poll `condition` on the main actor until it is true or `timeout` elapses.
-    /// Used for capture paths that hop through async cookie-store reads.
+    /// Poll `condition` on the main actor until it is true or `timeout` elapses. Returns whether
+    /// the condition was met, so a timeout is a legible failure rather than a silent fall-through
+    /// into a downstream assertion. Used for capture paths that hop through async store reads.
+    @discardableResult
     @MainActor
-    private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) async {
+    private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition(), Date() < deadline {
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
+        return condition()
     }
 
     // MARK: - Session capture funnel (U1, #17)
@@ -104,32 +111,55 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(auth.loginState, .idle)
     }
 
-    // MARK: - navigationResponse additive path (U1) — parse + validate logic
-    // WKNavigationResponse has no public initializer, so we exercise the header-parsing and
-    // domain-validation the delegate performs by feeding the parsed cookies through the funnel.
+    // MARK: - navigationResponse Set-Cookie parsing seam (U1 additive path + session-fixation guard)
+    // WKNavigationResponse has no public init, so the delegate routes header parsing through the
+    // static sessionCookies(fromResponseHeaders:url:) seam — exercised directly here. The delegate
+    // additionally gates on the RESPONSE host being claude.ai itself.
 
     @MainActor
-    func testCaptureFromResponseHeader_capturesSessionKey() {
-        let auth = makeAuthManager()
-        let url = URL(string: "https://claude.ai")!
-        let cookies = HTTPCookie.cookies(
-            withResponseHeaderFields: ["Set-Cookie": "sessionKey=sk-from-header; Domain=.claude.ai; Path=/; Secure"],
-            for: url
+    func testSessionCookies_parsesClaudeSessionKeyFromHeader() {
+        let url = URL(string: "https://claude.ai/login")!
+        let cookies = AuthManager.sessionCookies(
+            fromResponseHeaders: ["Set-Cookie": "sessionKey=sk-from-header; Domain=.claude.ai; Path=/; Secure"],
+            url: url
         )
-        auth.captureSessionCookie(from: cookies)
-        XCTAssertEqual(auth.pendingSessionKey, "sk-from-header")
+        XCTAssertTrue(cookies.contains { AuthManager.isSessionCookie($0) && $0.value == "sk-from-header" })
     }
 
     @MainActor
-    func testCaptureFromResponseHeader_rejectsSpoofedDomain() {
+    func testSessionCookies_rejectsCrossDomainInjection() {
+        // Session-fixation guard (pattern #2): a response from an allowlisted third party
+        // (accounts.google.com) carrying Set-Cookie: sessionKey; Domain=.claude.ai must NOT yield
+        // a claude.ai cookie, because the declared Domain= does not belong to the response host.
+        let url = URL(string: "https://accounts.google.com/o/oauth2/callback")!
+        let cookies = AuthManager.sessionCookies(
+            fromResponseHeaders: ["Set-Cookie": "sessionKey=sk-INJECTED; Domain=.claude.ai; Path=/; Secure"],
+            url: url
+        )
+        XCTAssertFalse(cookies.contains { $0.name == "sessionKey" },
+                       "A cross-domain Domain=.claude.ai injection must be pinned out")
+    }
+
+    @MainActor
+    func testSessionCookies_injectionNeverReachesCapture() {
         let auth = makeAuthManager()
-        let url = URL(string: "https://evil-claude.ai")!
-        let cookies = HTTPCookie.cookies(
-            withResponseHeaderFields: ["Set-Cookie": "sessionKey=sk-evil; Domain=evil-claude.ai; Path=/; Secure"],
-            for: url
+        let url = URL(string: "https://accounts.google.com/x")!
+        let cookies = AuthManager.sessionCookies(
+            fromResponseHeaders: ["Set-Cookie": "sessionKey=sk-INJECTED; Domain=.claude.ai; Path=/; Secure"],
+            url: url
         )
         auth.captureSessionCookie(from: cookies)
-        XCTAssertNil(auth.pendingSessionKey, "Spoofed Set-Cookie domain must be rejected — pattern #2")
+        XCTAssertNil(auth.pendingSessionKey, "Injected cross-domain sessionKey must never be captured")
+    }
+
+    @MainActor
+    func testCookieDomainMatchesHost_exactLabelOnly() {
+        XCTAssertTrue(AuthManager.cookieDomainMatchesHost(".claude.ai", host: "claude.ai"))
+        XCTAssertTrue(AuthManager.cookieDomainMatchesHost("claude.ai", host: "claude.ai"))
+        XCTAssertTrue(AuthManager.cookieDomainMatchesHost(".claude.ai", host: "api.claude.ai"))
+        XCTAssertFalse(AuthManager.cookieDomainMatchesHost(".claude.ai", host: "evil-claude.ai"),
+                       "evil-claude.ai must not match .claude.ai — pattern #2")
+        XCTAssertFalse(AuthManager.cookieDomainMatchesHost(".claude.ai", host: "claude.ai.attacker.com"))
     }
 
     // MARK: - webViewDidClose re-read (U1) — THE test that gates "fixes #17"
@@ -154,10 +184,11 @@ final class AuthManagerTests: XCTestCase {
         let unrelated = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         auth.webViewDidClose(unrelated)
 
-        await waitUntil { auth.accountStore.accounts.count == 1 }
+        // Real WKWebView + async non-persistent store read; give it a CI-safe window and assert
+        // the wait result so a timeout reports as a distinct failure, not a silent "0 accounts".
+        let captured = await waitUntil(timeout: 20) { auth.accountStore.accounts.count == 1 }
 
-        XCTAssertEqual(auth.accountStore.accounts.count, 1,
-                       "webViewDidClose must re-read the login store and capture the session (#17)")
+        XCTAssertTrue(captured, "webViewDidClose did not capture within timeout (#17 integration path)")
         XCTAssertEqual(auth.accountStore.accounts.first?.sessionKey, "sk-popup-close")
         XCTAssertEqual(auth.accountStore.accounts.first?.organizationId, "org-popup-close")
     }
@@ -443,6 +474,114 @@ final class AuthManagerTests: XCTestCase {
         let org = Organization(uuid: "org-x", name: nil, billingType: nil, emailAddress: nil)
         XCTAssertEqual(auth.completeManualSignIn(org: org), .invalidInput,
                        "Completing with no stashed context is a programming error, surfaced as invalid")
+    }
+
+    @MainActor
+    func testManualSignIn_failureRestoresActiveAccountJar() async {
+        let auth = makeAuthManager()
+        // A healthy active account X whose cookies are primed into the shared jar.
+        let x = Account(email: "x@test.com", sessionKey: "sk-X", organizationId: "org-X",
+                        allCookieHeader: "sessionKey=sk-X; __cf_bm=cf-X")
+        _ = auth.accountStore.addAccount(x)
+        auth.accountStore.switchTo(x.id)
+        let url = URL(string: "https://claude.ai")!
+        func jarSessionKey() -> String? {
+            ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: url)?.first { $0.name == "sessionKey" }?.value
+        }
+        XCTAssertEqual(jarSessionKey(), "sk-X", "Precondition: jar holds the active account")
+
+        // A failed paste for a DIFFERENT account Y (401) must not leave Y's cookies in the jar.
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 401
+        let result = await auth.manualSignIn("sessionKey=sk-Y; __cf_bm=cf-Y")
+
+        XCTAssertEqual(result, .authFailed(suggestFullHeader: false))
+        XCTAssertEqual(jarSessionKey(), "sk-X",
+                       "A failed manual sign-in must restore the working account's cookie jar (P1)")
+    }
+
+    // MARK: - Domain allowlist + OAuth popup gate (pattern #2 / #7)
+
+    @MainActor
+    func testIsAllowedDomain_tableDriven() {
+        let auth = makeAuthManager()
+        for host in ["claude.ai", "api.claude.ai", "accounts.google.com", "foo.gstatic.com", "x.challenges.cloudflare.com"] {
+            XCTAssertTrue(auth.isAllowedDomain(host), "\(host) should be allowed")
+        }
+        for host in ["evil-claude.ai", "claude.ai.attacker.com", "notgoogle.com", "google.com.evil.com"] {
+            XCTAssertFalse(auth.isAllowedDomain(host), "\(host) must be rejected (pattern #2)")
+        }
+    }
+
+    @MainActor
+    func testAllowsOAuthPopup_schemeBeforeHost() {
+        let auth = makeAuthManager()
+        // about: bootstraps have no host and must be allowed BEFORE any host check (pattern #7).
+        XCTAssertTrue(auth.allowsOAuthPopup(for: URL(string: "about:blank")!))
+        XCTAssertTrue(auth.allowsOAuthPopup(for: URL(string: "about:srcdoc")!))
+        XCTAssertTrue(auth.allowsOAuthPopup(for: URL(string: "https://accounts.google.com/o/oauth2")!))
+        XCTAssertFalse(auth.allowsOAuthPopup(for: URL(string: "https://evil.com")!))
+        XCTAssertFalse(auth.allowsOAuthPopup(for: URL(string: "https://evil-claude.ai")!))
+    }
+
+    // MARK: - webViewDidClose popup teardown (U1)
+
+    @MainActor
+    func testWebViewDidClose_tearsDownMatchingPopup() {
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let popup = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        login.addSubview(popup)
+        auth.popupWebView = popup
+
+        auth.webViewDidClose(popup)
+
+        XCTAssertNil(auth.popupWebView, "Matching popup should be cleared")
+        XCTAssertNil(popup.superview, "Popup should be removed from its superview")
+    }
+
+    @MainActor
+    func testWebViewDidClose_afterCaptureDoesNotRecapture() {
+        let auth = makeAuthManager()
+        auth.loginWebView = makeLoginWebView()
+        auth.captureSessionCookie(from: [makeCookie(value: "sk-first")])
+        XCTAssertEqual(auth.pendingSessionKey, "sk-first")
+
+        // A later popup close must not start a second capture (the !hasCapturedSession guard).
+        auth.webViewDidClose(WKWebView(frame: .zero, configuration: WKWebViewConfiguration()))
+        XCTAssertEqual(auth.pendingSessionKey, "sk-first", "No re-capture after hasCapturedSession")
+    }
+
+    // MARK: - Error overlay affordances (U2 + U5 integration)
+
+    @MainActor
+    func testOverlayManualTapped_firesHookAndTearsDown() {
+        let auth = makeAuthManager()
+        auth.loginWebView = makeLoginWebView()
+        auth.loginState = .error("boom")
+        var manualRequested = false
+        auth.onManualSignInRequested = { manualRequested = true }
+
+        auth.overlayManualTapped()
+
+        XCTAssertTrue(manualRequested, "\"Sign in manually\" must invoke the hook that opens Settings")
+        XCTAssertEqual(auth.loginState, .idle)
+        XCTAssertEqual(auth.loginOverlayKind, .none, "Overlay torn down")
+    }
+
+    @MainActor
+    func testOverlayRetryTapped_clearsPendingState() {
+        let auth = makeAuthManager()
+        auth.loginWebView = makeLoginWebView()
+        auth.loginState = .error("boom")
+        auth.pendingSessionKey = "sk-stale"
+
+        auth.overlayRetryTapped()
+
+        XCTAssertNil(auth.pendingSessionKey, "Retry clears the stale pending key")
+        XCTAssertEqual(auth.loginState, .idle)
+        XCTAssertEqual(auth.loginOverlayKind, .none)
     }
 
     // MARK: - isSessionCookie: Happy Path — valid sessionKey on claude.ai

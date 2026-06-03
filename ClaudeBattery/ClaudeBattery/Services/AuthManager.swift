@@ -67,7 +67,8 @@ class AuthManager: NSObject, ObservableObject {
     /// the claude.ai page via `window.opener`. Torn down on `webViewDidClose` or login-window
     /// shutdown. Required for "Continue with Google" - without it, `window.open()` returns nil
     /// and Google OAuth fails immediately.
-    private var popupWebView: WKWebView?
+    // internal for @testable access in AuthManagerTests (popup teardown test)
+    var popupWebView: WKWebView?
     var onAuthSuccess: (() -> Void)?
     /// Hook the app wires to open Settings at the manual paste section (U5). Invoked by the
     /// sign-in error overlay's "Sign in manually" button so a stuck user reaches the floor.
@@ -277,7 +278,7 @@ class AuthManager: NSObject, ObservableObject {
         urlObservation = webView.observe(\.url, options: [.new]) { [weak self] webView, _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.hasCapturedSession else { return }
-                self.checkCookiesFromAllSources(webView)
+                self.reReadCookieStore(webView)
             }
         }
 
@@ -287,7 +288,7 @@ class AuthManager: NSObject, ObservableObject {
         cookiePollTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.hasCapturedSession, let webView = self.loginWebView else { return }
-                self.checkCookiesFromAllSources(webView)
+                self.reReadCookieStore(webView)
             }
         }
 
@@ -352,18 +353,23 @@ class AuthManager: NSObject, ObservableObject {
     /// JS `document.cookie` fallback was deleted: `sessionKey` is HttpOnly, so `document.cookie`
     /// can never see it — it was dead code that could only ever capture via the store
     /// enumeration below.
-    private func checkCookiesFromAllSources(_ webView: WKWebView) {
+    private func reReadCookieStore(_ webView: WKWebView) {
         guard !hasCapturedSession else { return }
 
-        Task {
+        Task { @MainActor [weak self] in
             let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
+            // Re-validate liveness AFTER the await: the login may have been torn down while the
+            // store read was in flight. stopLoginWindow nils loginWebView, so a non-nil value is
+            // the "login still active" signal; without this, a read that resolves post-teardown
+            // would silently complete sign-in for a login the user already abandoned.
+            guard let self, !self.hasCapturedSession, self.loginWebView != nil else { return }
 
             #if DEBUG
             let names = cookies.map { "\($0.name)=\($0.domain)" }.joined(separator: ", ")
             logger.debug("Cookie store poll — \(cookies.count) cookies: \(names)")
             #endif
 
-            captureSessionCookie(from: cookies)
+            self.captureSessionCookie(from: cookies)
         }
     }
 
@@ -535,11 +541,13 @@ class AuthManager: NSObject, ObservableObject {
         return container
     }
 
-    @objc private func overlayRetryTapped() {
+    // internal for @testable access in AuthManagerTests (error-overlay affordance tests)
+    @objc func overlayRetryTapped() {
         retryLogin()
     }
 
-    @objc private func overlayManualTapped() {
+    // internal for @testable access in AuthManagerTests (error-overlay affordance tests)
+    @objc func overlayManualTapped() {
         onManualSignInRequested?()
         loginState = .idle
         stopLoginWindow()
@@ -553,6 +561,11 @@ class AuthManager: NSObject, ObservableObject {
         pendingCookieHeader = nil
         removeLoginOverlay()
         loginState = .idle
+        // Restart the inactivity clock the moment the user chooses to retry, rather than only
+        // after the reload reaches didFinish — otherwise a stale near-expiry timeout from the
+        // prior load could tear the window down mid-retry. (The 0.2s poll backstop is still
+        // armed; it was not invalidated on the prior capture.)
+        armLoginTimeout()
         if let url = URL(string: "https://claude.ai/login") {
             loginWebView?.load(URLRequest(url: url))
         }
@@ -572,6 +585,32 @@ class AuthManager: NSObject, ObservableObject {
         cookie.domain == "claude.ai" || cookie.domain == ".claude.ai"
     }
 
+    /// Parse Set-Cookie headers from a navigation response into cookies whose declared `Domain=`
+    /// actually belongs to the response `url` host. Foundation's `HTTPCookie.cookies(...)` honors
+    /// a `Domain=` attribute regardless of the response origin, so without this pinning an
+    /// allowlisted third-party response could inject a `Domain=.claude.ai` cookie (session
+    /// fixation, critical pattern #2). Static + pure for unit testing.
+    static func sessionCookies(fromResponseHeaders headers: [AnyHashable: Any], url: URL) -> [HTTPCookie] {
+        guard let host = url.host else { return [] }
+        var headerFields: [String: String] = [:]
+        for (key, value) in headers {
+            if let key = key as? String, let value = value as? String {
+                headerFields[key] = value
+            }
+        }
+        return HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: url)
+            .filter { cookieDomainMatchesHost($0.domain, host: host) }
+    }
+
+    /// True when a cookie may legitimately carry `cookieDomain` on a response from `host`:
+    /// an exact match, or a leading-dot parent domain of the host. Exact-label only - never a
+    /// substring (pattern #2): `evil-claude.ai` must not match `.claude.ai`.
+    static func cookieDomainMatchesHost(_ cookieDomain: String, host: String) -> Bool {
+        let normalized = cookieDomain.hasPrefix(".") ? String(cookieDomain.dropFirst()) : cookieDomain
+        guard !normalized.isEmpty else { return false }
+        return host == normalized || host.hasSuffix("." + normalized)
+    }
+
     // internal for @testable access in AuthManagerTests
     func handleCookieCaptured(_ cookie: HTTPCookie) {
         guard !hasCapturedSession else { return }
@@ -586,8 +625,11 @@ class AuthManager: NSObject, ObservableObject {
         hasCapturedSession = true
         pendingSessionKey = cookie.value
         loginState = .signingIn
-        cookiePollTimer?.invalidate()
-        cookiePollTimer = nil
+        // Deliberately do NOT invalidate cookiePollTimer here. The poll closure already
+        // guards on `hasCapturedSession`, so it no-ops while a capture is in flight, and it
+        // is torn down in stopLoginWindow. Leaving it armed means that if org discovery fails
+        // (handleOrgDiscoveryFailure resets hasCapturedSession) or the user taps "Try again",
+        // the 0.2s store-poll backstop resumes automatically without being re-created.
 
         logger.info("Session cookie captured via cookie store")
 
@@ -669,7 +711,12 @@ class AuthManager: NSObject, ObservableObject {
                 return
             }
 
-            // Determine which org to use
+            // Determine which org to use (pattern #6: never blindly take orgs[0]).
+            // NOTE: the manual paste path reimplements this same selection rule in
+            // discoverAndAddManualAccount. The two are intentionally separate - this path is
+            // async/imperative and drives the NSAlert picker + login window state machine, while
+            // the manual path is pure and returns ManualSignInResult for a SwiftUI picker. If the
+            // auto-select rule changes here, update discoverAndAddManualAccount too.
             let chosenOrg: Organization
             if orgs.count == 1 {
                 chosenOrg = orgs[0]
@@ -859,40 +906,75 @@ class AuthManager: NSObject, ObservableObject {
     }
 
     private func discoverAndAddManualAccount(sessionKey: String, cookieHeader: String?) async -> ManualSignInResult {
+        // Drop any prior unfinished org-choice context so a stale credential is not retained.
+        pendingManualSignIn = nil
+
+        // activateCookies mutates the SHARED jar that UsageService.pollUsage reads. Snapshot the
+        // active account first so any non-success outcome can restore it. Without this, a failed
+        // attempt to ADD a new account would clobber the working account's cookies and its next
+        // poll would 401 - silently breaking a healthy account (P1, review finding).
+        let previousActive = accountStore.activeAccount
+        func restoreActiveJar() {
+            if let previousActive {
+                ClaudeAPI.activateCookies(sessionKey: previousActive.sessionKey, cookieHeader: previousActive.allCookieHeader)
+            } else {
+                ClaudeAPI.clearClaudeCookies()
+            }
+        }
+
         ClaudeAPI.activateCookies(sessionKey: sessionKey, cookieHeader: cookieHeader)
 
         guard let request = ClaudeAPI.makeRequest(path: "/api/organizations", sessionKey: sessionKey, cookieHeader: cookieHeader) else {
+            restoreActiveJar()
             return .connectionError
         }
 
         do {
             let (data, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return .connectionError }
+            guard let http = response as? HTTPURLResponse else {
+                restoreActiveJar()
+                return .connectionError
+            }
 
             if http.statusCode == 401 || http.statusCode == 403 {
                 // 403 with only a bare key is most often a Cloudflare block (missing HttpOnly
                 // `__cf_bm`) — steer the user to paste the full header. Pattern #5: the server is
                 // authoritative; we do not guess validity client-side.
+                restoreActiveJar()
                 return .authFailed(suggestFullHeader: cookieHeader == nil)
             }
 
             let orgs = try JSONDecoder().decode([Organization].self, from: data)
-            guard !orgs.isEmpty else { return .noOrganizations }
+            guard !orgs.isEmpty else {
+                restoreActiveJar()
+                return .noOrganizations
+            }
 
             let email = extractEmail(from: orgs, rawData: data) ?? "Account \(accountStore.accounts.count + 1)"
 
             // Org choice (pattern #6): never blindly take orgs[0] for multi-org users.
+            let selectedOrg: Organization
             if orgs.count == 1 {
-                return addOrReactivateManualAccount(org: orgs[0], sessionKey: sessionKey, cookieHeader: cookieHeader, email: email)
+                selectedOrg = orgs[0]
+            } else if let existing = accountStore.accounts.first(where: { acct in orgs.contains(where: { $0.uuid == acct.organizationId }) }),
+                      let match = orgs.first(where: { $0.uuid == existing.organizationId }) {
+                selectedOrg = match
+            } else {
+                // Restore the active account's jar while the picker is shown; completeManualSignIn
+                // re-primes the jar to the chosen account via switchTo.
+                restoreActiveJar()
+                pendingManualSignIn = (sessionKey, cookieHeader, email)
+                return .needsOrgChoice(orgs)
             }
-            if let existing = accountStore.accounts.first(where: { acct in orgs.contains(where: { $0.uuid == acct.organizationId }) }),
-               let match = orgs.first(where: { $0.uuid == existing.organizationId }) {
-                return addOrReactivateManualAccount(org: match, sessionKey: sessionKey, cookieHeader: cookieHeader, email: email)
-            }
-            pendingManualSignIn = (sessionKey, cookieHeader, email)
-            return .needsOrgChoice(orgs)
+
+            let result = addOrReactivateManualAccount(org: selectedOrg, sessionKey: sessionKey, cookieHeader: cookieHeader, email: email)
+            // Only a successful add/reactivate (which re-primes the jar to the new account via
+            // switchTo) should leave the jar mutated; a limit-reached result must restore.
+            if case .success = result {} else { restoreActiveJar() }
+            return result
         } catch {
             logger.error("Manual sign-in org discovery failed: \(error.localizedDescription)")
+            restoreActiveJar()
             return .connectionError
         }
     }
@@ -948,7 +1030,8 @@ class AuthManager: NSObject, ObservableObject {
 
     // MARK: - Allowed Domains
 
-    private func isAllowedDomain(_ host: String) -> Bool {
+    // internal for @testable access in AuthManagerTests
+    func isAllowedDomain(_ host: String) -> Bool {
         // Exact match plus `".X"` suffix for multi-label domains - rejects
         // attacker-injected prefixes like `evil.googleapis.com.attacker.com`
         // that a bare `hasSuffix(".googleapis.com")` would accept.
@@ -969,6 +1052,19 @@ class AuthManager: NSObject, ObservableObject {
         host.hasSuffix(".icloud.com") ||
         host.hasSuffix(".challenges.cloudflare.com") ||
         host == "cf-chl-widget.cloudflare.com"
+    }
+
+    /// Whether a `window.open()` to `url` should spawn an OAuth popup. Pattern #7: the `about:`
+    /// scheme check MUST precede the host check - `about:blank` (Google's OAuth bootstrap) has
+    /// no host, so a host guard placed first would silently block it and break Google sign-in.
+    // internal for @testable access in AuthManagerTests
+    func allowsOAuthPopup(for url: URL) -> Bool {
+        if url.scheme == "about" {
+            let abs = url.absoluteString
+            return abs == "about:blank" || abs.hasPrefix("about:blank") || abs.hasPrefix("about:srcdoc")
+        }
+        guard let host = url.host else { return false }
+        return isAllowedDomain(host)
     }
 }
 
@@ -1023,16 +1119,14 @@ extension AuthManager: WKNavigationDelegate {
               let httpResponse = navigationResponse.response as? HTTPURLResponse,
               let url = httpResponse.url,
               let host = url.host,
-              isAllowedDomain(host) else { return }
+              // Only claude.ai itself can legitimately set the claude.ai sessionKey. Gating on
+              // the broad isAllowedDomain allowlist here would let any allowlisted OAuth third
+              // party (accounts.google.com, *.gstatic.com, …) deliver a
+              // `Set-Cookie: sessionKey=…; Domain=.claude.ai` that Foundation's parser honors —
+              // a session-fixation vector (critical pattern #2). Pin to claude.ai.
+              host == "claude.ai" || host.hasSuffix(".claude.ai") else { return }
 
-        var headerFields: [String: String] = [:]
-        for (key, value) in httpResponse.allHeaderFields {
-            if let key = key as? String, let value = value as? String {
-                headerFields[key] = value
-            }
-        }
-        let cookies = HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: url)
-        captureSessionCookie(from: cookies)
+        captureSessionCookie(from: Self.sessionCookies(fromResponseHeaders: httpResponse.allHeaderFields, url: url))
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -1041,7 +1135,7 @@ extension AuthManager: WKNavigationDelegate {
         }
 
         // Check cookies on every page load (immediate check + polling handles the rest)
-        checkCookiesFromAllSources(webView)
+        reReadCookieStore(webView)
 
         // Reset timeout on every navigation — proves user is still actively signing in.
         // Prevents the window from closing while the user checks email for their code.
@@ -1060,25 +1154,21 @@ extension AuthManager: WKUIDelegate {
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         guard let url = navigationAction.request.url else { return nil }
 
-        // Allow about:blank/about:srcdoc (Google OAuth bootstraps popups at about:blank
-        // before navigating to accounts.google.com). For all other URLs, apply the same
-        // domain allowlist as the parent WebView.
-        if url.scheme == "about" {
-            let abs = url.absoluteString
-            guard abs == "about:blank" || abs.hasPrefix("about:blank") || abs.hasPrefix("about:srcdoc") else {
-                logger.info("Blocked popup to unusual about: URI: \(abs)")
-                return nil
-            }
-        } else {
-            guard let host = url.host, isAllowedDomain(host) else {
-                logger.info("Blocked popup to disallowed domain: \(url.host ?? url.scheme ?? "nil")")
-                return nil
-            }
+        // Pattern #7: allowsOAuthPopup checks the about: scheme BEFORE the host, so Google's
+        // about:blank OAuth bootstrap (no host) is permitted while disallowed hosts are blocked.
+        guard allowsOAuthPopup(for: url) else {
+            logger.info("Blocked popup to disallowed URL: \(url.absoluteString)")
+            return nil
         }
 
-        // Tear down any previous popup before creating a new one.
+        // Fully retire any previous popup before creating a new one: clear its delegate pointers
+        // and nil our reference, so a late webViewDidClose from a replaced popup cannot fall
+        // through to this manager (review finding).
+        popupWebView?.navigationDelegate = nil
+        popupWebView?.uiDelegate = nil
         popupWebView?.stopLoading()
         popupWebView?.removeFromSuperview()
+        popupWebView = nil
 
         let popup = WKWebView(frame: webView.bounds, configuration: configuration)
         popup.navigationDelegate = self
@@ -1111,7 +1201,7 @@ extension AuthManager: WKUIDelegate {
         // so `sessionKey` is now readable even if the poll/observer missed it mid-flight.
         // Re-read the *login* store (not the popup's) right now.
         if let loginWebView, !hasCapturedSession {
-            checkCookiesFromAllSources(loginWebView)
+            reReadCookieStore(loginWebView)
         }
     }
 
@@ -1168,9 +1258,10 @@ extension AuthManager: WKHTTPCookieStoreObserver {
         Task { @MainActor [weak self] in
             guard let self, !self.hasCapturedSession else { return }
             let cookies = await cookieStore.allCookies()
-            if let sessionCookie = cookies.first(where: Self.isSessionCookie) {
-                self.handleCookieCaptured(sessionCookie)
-            }
+            // Re-validate after the await: the login may have been torn down mid-read (stopLoginWindow
+            // nils loginWebView). Route through the same funnel/guards as every other trigger.
+            guard !self.hasCapturedSession, self.loginWebView != nil else { return }
+            self.captureSessionCookie(from: cookies)
         }
     }
 }
