@@ -65,8 +65,11 @@ final class SecretRedactorTests: XCTestCase {
 
     func testBareEmailInProse_redactedToEmailToken() {
         let out = SecretRedactor.redact("Account added: jane.doe@example.co.uk via store")
+        // Narrowed to the secret itself (local part + domain), not a global `@` ban — a later
+        // change introducing a legitimate @mention should not fail a correct redaction.
         XCTAssertFalse(out.contains("jane.doe@example.co.uk"), out)
-        XCTAssertFalse(out.contains("@"), "an @ survived in prose: \(out)")
+        XCTAssertFalse(out.contains("jane.doe"), out)
+        XCTAssertFalse(out.contains("example.co.uk"), out)
         XCTAssertTrue(out.contains("[EMAIL]"), out)
     }
 
@@ -91,10 +94,11 @@ final class SecretRedactorTests: XCTestCase {
     func testAuthorizationBearer_fullyRedacted() {
         let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig"
         let out = SecretRedactor.redact("Authorization: Bearer \(token)")
+        // The full token (which itself contains the "payload" segment) must be gone; assert on
+        // the token and its segments, not a bare "payload" substring that prose could carry.
         XCTAssertFalse(out.contains(token), "Bearer token survived: \(out)")
-        XCTAssertFalse(out.contains("payload"), out)
+        XCTAssertFalse(out.contains(".payload."), out)
         XCTAssertTrue(out.contains("REDACTED_LEN_"), out)
-        // The scheme word may remain, but no token characters after it.
         XCTAssertFalse(out.contains("Bearer \(token)"), out)
     }
 
@@ -190,5 +194,169 @@ final class SecretRedactorTests: XCTestCase {
             XCTAssertFalse(out.contains(secret), "secret '\(secret)' survived: \(out)")
         }
         XCTAssertFalse(out.contains("@leak.com"), out)
+    }
+
+    // MARK: - P0: secrets nested in an array/object UNDER a credential key must not survive
+
+    /// THE test that proves the nested-JSON-under-credential-key leak is closed. Each case puts
+    /// an opaque (non-regex-detectable) secret inside an array or object whose parent key is a
+    /// credential key, including the exact `serialize()` envelope shape the producer writes.
+    func testNestedSecretUnderCredentialKey_doesNotSurvive() {
+        let cases: [(String, [String])] = [
+            // Arrays under a credential key.
+            (#"{"token":["sk-ant-LEAK1","sk-ant-LEAK2"]}"#, ["sk-ant-LEAK1", "sk-ant-LEAK2"]),
+            (#"{"password":["PWSECRET1"]}"#, ["PWSECRET1"]),
+            (#"{"assertion":["ASSERTLEAK"]}"#, ["ASSERTLEAK"]),
+            // Objects under a credential key.
+            (#"{"signature":{"r":"SIGLEAK","s":"SIGLEAK2"}}"#, ["SIGLEAK", "SIGLEAK2"]),
+            (#"{"signature":{"raw":"SIGSECRETVALUE"}}"#, ["SIGSECRETVALUE"]),
+            (#"{"_csrf":{"v":"CSRFLEAK"}}"#, ["CSRFLEAK"]),
+            // Deeply nested.
+            (#"{"token":{"a":{"b":["sk-ant-DEEPLEAK"]}}}"#, ["sk-ant-DEEPLEAK"]),
+            // The realistic serialize() envelope: payload nested under a credential key.
+            (#"{"kind":"x","payload":{"token":["sk-ant-ENVLEAK1","sk-ant-ENVLEAK2"]},"ts":"2026-06-03T00:00:00Z"}"#, ["sk-ant-ENVLEAK1", "sk-ant-ENVLEAK2"]),
+            (#"{"kind":"x","payload":{"signature":{"r":"ENVSIGLEAK"}},"ts":"t"}"#, ["ENVSIGLEAK"])
+        ]
+        for (input, secrets) in cases {
+            let out = SecretRedactor.redact(input)
+            for secret in secrets {
+                XCTAssertFalse(out.contains(secret), "nested secret '\(secret)' survived under credential key: \(out)")
+            }
+            XCTAssertTrue(out.contains("REDACTED_LEN_"), "expected length redaction: \(out)")
+        }
+    }
+
+    func testNonStringScalarUnderCredentialKey_redactedToMarker() {
+        // A numeric/bool leaf under a credential key is replaced with the non-scalar marker.
+        let out = SecretRedactor.redact(#"{"token":{"count":12345}}"#)
+        XCTAssertFalse(out.contains("12345"), out)
+        XCTAssertTrue(out.contains("REDACTED_NONSCALAR") || out.contains("REDACTED_LEN_"), out)
+    }
+
+    func testNestedSecret_idempotent() {
+        let inputs = [
+            #"{"token":["sk-ant-LEAK"]}"#,
+            #"{"signature":{"r":"SIGLEAK"}}"#,
+            #"{"token":{"count":5}}"#,
+            #"{"kind":"x","payload":{"token":["sk-ant-ENV"]},"ts":"t"}"#
+        ]
+        for input in inputs {
+            let once = SecretRedactor.redact(input)
+            let twice = SecretRedactor.redact(once)
+            XCTAssertEqual(once, twice, "nested redaction not idempotent for \(input)\n once: \(once)\n twice: \(twice)")
+        }
+    }
+
+    // MARK: - IDN / Unicode / quoted-local / underscore-domain emails
+
+    func testIDNEmails_doNotSurvive() {
+        let cases: [(String, String)] = [
+            ("Account added and activated: jens@müller.de", "müller.de"),
+            ("user giorgos@παράδειγμα.gr signed in", "παράδειγμα.gr"),
+            ("li@例え.jp added", "例え.jp"),
+            ("office@münchen.de", "münchen.de"),
+            ("ivan@почта.рф", "почта.рф")
+        ]
+        for (input, domain) in cases {
+            let out = SecretRedactor.redact(input)
+            XCTAssertFalse(out.contains(domain), "IDN domain '\(domain)' survived: \(out)")
+            XCTAssertTrue(out.contains("[EMAIL]"), "IDN email not redacted: \(out)")
+        }
+    }
+
+    func testUnderscoreDomainEmail_doesNotLeakDomain() {
+        let out = SecretRedactor.redact("u@inter_nal.example.com from billing")
+        XCTAssertFalse(out.contains("inter_nal.example.com"), out)
+        XCTAssertTrue(out.contains("[EMAIL]"), out)
+    }
+
+    func testQuotedLocalPartEmail_doesNotLeakDomain() {
+        let out = SecretRedactor.redact(#"contact "weird name"@example.com today"#)
+        XCTAssertFalse(out.contains("@example.com"), out)
+        XCTAssertTrue(out.contains("[EMAIL]"), out)
+    }
+
+    // MARK: - Credential value char-class truncation (comma/semicolon/colon)
+
+    func testCommaDelimitedCredentialValue_fullyRedacted() {
+        let out = SecretRedactor.redact("token=abc,def,ghi rest")
+        XCTAssertFalse(out.contains("abc,def,ghi"), out)
+        XCTAssertFalse(out.contains("def,ghi"), "comma-tail of the secret survived: \(out)")
+        XCTAssertTrue(out.contains("REDACTED_LEN_"), out)
+        XCTAssertTrue(out.contains("rest"), "following whitespace-delimited token should survive: \(out)")
+    }
+
+    func testSemicolonInNonCookieCredentialValue_fullyRedacted() {
+        // `assertion` is not a cookieHeaderKey, so the old cookie-rescue did not help it.
+        let out = SecretRedactor.redact("assertion=abc;def")
+        XCTAssertFalse(out.contains("def"), "semicolon-tail survived for non-cookie key: \(out)")
+        XCTAssertTrue(out.contains("REDACTED_LEN_"), out)
+    }
+
+    func testColonDelimitedBearerToken_fullyRedacted() {
+        let out = SecretRedactor.redact("Authorization: Bearer abc:def:ghi")
+        XCTAssertFalse(out.contains("def:ghi"), "colon-tail of bearer token survived: \(out)")
+        XCTAssertFalse(out.contains("abc:def:ghi"), out)
+        XCTAssertTrue(out.contains("REDACTED_LEN_"), out)
+    }
+
+    // MARK: - URL fragment generalization (not just sessionKey keyword)
+
+    func testURLFragmentWithArbitraryToken_redacted() {
+        let cases = [
+            "see https://claude.ai/cb#access_token=sk-ant-FRAGSECRET&x=1 now",
+            "https://claude.ai/cb#tokenval-OPAQUESECRET",
+            "https://claude.ai/cb#id_token=eyJFRAGJWT"
+        ]
+        for input in cases {
+            let out = SecretRedactor.redact(input)
+            XCTAssertTrue(out.contains("#[REDACTED]"), "fragment not redacted: \(out)")
+            for secret in ["sk-ant-FRAGSECRET", "OPAQUESECRET", "eyJFRAGJWT"] {
+                XCTAssertFalse(out.contains(secret), "fragment secret survived: \(out)")
+            }
+        }
+    }
+
+    func testURLFragmentSessionKeyStillRedacted() {
+        let out = SecretRedactor.redact("https://claude.ai/cb#sessionKey=sk-ant-SECRET&x=1")
+        XCTAssertFalse(out.contains("sk-ant-SECRET"), out)
+        XCTAssertTrue(out.contains("#[REDACTED]"), out)
+    }
+
+    // MARK: - isAlreadyRedacted both alternations (bare-^ and SHA-prefix)
+
+    func testIdempotenceGuard_bareLenMarkerUnderCredentialKey() {
+        // Re-redacting a value that is already `REDACTED_LEN_N` (non-rotation key) must be a no-op.
+        XCTAssertEqual(SecretRedactor.redact(#"{"token":"REDACTED_LEN_25"}"#), #"{"token":"REDACTED_LEN_25"}"#)
+    }
+
+    func testIdempotenceGuard_shaPrefixMarkerUnderRotationKey() {
+        let input = #"{"__cf_bm":"457f11ea...REDACTED_LEN_25"}"#
+        XCTAssertEqual(SecretRedactor.redact(input), input)
+    }
+
+    func testIdempotenceGuard_bareLenInKeyValueProse() {
+        XCTAssertEqual(SecretRedactor.redact("token=REDACTED_LEN_25"), "token=REDACTED_LEN_25")
+    }
+
+    // MARK: - ReDoS: pathological non-matching input completes quickly + is truncated
+
+    func testLongNonMatchingInput_completesQuicklyAndTruncates() {
+        // 40 KB with no `=`/`@` terminator — the pre-fix quadratic patterns took tens of seconds.
+        let pathological = String(repeating: "ab", count: 20_000)
+        let start = Date()
+        let out = SecretRedactor.redact(pathological)
+        let elapsed = Date().timeIntervalSince(start)
+        XCTAssertLessThan(elapsed, 1.0, "redact took \(elapsed)s on a 40KB line — possible ReDoS regression")
+        XCTAssertTrue(out.contains("…[TRUNCATED]"), "long input should be truncated: \(out.prefix(40))…")
+    }
+
+    func testLongInputStillRedactsLeadingSecret() {
+        // A secret at the start, then a long pathological tail: secret still redacted, fast.
+        let input = "sessionKey=sk-ant-HEADSECRET " + String(repeating: "x", count: 20_000)
+        let start = Date()
+        let out = SecretRedactor.redact(input)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.0)
+        XCTAssertFalse(out.contains("sk-ant-HEADSECRET"), "leading secret survived under truncation: \(out.prefix(80))")
     }
 }

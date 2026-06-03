@@ -37,7 +37,11 @@ enum SecretRedactor {
         if let data = message.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
             let redactedJson = redactJSON(json)
-            if let outData = try? JSONSerialization.data(withJSONObject: redactedJson, options: [.fragmentsAllowed]),
+            // `.sortedKeys` makes the output deterministic (byte-identical for identical input),
+            // which is what keeps redaction idempotent for object payloads — without it, a second
+            // pass re-serializes the same dict with a different key order and the strings, though
+            // equally redacted, would not compare equal.
+            if let outData = try? JSONSerialization.data(withJSONObject: redactedJson, options: [.fragmentsAllowed, .sortedKeys]),
                let outString = String(data: outData, encoding: .utf8) {
                 return outString
             }
@@ -48,25 +52,59 @@ enum SecretRedactor {
 
     // MARK: - JSON walker
 
-    private static func redactJSON(_ value: Any) -> Any {
+    /// Marker substituted for a non-string value (array/object) found under a credential key.
+    /// A structured value under a credential key has no legitimate non-secret use, so the whole
+    /// subtree is replaced rather than walked — closing the nested-secret leak where a token
+    /// array/object would otherwise reach `regexRedact`, which does not recognize opaque tokens.
+    static let nonScalarRedactionMarker = "REDACTED_NONSCALAR"
+
+    /// Walk the JSON tree. `forceRedact` is set once any credential-keyed ancestor is entered:
+    /// from that point EVERY descendant string is length-redacted (not regex-redacted), so a
+    /// secret nested in an array/object under a credential key (e.g. `{"token":["sk-ant-…"]}`)
+    /// cannot slip through to `regexRedact` and survive verbatim.
+    private static func redactJSON(_ value: Any, forceRedact: Bool = false) -> Any {
         if let dict = value as? [String: Any] {
             var out: [String: Any] = [:]
             for (key, val) in dict {
-                if credentialKeys.contains(key.lowercased()), let s = val as? String {
-                    out[key] = redactValue(forKey: key, value: s)
+                let keyIsCredential = credentialKeys.contains(key.lowercased())
+                if forceRedact {
+                    // Already inside a credential subtree: redact every leaf regardless of key.
+                    out[key] = forceRedactValue(forKey: key, value: val)
+                } else if keyIsCredential {
+                    if let s = val as? String {
+                        out[key] = redactValue(forKey: key, value: s)
+                    } else {
+                        // Structured value under a credential key — recurse in force-redact mode
+                        // so every nested string becomes REDACTED_LEN_N (no verbatim survival).
+                        out[key] = redactJSON(val, forceRedact: true)
+                    }
                 } else {
-                    out[key] = redactJSON(val)
+                    out[key] = redactJSON(val, forceRedact: false)
                 }
             }
             return out
         }
         if let arr = value as? [Any] {
-            return arr.map { redactJSON($0) }
+            return arr.map { redactJSON($0, forceRedact: forceRedact) }
         }
         if let str = value as? String {
-            return regexRedact(str)
+            return forceRedact ? redactValue(forKey: "", value: str) : regexRedact(str)
         }
         return value
+    }
+
+    /// Redact a single value while inside a credential subtree. Strings become `REDACTED_LEN_N`;
+    /// nested containers keep recursing in force-redact mode; non-string scalars (Int/Bool/null)
+    /// are replaced with the non-scalar marker (a number/bool under a credential key could itself
+    /// be a secret, e.g. a numeric token).
+    private static func forceRedactValue(forKey key: String, value: Any) -> Any {
+        if value is [String: Any] || value is [Any] {
+            return redactJSON(value, forceRedact: true)
+        }
+        if let str = value as? String {
+            return redactValue(forKey: key, value: str)
+        }
+        return nonScalarRedactionMarker
     }
 
     /// Marker an already-redacted value carries, e.g. `REDACTED_LEN_25` or
@@ -78,7 +116,9 @@ enum SecretRedactor {
     }
 
     private static func redactValue(forKey key: String, value: String) -> String {
-        guard !isAlreadyRedacted(value) else { return value }
+        // Idempotence: a value that is already a redaction marker (LEN form or the non-scalar
+        // marker) must pass through unchanged, or the count/SHA prefix would drift each pass.
+        guard !isAlreadyRedacted(value), value != nonScalarRedactionMarker else { return value }
         let count = value.count
         if rotationDetectableKeys.contains(key.lowercased()) {
             return "\(sha256Prefix(value))...REDACTED_LEN_\(count)"
@@ -109,9 +149,13 @@ enum SecretRedactor {
         options: []
     )
 
-    private static let urlSessionKeyFragmentRegex = try! NSRegularExpression(
-        pattern: "(https?://[^\\s#]+)#[^\\s]*(sessionKey|session_key)[^\\s]*",
-        options: [.caseInsensitive]
+    /// Any non-empty fragment on an http(s) URL. Generalized from a `sessionKey`-keyword-only
+    /// match to the WHOLE fragment, mirroring the query pass: OAuth/implicit-flow redirects carry
+    /// access/id tokens in the fragment under arbitrary names (`access_token`, `id_token`, `code`),
+    /// so keying on `sessionKey` alone left opaque fragment tokens exposed.
+    private static let urlFragmentRegex = try! NSRegularExpression(
+        pattern: "(https?://[^\\s#]+)#[^\\s]+",
+        options: []
     )
 
     private static let cookiePairRegex = try! NSRegularExpression(
@@ -123,10 +167,16 @@ enum SecretRedactor {
     /// `try?` (which silently skipped redaction on a compile failure — a real bypass) to a
     /// load-time `try!`. Group 1 = prefix (key + separator + optional opening quote),
     /// group 2 = key, group 3 = value.
+    ///
+    /// The value class is `[^"'\s\}\)]+` — it deliberately does NOT stop at `,` `;` `:` so an
+    /// opaque secret containing those delimiters (e.g. `token=abc,def`, `assertion=a:b:c`) is
+    /// captured whole rather than leaving a `,def`/`:b:c` remnant. Over-capturing a following
+    /// `;theme=dark` (no space) is the safe direction for a P0 redactor; real cookie headers use
+    /// `; ` with a space, which still terminates the value.
     private static let credentialKeyValueRegex: NSRegularExpression = {
         let keys = credentialKeys.joined(separator: "|")
         return try! NSRegularExpression(
-            pattern: "(?i)([\"']?(\(keys))[\"']?\\s*[:=]\\s*[\"']?)([^\"',;\\s\\}\\)]+)",
+            pattern: "(?i)([\"']?(\(keys))[\"']?\\s*[:=]\\s*[\"']?)([^\"'\\s\\}\\)]+)",
             options: []
         )
     }()
@@ -136,18 +186,25 @@ enum SecretRedactor {
     /// scheme word, so for `Authorization: Bearer abc` it would capture only `Bearer` and
     /// leave the token. This dedicated pass spans the space and redacts the token itself.
     /// Group 1 = everything up to and including the scheme word + space; group 2 = the token.
+    /// The token class includes `:` so an opaque colon-delimited token (`Bearer a:b:c`) is
+    /// captured whole instead of leaving a `:b:c` remnant.
     private static let bearerTokenRegex = try! NSRegularExpression(
-        pattern: "(?i)((?:authorization\\s*[:=]\\s*)?(?:bearer|basic)\\s+)([A-Za-z0-9\\-._~+/=]+)",
+        pattern: "(?i)((?:authorization\\s*[:=]\\s*)?(?:bearer|basic)\\s+)([A-Za-z0-9\\-._~+/=:]+)",
         options: []
     )
 
     /// Bare email addresses in free-text prose or as a JSON string value not under a
     /// credential key (e.g. `"Account added: user@example.com"`). Redacted to `[EMAIL]`.
-    /// Local part and domain labels allow the RFC-permitted subset that actually appears
-    /// in claude.ai data; the TLD requires at least two letters so it does not swallow a
-    /// trailing word boundary.
+    ///
+    /// Unicode-aware: the local-part and domain classes use `\p{L}`/`\p{N}` so internationalized
+    /// (IDN) addresses are caught too — `jens@müller.de`, `用户@例え.jp`, `ivan@почта.рф` — not just
+    /// ASCII. A quoted local part (`"weird name"@example.com`, RFC 5321) is matched via the
+    /// leading alternation, and `_` is permitted in domain labels (enterprise relay hosts).
+    /// Classes/quantifiers are bounded to avoid quadratic backtracking (the local part is capped,
+    /// the domain-label repetition is bounded, and a `\b` anchors the TLD) so a long non-email
+    /// run does not stall the export.
     private static let emailRegex = try! NSRegularExpression(
-        pattern: "[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}",
+        pattern: "(?:\"[^\"]{0,128}\"|[\\p{L}\\p{N}._%+\\-]{1,128})@[\\p{L}\\p{N}_\\-]{1,128}(?:\\.[\\p{L}\\p{N}_\\-]{1,128}){0,16}\\.[\\p{L}]{2,24}\\b",
         options: []
     )
 
@@ -158,30 +215,59 @@ enum SecretRedactor {
 
     // MARK: - Regex pass
 
+    /// Per-call input cap. Several passes (`emailRegex`, `cookiePairRegex`) are O(n^2) on long
+    /// non-matching input, and `OSLogStoreDumper` feeds arbitrary `composedMessage` lines (base64
+    /// blobs, long hosts) through `redact`. A single large pathological line would stall the
+    /// synchronous export. Lines this long carry no diagnostic value, so we hard-truncate before
+    /// the regex passes. The marker makes the truncation auditable. The cheap pre-filters below
+    /// (skip a pass when its trigger char is absent) keep even the capped worst case near-linear.
+    static let maxRedactInputLength = 4_096
+
     private static func regexRedact(_ input: String) -> String {
         var result = input
+        if result.utf16.count > maxRedactInputLength {
+            let endIndex = result.index(result.startIndex, offsetBy: maxRedactInputLength, limitedBy: result.endIndex) ?? result.endIndex
+            result = String(result[result.startIndex..<endIndex]) + "…[TRUNCATED]"
+        }
+
+        // Cheap pre-filters: a credential `key=value`/`key:value`, a cookie pair, and a bearer
+        // token all require a `=` or `:`; an email requires `@`. Skipping the corresponding
+        // (quadratic) regex when its trigger char is absent makes a long non-matching line (the
+        // ReDoS case) near-linear instead of O(n^2). The `:`/`=` set covers all three structured
+        // passes; bearer also needs a scheme word but `:`/`=`/space precede it in practice.
+        let hasKVDelim = result.contains("=") || result.contains(":")
+        let hasAt = result.contains("@")
 
         // 1. Authorization bearer/basic tokens FIRST. The token char-class includes `=` and
         //    other base64url chars, so running this before the generic credential pass avoids
         //    the generic pass clipping the token at the scheme-word space and leaving a remnant.
-        result = redactBearerTokens(result)
+        if hasKVDelim || result.range(of: "(?i)(bearer|basic)\\s", options: .regularExpression) != nil {
+            result = redactBearerTokens(result)
+        }
 
         // 2. Generic credential key=value / key: value pairs (sessionKey, password, token, …).
-        result = redactCredentialPairs(result)
+        if hasKVDelim {
+            result = redactCredentialPairs(result)
+            // 3. Cookie headers (mixed secret + harmless pairs) — also key=value shaped.
+            result = redactCookieHeader(result)
+        }
 
-        // 3. Cookie headers (mixed secret + harmless pairs).
-        result = redactCookieHeader(result)
+        // 4. URLs (query strings + fragments) — only when a URL scheme is present.
+        if result.contains("://") {
+            result = redactURLs(result)
+        }
 
-        // 4. URLs (query strings + sessionKey fragments).
-        result = redactURLs(result)
-
-        // 5. UUID path segments.
-        result = redactUUIDPaths(result)
+        // 5. UUID path segments — only when a hyphen could form a UUID.
+        if result.contains("-") {
+            result = redactUUIDPaths(result)
+        }
 
         // 6. Bare emails LAST so already-redacted values (REDACTED_LEN_, [ORG-UUID], 8-char
         //    SHA prefixes) cannot contain an `@` that this would rewrite — and so an email
         //    surviving every structured pass is still caught (defense in depth).
-        result = redactEmails(result)
+        if hasAt {
+            result = redactEmails(result)
+        }
 
         return result
     }
@@ -263,17 +349,13 @@ enum SecretRedactor {
     private static func redactURLs(_ input: String) -> String {
         var result = input
 
-        var fragmentRanges: [NSRange] = []
-        urlSessionKeyFragmentRegex.enumerateMatches(in: result, range: NSRange(location: 0, length: (result as NSString).length)) { m, _, _ in
-            if let r = m?.range(at: 1) { fragmentRanges.append(NSRange(location: r.location, length: ((result as NSString).length - r.location))) }
-        }
-        for range in fragmentRanges.reversed() {
-            let prefix = (result as NSString).substring(with: NSRange(location: range.location, length: 0))
-            let urlMatch = urlSessionKeyFragmentRegex.firstMatch(in: result, range: range)
-            if let urlMatch, urlMatch.numberOfRanges >= 2 {
-                let urlOnly = (result as NSString).substring(with: urlMatch.range(at: 1))
-                result = (result as NSString).replacingCharacters(in: urlMatch.range, with: prefix + urlOnly + "#REDACTED")
-            }
+        // Whole-fragment redaction for any http(s) URL (access_token/id_token/code/etc.).
+        let fragNS = result as NSString
+        let fragMatches = urlFragmentRegex.matches(in: result, range: NSRange(location: 0, length: fragNS.length))
+        for match in fragMatches.reversed() {
+            guard match.numberOfRanges >= 2 else { continue }
+            let urlOnly = (result as NSString).substring(with: match.range(at: 1))
+            result = (result as NSString).replacingCharacters(in: match.range, with: urlOnly + "#[REDACTED]")
         }
 
         let queryNS = result as NSString
