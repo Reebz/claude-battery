@@ -364,10 +364,16 @@ class AuthManager: NSObject, ObservableObject {
             // would silently complete sign-in for a login the user already abandoned.
             guard let self, !self.hasCapturedSession, self.loginWebView != nil else { return }
 
-            #if DEBUG
+            // U6 diagnostics: cookie NAMES + domains only, never `.value`. Runtime-gated by the
+            // logger; the call compiles unconditionally (no `#if DEBUG` at the call site).
             let names = cookies.map { "\($0.name)=\($0.domain)" }.joined(separator: ", ")
+            #if DEBUG
             logger.debug("Cookie store poll — \(cookies.count) cookies: \(names)")
             #endif
+            DiagnosticsLogger.shared.emitHot(kind: "cookie-store-poll", payload: [
+                "count": cookies.count,
+                "names": names
+            ])
 
             self.captureSessionCookie(from: cookies)
         }
@@ -416,6 +422,16 @@ class AuthManager: NSObject, ObservableObject {
     /// `.signingIn` shows "Finishing sign-in…", `.error` swaps to a recoverable error card,
     /// `.idle` clears it. No-ops when there is no login WebView to host the overlay.
     private func updateLoginOverlay(for state: LoginState) {
+        // U6 diagnostics: single chokepoint for every loginState transition. The state name
+        // (and the user-facing `.error` message) carry no secret/email/sessionKey value.
+        let stateName: String
+        switch state {
+        case .idle: stateName = "idle"
+        case .signingIn: stateName = "signingIn"
+        case .error(let message): stateName = "error: \(message)"
+        }
+        DiagnosticsLogger.shared.emitMilestone(kind: "login-state", payload: ["state": stateName])
+
         switch state {
         case .signingIn:
             showSigningInOverlay()
@@ -619,12 +635,23 @@ class AuthManager: NSObject, ObservableObject {
               cookie.isSecure,
               cookie.path == "/" else {
             logger.debug("Cookie rejected — name=\(cookie.name) domain=\(cookie.domain)")
+            // U6 diagnostics: rejected cookie NAME + domain only, never `.value`.
+            DiagnosticsLogger.shared.emitMilestone(kind: "cookie-rejected", payload: [
+                "name": cookie.name,
+                "domain": cookie.domain
+            ])
             return
         }
 
         hasCapturedSession = true
         pendingSessionKey = cookie.value
         loginState = .signingIn
+        // U6 diagnostics: the single capture-funnel success point. Records that capture fired
+        // and the cookie domain (non-secret); never the `sessionKey` value.
+        DiagnosticsLogger.shared.emitMilestone(kind: "session-cookie-captured", payload: [
+            "domain": cookie.domain,
+            "isSecure": cookie.isSecure
+        ])
         // Deliberately do NOT invalidate cookiePollTimer here. The poll closure already
         // guards on `hasCapturedSession`, so it no-ops while a capture is in flight, and it
         // is torn down in stopLoginWindow. Leaving it armed means that if org discovery fails
@@ -684,6 +711,12 @@ class AuthManager: NSObject, ObservableObject {
             }
 
             logger.info("Org discovery HTTP \(httpResponse.statusCode)")
+            // U6 diagnostics: HTTP status code only — never the response body (which carries
+            // email/org data and stays behind the `#if DEBUG` guards below).
+            DiagnosticsLogger.shared.emitMilestone(kind: "org-discovery-status", payload: [
+                "status": httpResponse.statusCode,
+                "path": "webview"
+            ])
 
             if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
                 #if DEBUG
@@ -936,6 +969,12 @@ class AuthManager: NSObject, ObservableObject {
                 return .connectionError
             }
 
+            // U6 diagnostics: manual-path org-discovery HTTP status code only.
+            DiagnosticsLogger.shared.emitMilestone(kind: "org-discovery-status", payload: [
+                "status": http.statusCode,
+                "path": "manual"
+            ])
+
             if http.statusCode == 401 || http.statusCode == 403 {
                 // 403 with only a bare key is most often a Cloudflare block (missing HttpOnly
                 // `__cf_bm`) — steer the user to paste the full header. Pattern #5: the server is
@@ -1099,9 +1138,13 @@ extension AuthManager: WKNavigationDelegate {
 
         if isAllowedDomain(host) {
             logger.debug("Navigation allowed: \(host)")
+            // U6 diagnostics: decision + host only (never url.absoluteString — it may carry
+            // query params). Hot path: navigation can be frequent during the SPA flow.
+            DiagnosticsLogger.shared.emitHot(kind: "nav-decision", payload: ["decision": "allow", "host": host])
             decisionHandler(.allow)
         } else {
             logger.info("Blocked navigation to disallowed domain: \(host)")
+            DiagnosticsLogger.shared.emitHot(kind: "nav-decision", payload: ["decision": "block", "host": host])
             decisionHandler(.cancel)
         }
     }
