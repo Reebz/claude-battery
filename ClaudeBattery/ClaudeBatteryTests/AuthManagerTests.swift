@@ -284,6 +284,47 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertFalse(alert.messageText.contains("\u{2014}"))
     }
 
+    // MARK: - WebAuthn credentials shim + One Tap suppression (U4)
+    // JS runtime behavior is validated by G1 + manual QA; these assert the shim is wired into
+    // the config and that its source honors the publicKey gate and the CPU-safe suppression.
+
+    @MainActor
+    func testLoginConfiguration_includesCredentialsShimUnconditionally() {
+        let auth = makeAuthManager()
+        let config = auth.makeLoginConfiguration()
+        let sources = config.userContentController.userScripts.map(\.source)
+        XCTAssertTrue(
+            sources.contains { $0.contains("navigator.credentials") && $0.contains(".publicKey") },
+            "Login config must include the WebAuthn shim (ships in release, unlike the netlog script)"
+        )
+    }
+
+    @MainActor
+    func testCredentialsShim_gatesRejectionOnPublicKey() {
+        let src = AuthManager.credentialsShimSource
+        XCTAssertTrue(src.contains("navigator.credentials.get"))
+        XCTAssertTrue(src.contains("navigator.credentials.create"))
+        XCTAssertTrue(src.contains("options.publicKey"), "Must gate on publicKey, not blanket-reject")
+        XCTAssertTrue(src.contains("return origGet(options)"), "Non-publicKey get must pass through unchanged")
+        XCTAssertTrue(src.contains("return origCreate(options)"), "Non-publicKey create must pass through unchanged")
+    }
+
+    @MainActor
+    func testCredentialsShim_forcesPlatformAuthenticatorUnavailable() {
+        let src = AuthManager.credentialsShimSource
+        XCTAssertTrue(src.contains("isUserVerifyingPlatformAuthenticatorAvailable"))
+        XCTAssertTrue(src.contains("Promise.resolve(false)"))
+    }
+
+    @MainActor
+    func testCredentialsShim_suppressesOneTapWithCSSNotObserver() {
+        let src = AuthManager.credentialsShimSource
+        XCTAssertTrue(src.contains("accounts.google.com/gsi"), "Targets the Google One Tap iframe (#7)")
+        XCTAssertTrue(src.contains("display: none"), "Hides One Tap via CSS")
+        XCTAssertFalse(src.contains("MutationObserver"),
+                       "Must not use a subtree MutationObserver — CPU hot-loop risk (issue #11)")
+    }
+
     // MARK: - isSessionCookie: Happy Path — valid sessionKey on claude.ai
 
     @MainActor

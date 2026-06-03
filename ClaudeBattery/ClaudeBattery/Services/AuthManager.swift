@@ -66,6 +66,148 @@ class AuthManager: NSObject, ObservableObject {
         super.init()
     }
 
+    // MARK: - Login WebView configuration
+
+    /// Build the login `WKWebViewConfiguration`: a non-persistent data store, the production
+    /// WebAuthn/One-Tap shim (U4), and — only in DEBUG — the network-tracing instrumentation.
+    // internal for @testable access in AuthManagerTests
+    func makeLoginConfiguration() -> WKWebViewConfiguration {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+
+        // U4: ships in production (small, non-secret). Makes passkey/Google degrade instead of
+        // hanging, without regressing password/federated credential flows.
+        config.userContentController.addUserScript(
+            WKUserScript(source: Self.credentialsShimSource, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        )
+
+        #if DEBUG
+        // Debug-only network tracing — capture every fetch / XHR inside the login webview so we
+        // can see which claude.ai request fails when a user reports "error logging you in".
+        config.userContentController.addUserScript(
+            WKUserScript(source: Self.netLogScriptSource, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        )
+        config.userContentController.add(self, name: "claudebatteryNetLog")
+        #endif
+
+        return config
+    }
+
+    /// WebAuthn-only credentials shim + Google One Tap suppression (KTD-4). Ships in production.
+    ///
+    /// - Wraps `navigator.credentials.get/create` and rejects **only** when `options.publicKey`
+    ///   is present (a WebAuthn request, #25), racing the real call against a short timeout so
+    ///   claude.ai's passkey UI fails fast instead of spinning forever in an un-entitled WKWebView.
+    ///   Password and federated credential requests pass through unchanged (no-regression invariant).
+    /// - Forces `PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable` to `false`.
+    /// - Hides the auto-rendered Google One Tap iframe (#7) via injected CSS rather than a
+    ///   MutationObserver — a subtree observer on claude.ai's SPA would be a CPU hot-loop (issue #11).
+    /// - Posts a `webauthn-intercept` sentinel to the DEBUG netlog handler (a no-op in production,
+    ///   where no handler is registered) so G1 can confirm the wrapper is the path claude.ai invokes.
+    static let credentialsShimSource = """
+    (function() {
+        if (!navigator.credentials) { return; }
+        var post = function(data) {
+            try {
+                var h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.claudebatteryNetLog;
+                if (h) { h.postMessage(JSON.stringify(data)); }
+            } catch (e) {}
+        };
+        var TIMEOUT_MS = 3000;
+        var rejectAfterTimeout = function() {
+            return new Promise(function(_resolve, reject) {
+                setTimeout(function() {
+                    reject(new DOMException("WebAuthn is not available in this sign-in window.", "NotAllowedError"));
+                }, TIMEOUT_MS);
+            });
+        };
+        var origGet = navigator.credentials.get && navigator.credentials.get.bind(navigator.credentials);
+        var origCreate = navigator.credentials.create && navigator.credentials.create.bind(navigator.credentials);
+        if (origGet) {
+            navigator.credentials.get = function(options) {
+                if (options && options.publicKey) {
+                    post({kind: 'webauthn-intercept', method: 'get'});
+                    return Promise.race([origGet(options), rejectAfterTimeout()]);
+                }
+                return origGet(options);
+            };
+        }
+        if (origCreate) {
+            navigator.credentials.create = function(options) {
+                if (options && options.publicKey) {
+                    post({kind: 'webauthn-intercept', method: 'create'});
+                    return Promise.race([origCreate(options), rejectAfterTimeout()]);
+                }
+                return origCreate(options);
+            };
+        }
+        if (window.PublicKeyCredential) {
+            window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = function() {
+                return Promise.resolve(false);
+            };
+            if (window.PublicKeyCredential.isConditionalMediationAvailable) {
+                window.PublicKeyCredential.isConditionalMediationAvailable = function() {
+                    return Promise.resolve(false);
+                };
+            }
+        }
+        try {
+            var style = document.createElement('style');
+            style.textContent = '#credential_picker_container, #credential_picker_iframe, iframe[src*="accounts.google.com/gsi"] { display: none !important; }';
+            (document.head || document.documentElement).appendChild(style);
+        } catch (e) {}
+    })();
+    """
+
+    /// DEBUG-only network tracing script (relocated from `presentLogin`). Never ships in release.
+    static let netLogScriptSource = """
+    (function() {
+        const post = (data) => {
+            try {
+                const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.claudebatteryNetLog;
+                if (h) h.postMessage(JSON.stringify(data));
+            } catch (e) {}
+        };
+        post({kind: 'script-injected', url: location.href});
+        const origFetch = window.fetch;
+        window.fetch = async function(input, init) {
+            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            const method = (init && init.method) || (typeof input === 'object' && input.method) || 'GET';
+            post({kind: 'fetch-start', url, method});
+            try {
+                const response = await origFetch(input, init);
+                post({kind: 'fetch-done', url, method, status: response.status});
+                return response;
+            } catch (e) {
+                post({kind: 'fetch-error', url, method, error: String(e)});
+                throw e;
+            }
+        };
+        const OrigXHR = window.XMLHttpRequest;
+        window.XMLHttpRequest = function() {
+            const xhr = new OrigXHR();
+            const origOpen = xhr.open;
+            xhr.open = function(method, url) {
+                this._method = method; this._url = url;
+                post({kind: 'xhr-open', method, url});
+                return origOpen.apply(this, arguments);
+            };
+            xhr.addEventListener('loadend', function() {
+                post({kind: 'xhr-done', method: xhr._method, url: xhr._url, status: xhr.status});
+            });
+            return xhr;
+        };
+        window.addEventListener('error', function(ev) {
+            post({kind: 'js-error', message: String(ev.message), source: String(ev.filename || ''), lineno: ev.lineno || 0});
+        });
+        const origConsoleError = console.error;
+        console.error = function() {
+            try { post({kind: 'console-error', args: Array.from(arguments).map(a => String(a)).join(' ') }); } catch (e) {}
+            return origConsoleError.apply(console, arguments);
+        };
+    })();
+    """
+
     // MARK: - Login
 
     func presentLogin() {
@@ -79,65 +221,7 @@ class AuthManager: NSObject, ObservableObject {
 
         loginState = .idle
 
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent()
-
-        #if DEBUG
-        // Debug instrumentation - capture every fetch / XHR inside the login webview
-        // so we can see which claude.ai request fails when a user reports "error logging you in"
-        // inside the UI (e.g., samuelgjekic, issue #7). Logs arrive via os_log with subsystem
-        // "com.claudebattery.app", category "Auth", visible in Console.app or `log stream`.
-        let netLogScript = """
-        (function() {
-            const post = (data) => {
-                try {
-                    const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.claudebatteryNetLog;
-                    if (h) h.postMessage(JSON.stringify(data));
-                } catch (e) {}
-            };
-            post({kind: 'script-injected', url: location.href});
-            const origFetch = window.fetch;
-            window.fetch = async function(input, init) {
-                const url = typeof input === 'string' ? input : (input && input.url) || '';
-                const method = (init && init.method) || (typeof input === 'object' && input.method) || 'GET';
-                post({kind: 'fetch-start', url, method});
-                try {
-                    const response = await origFetch(input, init);
-                    post({kind: 'fetch-done', url, method, status: response.status});
-                    return response;
-                } catch (e) {
-                    post({kind: 'fetch-error', url, method, error: String(e)});
-                    throw e;
-                }
-            };
-            const OrigXHR = window.XMLHttpRequest;
-            window.XMLHttpRequest = function() {
-                const xhr = new OrigXHR();
-                const origOpen = xhr.open;
-                xhr.open = function(method, url) {
-                    this._method = method; this._url = url;
-                    post({kind: 'xhr-open', method, url});
-                    return origOpen.apply(this, arguments);
-                };
-                xhr.addEventListener('loadend', function() {
-                    post({kind: 'xhr-done', method: xhr._method, url: xhr._url, status: xhr.status});
-                });
-                return xhr;
-            };
-            window.addEventListener('error', function(ev) {
-                post({kind: 'js-error', message: String(ev.message), source: String(ev.filename || ''), lineno: ev.lineno || 0});
-            });
-            const origConsoleError = console.error;
-            console.error = function() {
-                try { post({kind: 'console-error', args: Array.from(arguments).map(a => String(a)).join(' ') }); } catch (e) {}
-                return origConsoleError.apply(console, arguments);
-            };
-        })();
-        """
-        let userScript = WKUserScript(source: netLogScript, injectionTime: .atDocumentStart, forMainFrameOnly: false)
-        config.userContentController.addUserScript(userScript)
-        config.userContentController.add(self, name: "claudebatteryNetLog")
-        #endif
+        let config = makeLoginConfiguration()
 
         let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 640), configuration: config)
         webView.customUserAgent = ClaudeAPI.safariUserAgent
