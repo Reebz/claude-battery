@@ -1,4 +1,5 @@
 import XCTest
+import WebKit
 @testable import ClaudeBattery
 
 final class AuthManagerTests: XCTestCase {
@@ -48,6 +49,117 @@ final class AuthManagerTests: XCTestCase {
             properties[.secure] = "TRUE"
         }
         return HTTPCookie(properties: properties)!
+    }
+
+    /// Poll `condition` on the main actor until it is true or `timeout` elapses.
+    /// Used for capture paths that hop through async cookie-store reads.
+    @MainActor
+    private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    // MARK: - Session capture funnel (U1, #17)
+    // Every capture trigger (poll, KVO, navigationResponse, webViewDidClose) routes through
+    // captureSessionCookie(from:). These deterministic tests exercise that funnel directly;
+    // the real WKWebView store-read on macOS 13.5 is covered by manual QA per the plan.
+
+    @MainActor
+    func testCaptureSessionCookie_capturesValidSession() {
+        let auth = makeAuthManager()
+        auth.captureSessionCookie(from: [makeCookie(value: "sk-funnel")])
+        // handleCookieCaptured sets these synchronously before spawning org discovery.
+        XCTAssertEqual(auth.pendingSessionKey, "sk-funnel")
+        XCTAssertEqual(auth.loginState, .signingIn)
+    }
+
+    @MainActor
+    func testCaptureSessionCookie_idempotentAcrossTriggers() {
+        let auth = makeAuthManager()
+        // First trigger captures; a second trigger (e.g. poll firing after webViewDidClose)
+        // must not re-capture — critical pattern #3.
+        auth.captureSessionCookie(from: [makeCookie(value: "first")])
+        auth.captureSessionCookie(from: [makeCookie(value: "second")])
+        XCTAssertEqual(auth.pendingSessionKey, "first", "Second capture must be ignored")
+    }
+
+    @MainActor
+    func testCaptureSessionCookie_rejectsSpoofedDomain() {
+        let auth = makeAuthManager()
+        auth.captureSessionCookie(from: [makeCookie(domain: "evil-claude.ai")])
+        XCTAssertNil(auth.pendingSessionKey, "Spoofed domain must never be captured — pattern #2")
+        XCTAssertEqual(auth.loginState, .idle)
+    }
+
+    @MainActor
+    func testCaptureSessionCookie_ignoresNonSessionCookies() {
+        let auth = makeAuthManager()
+        auth.captureSessionCookie(from: [
+            makeCookie(name: "__cf_bm", value: "cf"),
+            makeCookie(name: "anthropic-csrf-token", value: "csrf"),
+        ])
+        XCTAssertNil(auth.pendingSessionKey)
+        XCTAssertEqual(auth.loginState, .idle)
+    }
+
+    // MARK: - navigationResponse additive path (U1) — parse + validate logic
+    // WKNavigationResponse has no public initializer, so we exercise the header-parsing and
+    // domain-validation the delegate performs by feeding the parsed cookies through the funnel.
+
+    @MainActor
+    func testCaptureFromResponseHeader_capturesSessionKey() {
+        let auth = makeAuthManager()
+        let url = URL(string: "https://claude.ai")!
+        let cookies = HTTPCookie.cookies(
+            withResponseHeaderFields: ["Set-Cookie": "sessionKey=sk-from-header; Domain=.claude.ai; Path=/; Secure"],
+            for: url
+        )
+        auth.captureSessionCookie(from: cookies)
+        XCTAssertEqual(auth.pendingSessionKey, "sk-from-header")
+    }
+
+    @MainActor
+    func testCaptureFromResponseHeader_rejectsSpoofedDomain() {
+        let auth = makeAuthManager()
+        let url = URL(string: "https://evil-claude.ai")!
+        let cookies = HTTPCookie.cookies(
+            withResponseHeaderFields: ["Set-Cookie": "sessionKey=sk-evil; Domain=evil-claude.ai; Path=/; Secure"],
+            for: url
+        )
+        auth.captureSessionCookie(from: cookies)
+        XCTAssertNil(auth.pendingSessionKey, "Spoofed Set-Cookie domain must be rejected — pattern #2")
+    }
+
+    // MARK: - webViewDidClose re-read (U1) — THE test that gates "fixes #17"
+    // Seeds a real non-persistent cookie store with sessionKey, then drives webViewDidClose
+    // and asserts the full capture → org-discovery → account chain completes.
+
+    @MainActor
+    func testWebViewDidClose_capturesSessionFromLoginStore() async {
+        let auth = makeAuthManager()
+
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        let loginWebView = WKWebView(frame: .zero, configuration: config)
+        await config.websiteDataStore.httpCookieStore.setCookie(makeCookie(value: "sk-popup-close"))
+        auth.loginWebView = loginWebView
+
+        // Single org so discovery completes deterministically to one account.
+        mockSession.responseData = #"[{"uuid": "org-popup-close"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        // A non-popup webView triggers only the re-read branch, not popup teardown.
+        let unrelated = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        auth.webViewDidClose(unrelated)
+
+        await waitUntil { auth.accountStore.accounts.count == 1 }
+
+        XCTAssertEqual(auth.accountStore.accounts.count, 1,
+                       "webViewDidClose must re-read the login store and capture the session (#17)")
+        XCTAssertEqual(auth.accountStore.accounts.first?.sessionKey, "sk-popup-close")
+        XCTAssertEqual(auth.accountStore.accounts.first?.organizationId, "org-popup-close")
     }
 
     // MARK: - isSessionCookie: Happy Path — valid sessionKey on claude.ai

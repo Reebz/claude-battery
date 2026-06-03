@@ -19,7 +19,8 @@ class AuthManager: NSObject, ObservableObject {
     // internal for @testable access in AuthManagerTests
     let accountStore: AccountStore
     private let session: any HTTPDataFetching
-    private var loginWebView: WKWebView?
+    // internal for @testable access in AuthManagerTests (webViewDidClose capture test)
+    var loginWebView: WKWebView?
     private var loginWindowController: NSWindowController?
     private var loginTimeoutTask: Task<Void, Never>?
     private var orgDiscoveryTask: Task<Void, Never>?
@@ -29,10 +30,9 @@ class AuthManager: NSObject, ObservableObject {
     private var hasCapturedSession = false
     // internal for @testable access in AuthManagerTests
     var pendingSessionKey: String?
-    /// Full Cookie header string built from every `.claude.ai` cookie in the login WebView
-    /// (or the full `document.cookie` string in the JS-fallback path). Passed to `ClaudeAPI`
-    /// alongside `pendingSessionKey` so authenticated API calls during org discovery carry
-    /// the full cookie set instead of `sessionKey` alone.
+    /// Full Cookie header string built from every `.claude.ai` cookie in the login WebView.
+    /// Passed to `ClaudeAPI` alongside `pendingSessionKey` so authenticated API calls during
+    /// org discovery carry the full cookie set instead of `sessionKey` alone.
     private var pendingCookieHeader: String?
     /// Child WebView hosting OAuth popups spawned by `window.open()`. Added as a subview of
     /// the primary `loginWebView` so the OAuth provider's callback can `postMessage` back to
@@ -161,8 +161,10 @@ class AuthManager: NSObject, ObservableObject {
             }
         }
 
-        // Poll cookies every 0.5s — most reliable fallback for non-persistent store observer bugs
-        cookiePollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        // Poll cookies every 0.2s — most reliable fallback for non-persistent store observer bugs.
+        // Note (KTD-2): a faster poll only samples more often; it does not shrink the store's
+        // sync latency. The load-bearing #17 fix is the webViewDidClose / KVO re-read.
+        cookiePollTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.hasCapturedSession, let webView = self.loginWebView else { return }
                 self.checkCookiesFromAllSources(webView)
@@ -174,11 +176,16 @@ class AuthManager: NSObject, ObservableObject {
         }
     }
 
-    /// Check for session cookie via both WKHTTPCookieStore and JavaScript document.cookie
+    /// Re-read the WKHTTPCookieStore and capture the `sessionKey` if it has appeared.
+    ///
+    /// Called from every capture trigger: the cookie observer, the poll timer, KVO `url`
+    /// changes, `didFinish`, and (the load-bearing #17 path) `webViewDidClose`. The former
+    /// JS `document.cookie` fallback was deleted: `sessionKey` is HttpOnly, so `document.cookie`
+    /// can never see it — it was dead code that could only ever capture via the store
+    /// enumeration below.
     private func checkCookiesFromAllSources(_ webView: WKWebView) {
         guard !hasCapturedSession else { return }
 
-        // Path 1: WKHTTPCookieStore (captures HTTP Set-Cookie headers)
         Task {
             let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
 
@@ -187,48 +194,20 @@ class AuthManager: NSObject, ObservableObject {
             logger.debug("Cookie store poll — \(cookies.count) cookies: \(names)")
             #endif
 
-            if let sessionCookie = cookies.first(where: Self.isSessionCookie) {
-                handleCookieCaptured(sessionCookie)
-                return
-            }
+            captureSessionCookie(from: cookies)
         }
+    }
 
-        // Path 2: JavaScript document.cookie (captures JS-set cookies missed by WKHTTPCookieStore)
-        webView.evaluateJavaScript("document.cookie") { [weak self] result, error in
-            Task { @MainActor [weak self] in
-                guard let self, !self.hasCapturedSession else { return }
-                guard let cookieString = result as? String, !cookieString.isEmpty else { return }
-
-                #if DEBUG
-                logger.debug("JS document.cookie: \(cookieString.prefix(200))")
-                #endif
-
-                // Parse "sessionKey=value; other=value2; ..." format
-                let pairs = cookieString.components(separatedBy: "; ")
-                for pair in pairs {
-                    let parts = pair.components(separatedBy: "=")
-                    guard parts.count >= 2, parts[0] == "sessionKey" else { continue }
-                    let value = parts.dropFirst().joined(separator: "=")
-                    guard !value.isEmpty else { continue }
-
-                    logger.info("Session cookie captured via JavaScript fallback")
-                    self.hasCapturedSession = true
-                    self.pendingSessionKey = value
-                    // JS path: `document.cookie` only exposes non-HttpOnly cookies, which
-                    // excludes Cloudflare `__cf_bm`. Pass whatever we can see to `ClaudeAPI`;
-                    // it primes the jar with this set, then URLSession picks up the HttpOnly
-                    // cookies (including `__cf_bm`) automatically from the ambient
-                    // `WKWebsiteDataStore` context on the first authenticated response.
-                    self.pendingCookieHeader = cookieString
-                    self.loginState = .signingIn
-                    self.cookiePollTimer?.invalidate()
-                    self.cookiePollTimer = nil
-
-                    self.orgDiscoveryTask = Task { await self.fetchOrganizationId() }
-                    return
-                }
-            }
-        }
+    /// Single capture funnel. Every path that observes cookies (store poll, KVO, navigation
+    /// response, popup close) routes its cookie set through here so the `hasCapturedSession`
+    /// guard (critical pattern #3) enforces exactly-once capture regardless of which trigger
+    /// fires first. Per pattern #5, only the cookie value is read downstream — no store
+    /// metadata (e.g. `expiresDate`) is trusted.
+    // internal for @testable access in AuthManagerTests
+    func captureSessionCookie(from cookies: [HTTPCookie]) {
+        guard !hasCapturedSession else { return }
+        guard let sessionCookie = cookies.first(where: Self.isSessionCookie) else { return }
+        handleCookieCaptured(sessionCookie)
     }
 
     private func stopLoginWindow() {
@@ -601,6 +580,31 @@ extension AuthManager: WKNavigationDelegate {
         }
     }
 
+    /// Additive #17 backstop (KTD-2): if a claude.ai navigation response carries a
+    /// `Set-Cookie: sessionKey=…`, capture it. This **likely never fires** for the real
+    /// failure case — `sessionKey` is HttpOnly and XHR-set during the SPA navigation, and
+    /// WebKit strips HttpOnly `Set-Cookie` from the response it hands the delegate. Kept as
+    /// a cheap bonus path only; the load-bearing fix is the store re-read on
+    /// `webViewDidClose` / KVO. Always allows the response.
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        defer { decisionHandler(.allow) }
+
+        guard !hasCapturedSession,
+              let httpResponse = navigationResponse.response as? HTTPURLResponse,
+              let url = httpResponse.url,
+              let host = url.host,
+              isAllowedDomain(host) else { return }
+
+        var headerFields: [String: String] = [:]
+        for (key, value) in httpResponse.allHeaderFields {
+            if let key = key as? String, let value = value as? String {
+                headerFields[key] = value
+            }
+        }
+        let cookies = HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: url)
+        captureSessionCookie(from: cookies)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if let url = webView.url {
             loginWindowController?.window?.title = "Sign in to Claude — \(url.host ?? "")"
@@ -681,6 +685,14 @@ extension AuthManager: WKUIDelegate {
             popupWebView?.removeFromSuperview()
             popupWebView = nil
             logger.debug("OAuth popup closed itself")
+        }
+
+        // Load-bearing #17 fix (KTD-2): a popup closing is exactly when claude.ai has finished
+        // the OAuth redirect and the non-persistent store has had a navigation cycle to sync,
+        // so `sessionKey` is now readable even if the poll/observer missed it mid-flight.
+        // Re-read the *login* store (not the popup's) right now.
+        if let loginWebView, !hasCapturedSession {
+            checkCookiesFromAllSources(loginWebView)
         }
     }
 
