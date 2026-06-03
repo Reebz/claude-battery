@@ -236,7 +236,7 @@ final class DiagnosticsLogger: @unchecked Sendable {
         guard let h = try? FileHandle(forWritingTo: url) else {
             return nil
         }
-        try? h.seekToEnd()
+        _ = try? h.seekToEnd() // best-effort; a per-launch file is fresh, so this is a no-op
         handle = h
         return url
     }
