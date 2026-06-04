@@ -110,5 +110,42 @@ final class NoSecretsExportGateTests: XCTestCase {
         XCTAssertTrue(combined.contains("REDACTED_LEN_"), "expected redaction markers in archive content")
     }
 
+    /// Hardens the gate against two producer-shape regressions the original end-to-end test did not
+    /// drive: (1) a STRUCTURED cookie pair carrying a `value` field (the real cookie-store-poll shape
+    /// is name+domain; a regression adding the value would leak the live cookie/session value), and
+    /// (2) a secret riding in a JSON KEY position under a credential key. Both are now redacted by
+    /// the producer→archive pipeline; a wiring regression (dropping the `value` denylist entry or the
+    /// JSON-walker key redaction) would leak verbatim and fail here.
+    func testEndToEnd_structuredCookiePairsAndKeyPosition_hasNoSecrets() throws {
+        let logger = DiagnosticsLogger(directoryOverride: dir, enabledOverride: true)
+        logger.emitMilestone(kind: "cookie-store-poll", payload: [
+            "count": 1,
+            "names": [["name": "sessionKey", "domain": ".claude.ai", "value": "sk-ant-COOKIEVALSECRET"]]
+        ])
+        logger.emitMilestone(kind: "key-position", payload: [
+            "token": ["sk-ant-KEYPOSSECRET": true]
+        ])
+        logger.flush()
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let eligible = LogsExporter.eligibleLogFiles(in: dir, installedAfter: Date(timeIntervalSince1970: 0))
+        let archiveURL = try LogsExporter.buildArchive(from: eligible)
+        defer { try? FileManager.default.removeItem(at: archiveURL) }
+        let extractDir = dir.appendingPathComponent("extracted-structured", isDirectory: true)
+        try ArchiveTestSupport.decode(at: archiveURL, into: extractDir)
+
+        var combined = ""
+        for f in try FileManager.default.contentsOfDirectory(at: extractDir, includingPropertiesForKeys: nil) {
+            combined += (try? String(contentsOf: f, encoding: .utf8)) ?? ""
+        }
+        XCTAssertFalse(combined.contains("sk-ant-COOKIEVALSECRET"), "structured cookie `value` leaked: \(combined)")
+        XCTAssertFalse(combined.contains("sk-ant-KEYPOSSECRET"), "secret in JSON key position leaked: \(combined)")
+        XCTAssertTrue(combined.contains("REDACTED_KEY_"), "expected key-position SHA redaction marker: \(combined)")
+        XCTAssertTrue(combined.contains("REDACTED_LEN_"), "expected value redaction marker: \(combined)")
+        // The producer's genuine signal — cookie NAME + domain — must survive (it is not a secret).
+        XCTAssertTrue(combined.contains("sessionKey"), "cookie name signal lost: \(combined)")
+        XCTAssertTrue(combined.contains("claude.ai"), "cookie domain signal lost: \(combined)")
+    }
+
     // MARK: - Helpers (archive decode is shared via ArchiveTestSupport in LogsExporterTests)
 }

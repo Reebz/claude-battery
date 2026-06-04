@@ -469,4 +469,215 @@ final class SecretRedactorTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 1.0)
         XCTAssertFalse(out.contains("sk-ant-HEADSECRET"), "leading secret survived under truncation: \(out.prefix(80))")
     }
+
+    // MARK: - v1.49 QA hardening: brace/paren remnant on non-cookie credential keys
+    //
+    // The credential value-class formerly stopped at `}`/`)`, leaking the post-delimiter tail for
+    // every credential key NOT also backstopped by the cookie pass. Now it stops only at quotes/
+    // whitespace, so the whole opaque value is redacted on BOTH the non-JSON path and the
+    // JSON-string-value-under-a-non-credential-key path (the producer-reachable defense-in-depth path).
+
+    func testBraceParenRemnant_nonCookieCredentialKeys_fullyRedacted() {
+        let keys = ["token", "assertion", "signature", "password", "csrftoken", "x-csrf-token", "_csrf", "authorization"]
+        for key in keys {
+            for delim in [")", "}"] {
+                let raw = "\(key)=HEADPART\(delim)REMNANTLEAKTAIL"
+                let outRaw = SecretRedactor.redact(raw)
+                XCTAssertFalse(outRaw.contains("REMNANTLEAKTAIL"), "\(key) '\(delim)' remnant survived (non-JSON): \(outRaw)")
+                // Same secret shape as a JSON string value under a NON-credential key.
+                let json = "{\"freeText\":\"\(key)=HEADPART\(delim)REMNANTLEAKTAIL\"}"
+                let outJson = SecretRedactor.redact(json)
+                XCTAssertFalse(outJson.contains("REMNANTLEAKTAIL"), "\(key) '\(delim)' remnant survived (JSON value): \(outJson)")
+            }
+        }
+    }
+
+    // MARK: - v1.49 QA hardening: JSON-walker key matching (substring / whitespace / zero-width)
+
+    func testCredentialSubstringKeyInJSON_redacted() {
+        // The walker formerly used exact-set key matching, so a credential-SUBSTRING key routed the
+        // value to regexRedact and an opaque (non-regex-detectable) value survived verbatim.
+        let cases = [
+            (#"{"my_token":"NEEDLE_SUBKEY_A"}"#, "NEEDLE_SUBKEY_A"),
+            (#"{"refresh_token":"NEEDLE_RT_B"}"#, "NEEDLE_RT_B"),
+            (#"{"x_csrftoken":"NEEDLE_CSRF_C"}"#, "NEEDLE_CSRF_C")
+        ]
+        for (input, needle) in cases {
+            let out = SecretRedactor.redact(input)
+            XCTAssertFalse(out.contains(needle), "substring-key value survived: \(out)")
+            XCTAssertTrue(out.contains("REDACTED_LEN_"), out)
+        }
+    }
+
+    func testWhitespacePaddedCredentialKeyInJSON_redacted() {
+        let cases = [
+            (#"{"token ":"NEEDLE_TRAIL_A"}"#, "NEEDLE_TRAIL_A"),
+            (#"{" sessionKey":"NEEDLE_LEAD_B"}"#, "NEEDLE_LEAD_B")
+        ]
+        for (input, needle) in cases {
+            let out = SecretRedactor.redact(input)
+            XCTAssertFalse(out.contains(needle), "whitespace-padded key value survived: \(out)")
+        }
+    }
+
+    func testZeroWidthSplitCredentialKeyInJSON_redacted() {
+        // U+200B / U+200C inside a credential keyword must not dodge the walker — keys are
+        // format-stripped before the membership test.
+        let zwsp = "\u{200B}", zwnj = "\u{200C}"
+        let cases = [
+            ("{\"sess\(zwsp)ionKey\":\"NEEDLE_ZWSP_A\"}", "NEEDLE_ZWSP_A"),
+            ("{\"to\(zwnj)ken\":\"NEEDLE_ZWNJ_B\"}", "NEEDLE_ZWNJ_B")
+        ]
+        for (input, needle) in cases {
+            let out = SecretRedactor.redact(input)
+            XCTAssertFalse(out.contains(needle), "zero-width-split key value survived: \(out)")
+        }
+    }
+
+    // MARK: - v1.49 QA hardening: cf_clearance/lasturl/next-url glued-prefix immunity
+
+    func testGluedPrefixCookieKey_stillRedacted() {
+        // A long alnum run glued before a cookie key defeats the cookie pass's greedy key class.
+        // cf_clearance/lasturl/next-url are now in credentialKeys, whose keyword-anchored regex
+        // redacts them regardless of the preceding junk (and regardless of the 4096 truncation).
+        let cases = [
+            (String(repeating: "A", count: 4039) + "cf_clearance=NEEDLE_CFCLEAR_LONG" + String(repeating: "Z", count: 200), "NEEDLE_CFCLEAR_LONG"),
+            ("padpadpadnext-url=NEEDLE_NEXTURL_X", "NEEDLE_NEXTURL_X"),
+            ("xlasturl=NEEDLE_LASTURL_Y", "NEEDLE_LASTURL_Y")
+        ]
+        for (input, needle) in cases {
+            let out = SecretRedactor.redact(input)
+            XCTAssertFalse(out.contains(needle), "glued-prefix cookie key value survived: \(out.prefix(120))")
+        }
+    }
+
+    // MARK: - v1.49 QA hardening: email (NFD-decomposed IDN, trailing word char)
+
+    func testNFDDecomposedIDNEmail_redacted() {
+        // 'ü' as NFD: 'u' + U+0308 combining diaeresis. The email classes now include \p{M}.
+        let nfd = "jens@mu\u{0308}ller.de"
+        let out = SecretRedactor.redact("mail to \(nfd) here")
+        XCTAssertFalse(out.contains(nfd), "NFD IDN email survived: \(out)")
+        XCTAssertFalse(out.contains("mu\u{0308}ller.de"), out)
+        XCTAssertTrue(out.contains("[EMAIL]"), out)
+    }
+
+    func testEmailFollowedByWordChar_redacted() {
+        // The trailing `\b` failed when a word char followed the TLD; a negative lookahead fixes it.
+        let out = SecretRedactor.redact(#"{"label":"NEEDLE_victim@example.com_U1"}"#)
+        XCTAssertFalse(out.contains("victim@example.com"), "email before a word char survived: \(out)")
+        XCTAssertTrue(out.contains("[EMAIL]"), out)
+    }
+
+    // MARK: - v1.49 QA hardening: Authorization (scheme-agnostic) + fullwidth separator + zero-width value
+
+    func testAuthorizationAnyScheme_fullyRedacted() {
+        let cases = [
+            ("Authorization: Negotiate NEEDLE_NEG_A", "NEEDLE_NEG_A"),
+            (#"Authorization: Digest realm="x",nonce="NEEDLE_DIG_B""#, "NEEDLE_DIG_B"),
+            ("Authorization: Token NEEDLE_TOK_C", "NEEDLE_TOK_C"),
+            ("authorization=Bearer NEEDLE_EQ_D", "NEEDLE_EQ_D")
+        ]
+        for (input, needle) in cases {
+            let out = SecretRedactor.redact(input)
+            XCTAssertFalse(out.contains(needle), "Authorization value survived: \(out)")
+            XCTAssertTrue(out.contains("REDACTED_LEN_"), out)
+        }
+    }
+
+    func testBareBearerArbitraryPunctuation_fullyRedacted() {
+        let cases = [
+            (#"Bearer "NEEDLE_Q_A""#, "NEEDLE_Q_A"),
+            ("Bearer *NEEDLE_STAR_B", "NEEDLE_STAR_B"),
+            ("Bearer NEEDLE_AT_C@host", "NEEDLE_AT_C")
+        ]
+        for (input, needle) in cases {
+            let out = SecretRedactor.redact(input)
+            XCTAssertFalse(out.contains(needle), "bare bearer token survived: \(out)")
+        }
+    }
+
+    func testFullwidthColonSeparator_redacted() {
+        let out = SecretRedactor.redact("token\u{FF1A}NEEDLE_FWCOLON")
+        XCTAssertFalse(out.contains("NEEDLE_FWCOLON"), "fullwidth-colon-separated secret survived: \(out)")
+    }
+
+    func testZeroWidthSplitKeyOnRegexPath_redacted() {
+        let out = SecretRedactor.redact("cookie: __cf\u{200B}_bm=NEEDLE_ZWCFBM; path=/")
+        XCTAssertFalse(out.contains("NEEDLE_ZWCFBM"), "zero-width-split __cf_bm value survived: \(out)")
+    }
+
+    // MARK: - v1.49 QA hardening: no over-redaction of harmless producer signal + idempotence
+
+    func testHarmlessNonCredentialSignalPreserved() {
+        // The hardening must NOT over-redact the producer's real diagnostic signal.
+        let out = SecretRedactor.redact(#"{"decision":"allow","host":"claude.ai","status":403,"state":"signingIn"}"#)
+        XCTAssertTrue(out.contains("claude.ai"), "host signal lost: \(out)")
+        XCTAssertTrue(out.contains("allow"), out)
+        XCTAssertTrue(out.contains("signingIn"), out)
+        XCTAssertTrue(out.contains("403"), out)
+    }
+
+    func testHardeningCasesIdempotent() {
+        let inputs = [
+            "token=HEAD)REMNANTLEAKTAIL",
+            #"{"my_token":"NEEDLE_SUBKEY_A"}"#,
+            "Authorization: Negotiate NEEDLE_NEG_A",
+            "Bearer *NEEDLE_STAR_B",
+            "mail to jens@mu\u{0308}ller.de here",
+            String(repeating: "A", count: 4039) + "cf_clearance=NEEDLE_CFCLEAR_LONG" + String(repeating: "Z", count: 200)
+        ]
+        for input in inputs {
+            let once = SecretRedactor.redact(input)
+            XCTAssertEqual(once, SecretRedactor.redact(once), "not idempotent: \(input.prefix(40))")
+        }
+    }
+
+    // MARK: - v1.49 fixes-review (round 2): close gaps found while reviewing the hardening
+
+    func testFullwidthSeparatorAuthorizationScheme_fullyRedacted() {
+        // REGRESSION: the authz end-of-line pass separator was ASCII-only [:=] while the credential
+        // pass accepted fullwidth ：＝, so an exotic scheme (Negotiate/Token/NTLM) carried with a
+        // fullwidth separator had only its scheme word redacted and the real token orphaned.
+        let cases = [
+            ("Authorization：Negotiate FWNEGOTIATEsecret", "FWNEGOTIATEsecret"),
+            ("authorization＝Token FWTOKENsecret", "FWTOKENsecret"),
+            ("proxy-authorization＝NTLM FWNTLMsecretblob", "FWNTLMsecretblob"),
+            (#"{"msg":"Authorization：Negotiate JSONFWsecret"}"#, "JSONFWsecret")
+        ]
+        for (input, needle) in cases {
+            let out = SecretRedactor.redact(input)
+            XCTAssertFalse(out.contains(needle), "fullwidth-separator Authorization token survived: \(out)")
+            XCTAssertTrue(out.contains("REDACTED_LEN_"), out)
+        }
+    }
+
+    func testScalarArrayElementsUnderCredentialKey_redacted() {
+        // A bare Int/Bool/null as an ARRAY element under a credential key must become the non-scalar
+        // marker — the array twin of the direct-scalar fail-open closure (which only covered dict values).
+        let cases: [(String, [String])] = [
+            (#"{"token":[1234567890]}"#, ["1234567890"]),
+            (#"{"token":["sk-secret",123,true,null]}"#, ["sk-secret", "123"]),
+            (#"{"signature":[42,false]}"#, ["42"]),
+            (#"{"kind":"x","payload":{"sessionKey":[9988776655]},"ts":"t"}"#, ["9988776655"])
+        ]
+        for (input, raws) in cases {
+            let out = SecretRedactor.redact(input)
+            for raw in raws {
+                XCTAssertFalse(out.contains(raw), "scalar array element survived under credential key: \(out)")
+            }
+            XCTAssertTrue(out.contains("REDACTED_NONSCALAR"), "expected non-scalar marker: \(out)")
+        }
+    }
+
+    func testRedirectParamCode_redactedInURLContextButNotProse() {
+        // `code=` must redact only in a real query/fragment, never in prose (HTTP status / error codes).
+        for prose in ["error code=42", "NSURLErrorDomain code=-1012", "area code=415 here"] {
+            XCTAssertEqual(SecretRedactor.redact(prose), prose, "prose 'code=' was over-redacted")
+        }
+        for (input, needle) in [("/auth/cb?code=AUTHCODE_LIVE123&next=/x", "AUTHCODE_LIVE123"),
+                                ("/cb#access_token=FRAGACCESSTOK&id_token=FRAGIDTOK", "FRAGACCESSTOK")] {
+            XCTAssertFalse(SecretRedactor.redact(input).contains(needle), "real redirect param survived: \(input)")
+        }
+    }
 }
