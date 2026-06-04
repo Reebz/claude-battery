@@ -5,8 +5,9 @@
 **Sign-In Reliability & Opt-In Diagnostics**
 - Getting signed in is more reliable for accounts the embedded window could not finish on its own. A clear "use an email code" prompt steers you to the path that works in-app, the "Finishing sign-in" screen now recovers with "Try again" or "Sign in manually" instead of leaving a blank window, and a manual cookie-paste fallback covers Google-federated and passkey-only accounts (issues #7, #17, #25).
 - New opt-in Diagnostics section in Settings: turn on logging, reproduce a sign-in problem, then export a redacted log archive to attach to a GitHub issue. No passwords, tokens, or emails are ever saved - the export ships only controlled, redacted logs, and the producer stays completely off until you opt in.
-- Hardened the redaction and export internals so a future logging change cannot leak a secret: airtight handling of values nested under credential keys, per-launch log files with retention, and an end-to-end no-secrets gate in the test suite.
-- 297 automated tests (up from 173).
+- Hardened the redaction and export internals so a future logging change cannot leak a secret: airtight handling of values nested under credential keys, per-launch log files with retention, and an end-to-end no-secrets gate in the test suite. A follow-up adversarial fuzz pass closed every remaining redaction edge case (unusually shaped or padded credential keys, delimiter remnants, decomposed-Unicode emails, and non-Bearer auth schemes), and the diagnostic export now writes over an existing file atomically so a failed save can never destroy it.
+- Sign-in recovery is cleaner: an org-discovery failure now shows a single recoverable error card with "Try again" / "Sign in manually" instead of a redundant alert sheet that blocked those buttons, cancelling the organization picker no longer silently retries on the next cookie poll, and the no-organizations message now notes that a Pro or Max plan may be required.
+- 328 automated tests (up from 173).
 
 ### v1.48
 
