@@ -80,15 +80,56 @@ enum LogsExporter {
         }
 
         do {
-            if FileManager.default.fileExists(atPath: destination.path) {
-                try FileManager.default.removeItem(at: destination)
-            }
-            try FileManager.default.copyItem(at: archiveURL, to: destination)
+            try writeArchive(archiveURL, to: destination)
         } catch {
             return .failure("Could not save the archive: \(error.localizedDescription)")
         }
 
         return .success(savedURL: destination, issuesURL: issuesURL)
+    }
+
+    // MARK: - Atomic save (pure, unit-testable)
+
+    /// Save `source` to `destination` without ever destroying a pre-existing file mid-operation.
+    ///
+    /// If `destination` is empty, a plain `copyItem` suffices. If a file already exists there, the
+    /// previous remove-then-copy was non-atomic: a `removeItem` success followed by a `copyItem`
+    /// failure (ENOSPC on an external volume, a mid-copy I/O disconnect, a permission change) left
+    /// the user with NOTHING in place of their original. Instead, stage a copy into a temp sibling
+    /// inside the destination's PARENT directory — same NSSavePanel-granted scope, same volume,
+    /// both of which `replaceItemAt` requires — then atomically swap it in. `replaceItemAt` leaves
+    /// the original untouched on failure, so a failed save never destroys the pre-existing file.
+    /// Any throw best-effort cleans up the temp sibling so a failed save leaves no `.tmp-*` litter.
+    static func writeArchive(_ source: URL, to destination: URL) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: destination.path) else {
+            try fm.copyItem(at: source, to: destination)
+            return
+        }
+
+        let tempSibling = destination
+            .deletingLastPathComponent()
+            .appendingPathComponent("." + destination.lastPathComponent + ".tmp-\(UUID().uuidString)")
+        do {
+            try fm.copyItem(at: source, to: tempSibling)
+            // `replaceItemAt` cannot consume a SYMLINK original (it throws ENOENT). `fileExists`
+            // follows the link, so a symlink-to-existing-file reaches this branch; detect the link
+            // itself (without following) and unlink+move instead. Still crash-safe (the temp already
+            // holds the full payload), and it matches the old remove-then-copy semantics: replace the
+            // link with a real file, leave the link's target untouched.
+            // lstat-based (path, not URL) so it reads the link itself and is immune to URL
+            // resource-value caching: `attributesOfItem(atPath:)` returns the symlink's own attributes.
+            let isSymlink = ((try? fm.attributesOfItem(atPath: destination.path))?[.type] as? FileAttributeType) == .typeSymbolicLink
+            if isSymlink {
+                try fm.removeItem(at: destination)
+                try fm.moveItem(at: tempSibling, to: destination)
+            } else {
+                try fm.replaceItemAt(destination, withItemAt: tempSibling)
+            }
+        } catch {
+            try? fm.removeItem(at: tempSibling)
+            throw error
+        }
     }
 
     // MARK: - Eligibility (pure, unit-testable)

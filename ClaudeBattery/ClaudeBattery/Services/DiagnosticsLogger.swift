@@ -146,21 +146,27 @@ final class DiagnosticsLogger: @unchecked Sendable {
             // Serialization failed (a non-JSON value slipped into the payload). Preserve the
             // original kind and the payload KEY NAMES (non-secret by the producer contract) so the
             // diagnostic still records WHICH event was lost, instead of dropping it silently. No
-            // value is emitted; the fallback is sanitized to stay valid JSON and still runs through
-            // SecretRedactor at the call site.
-            let safeKind = Self.jsonSafe(kind)
-            let safeKeys = Self.jsonSafe(payload.keys.sorted().joined(separator: ","))
-            return "{\"ts\":\"\(isoFormatter.string(from: Date()))\",\"kind\":\"serialize-failed\",\"payload\":{\"failed_kind\":\"\(safeKind)\",\"keys\":\"\(safeKeys)\"}}"
+            // value is emitted; the fallback is itself built with `JSONSerialization` (all-String
+            // dict, so `isValidJSONObject` is guaranteed true and control chars in `kind`/key names
+            // are escaped correctly) to stay valid JSON, and still runs through SecretRedactor at
+            // the call site.
+            let fallback: [String: Any] = [
+                "ts": isoFormatter.string(from: Date()),
+                "kind": "serialize-failed",
+                "payload": [
+                    "failed_kind": kind,
+                    "keys": payload.keys.sorted().joined(separator: ",")
+                ]
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: fallback, options: [.sortedKeys]),
+               let str = String(data: data, encoding: .utf8) {
+                return str
+            }
+            // Last-resort minimal valid JSON if even that somehow fails (it cannot for an
+            // all-String dict, but stay total).
+            return "{\"kind\":\"serialize-failed\"}"
         }
         return str
-    }
-
-    /// Strip characters that would break a hand-built JSON string literal. Used only by the
-    /// serialize-failed fallback above, where `JSONSerialization` is unavailable.
-    private static func jsonSafe(_ s: String) -> String {
-        s.replacingOccurrences(of: "\\", with: "")
-            .replacingOccurrences(of: "\"", with: "")
-            .replacingOccurrences(of: "\n", with: " ")
     }
 
     /// Lazily open the file handle and write `path-resolved` + `session-start` exactly once,

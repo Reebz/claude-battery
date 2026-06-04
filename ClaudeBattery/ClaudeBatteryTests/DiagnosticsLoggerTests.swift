@@ -309,4 +309,27 @@ final class DiagnosticsLoggerTests: XCTestCase {
         XCTAssertTrue(line.contains("count"), "fallback must preserve payload key names: \(line)")
         XCTAssertTrue(line.contains("when"), "fallback must preserve payload key names: \(line)")
     }
+
+    /// Control chars (TAB, U+0001) in the kind or in a payload KEY name must not break the
+    /// fallback's JSON validity. The old string-interpolation fallback only stripped `\`, `"`,
+    /// and `\n`, so a TAB/CR/other control char passed through and produced invalid JSON; the
+    /// `JSONSerialization`-built fallback escapes them correctly.
+    func testSerializeFailedFallback_withControlCharsInKindAndKeys_isValidJSON() {
+        let logger = makeEnabledLogger()
+        // Date values force the primary serialization to fail (non-JSON-serializable), and the
+        // control chars live in the kind and a payload key name that the fallback echoes back.
+        let line = logger.redactedLine(kind: "bad\u{0009}kind\u{0001}", payload: [
+            "k\u{0009}ey": Date(),
+            "norm": Date()
+        ])
+
+        let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8))
+        XCTAssertNotNil(obj, "fallback line with control chars must still be valid JSON: \(line)")
+
+        let dict = obj as? [String: Any]
+        XCTAssertEqual(dict?["kind"] as? String, "serialize-failed", "fallback must report serialize-failed: \(line)")
+        let payload = dict?["payload"] as? [String: Any]
+        XCTAssertNotNil(payload?["failed_kind"], "fallback payload must carry failed_kind: \(line)")
+        XCTAssertNotNil(payload?["keys"], "fallback payload must carry keys: \(line)")
+    }
 }

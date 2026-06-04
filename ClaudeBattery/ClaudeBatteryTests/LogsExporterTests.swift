@@ -177,6 +177,89 @@ final class LogsExporterTests: XCTestCase {
         XCTAssertThrowsError(try LogsExporter.buildArchive(from: [bogus]))
     }
 
+    // MARK: - Atomic save (writeArchive)
+
+    func testWriteArchive_toNewPath_copiesContent() throws {
+        let src = dir.appendingPathComponent("source.aar")
+        let bytes = Data("known-archive-bytes".utf8)
+        try bytes.write(to: src)
+
+        let dest = dir.appendingPathComponent("saved.aar")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dest.path), "precondition: dest must not exist")
+
+        try LogsExporter.writeArchive(src, to: dest)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dest.path), "dest should exist after save")
+        XCTAssertEqual(try Data(contentsOf: dest), bytes, "dest bytes must match source")
+    }
+
+    func testWriteArchive_overExistingFile_replacesAtomically() throws {
+        let src = dir.appendingPathComponent("source.aar")
+        let newBytes = Data("the-new-replacement-bytes".utf8)
+        try newBytes.write(to: src)
+
+        let dest = dir.appendingPathComponent("saved.aar")
+        try Data("the-old-pre-existing-bytes".utf8).write(to: dest)
+
+        try LogsExporter.writeArchive(src, to: dest)
+
+        XCTAssertEqual(try Data(contentsOf: dest), newBytes, "dest must be replaced with source bytes")
+        XCTAssertTrue(siblingTempFiles(of: dest).isEmpty, "no .tmp-* sibling may remain: \(siblingTempFiles(of: dest))")
+    }
+
+    func testWriteArchive_overExisting_originalSurvivesWhenSourceMissing() throws {
+        // REGRESSION (P2 non-atomic destructive overwrite): the old remove-then-copy destroyed the
+        // user's pre-existing file before the copy, so a copy failure left NOTHING in its place.
+        // writeArchive must never destroy the original when the operation cannot complete.
+        let dest = dir.appendingPathComponent("saved.aar")
+        let originalBytes = Data("the-irreplaceable-original-bytes".utf8)
+        try originalBytes.write(to: dest)
+
+        let missingSource = dir.appendingPathComponent("does-not-exist.aar")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missingSource.path), "precondition: source must be missing")
+
+        XCTAssertThrowsError(try LogsExporter.writeArchive(missingSource, to: dest),
+                             "a missing source must make the save throw")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dest.path),
+                      "the pre-existing file must survive a failed save")
+        XCTAssertEqual(try Data(contentsOf: dest), originalBytes,
+                       "the pre-existing file's bytes must be untouched after a failed save")
+        XCTAssertTrue(siblingTempFiles(of: dest).isEmpty, "no .tmp-* litter may remain: \(siblingTempFiles(of: dest))")
+    }
+
+    func testWriteArchive_overSymlinkDestination_replacesLinkAndLeavesTargetIntact() throws {
+        // REGRESSION: `replaceItemAt` throws ENOENT on a SYMLINK original (fileExists follows the
+        // link, so a symlink-to-existing-file reaches the replace branch). writeArchive must unlink+
+        // move instead — replace the link with a real file, leave the link's target untouched.
+        let src = dir.appendingPathComponent("source.aar")
+        try Data("new-archive-bytes".utf8).write(to: src)
+        let target = dir.appendingPathComponent("real-target.txt")
+        try Data("original-target-bytes".utf8).write(to: target)
+        let linkDest = dir.appendingPathComponent("saved-link.aar")
+        try FileManager.default.createSymbolicLink(at: linkDest, withDestinationURL: target)
+
+        try LogsExporter.writeArchive(src, to: linkDest)
+
+        XCTAssertEqual(try Data(contentsOf: linkDest), Data("new-archive-bytes".utf8),
+                       "destination must hold the source bytes after replacing the symlink")
+        XCTAssertEqual(try Data(contentsOf: target), Data("original-target-bytes".utf8),
+                       "the symlink's former target must be untouched")
+        let isLink = ((try? FileManager.default.attributesOfItem(atPath: linkDest.path))?[.type] as? FileAttributeType) == .typeSymbolicLink
+        XCTAssertFalse(isLink, "destination must be a real file, not a symlink, after the save")
+        XCTAssertTrue(siblingTempFiles(of: linkDest).isEmpty, "no .tmp-* litter may remain")
+    }
+
+    /// `.tmp-*` siblings writeArchive may have staged next to `dest` in its parent directory.
+    private func siblingTempFiles(of dest: URL) -> [URL] {
+        let parent = dest.deletingLastPathComponent()
+        let prefix = "." + dest.lastPathComponent + ".tmp-"
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: parent, includingPropertiesForKeys: nil, options: []
+        )) ?? []
+        return entries.filter { $0.lastPathComponent.hasPrefix(prefix) }
+    }
+
     // MARK: - Helpers (shared archive decode lives in ArchiveTestSupport, below)
 }
 
