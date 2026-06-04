@@ -9,6 +9,15 @@ enum LoginState: Equatable {
     case idle
     case signingIn
     case error(String)
+
+    /// True only in the `.error` state. The capture funnel (`captureSessionCookie`) checks this so a
+    /// cancelled or failed login cannot auto-recapture the still-present session cookie while an
+    /// error card is on screen. `retryLogin` resets `.error` -> `.idle` before reloading, so the
+    /// user-initiated retry path is unaffected.
+    var isError: Bool {
+        if case .error = self { return true }
+        return false
+    }
 }
 
 /// Which overlay (if any) is currently shown over the login WebView (U2).
@@ -49,6 +58,11 @@ class AuthManager: NSObject, ObservableObject {
     private var loginWindowController: NSWindowController?
     private var loginTimeoutTask: Task<Void, Never>?
     private var orgDiscoveryTask: Task<Void, Never>?
+    /// Stored continuation for the in-progress org-picker sheet, so a teardown can resume it
+    /// (resume-once via `resumeOrgPicker`) instead of leaking the suspended `fetchOrganizationId`
+    /// task when the window is closed out from under the open sheet.
+    // internal for @testable access in AuthManagerTests (funnel has no other test seam)
+    var orgPickerContinuation: CheckedContinuation<Organization?, Never>?
     private var cookieEnumerationTask: Task<Void, Never>?
     private var cookiePollTimer: Timer?
     private var urlObservation: NSKeyValueObservation?
@@ -401,13 +415,22 @@ class AuthManager: NSObject, ObservableObject {
     /// metadata (e.g. `expiresDate`) is trusted.
     // internal for @testable access in AuthManagerTests
     func captureSessionCookie(from cookies: [HTTPCookie]) {
-        guard !hasCapturedSession else { return }
+        // `!loginState.isError`: a cancelled/failed login leaves the 0.2s poll timer armed and the
+        // session cookie live in the non-persistent store; without this gate the next tick would
+        // re-capture and re-launch org discovery, silently undoing the user's Cancel and overwriting
+        // every discovery-failure error card with a spinner. retryLogin clears .error -> .idle first,
+        // so the user-initiated retry path still captures.
+        guard !hasCapturedSession, !loginState.isError else { return }
         guard let sessionCookie = cookies.first(where: Self.isSessionCookie) else { return }
         handleCookieCaptured(sessionCookie)
     }
 
-    private func stopLoginWindow() {
+    // internal for @testable access in AuthManagerTests (verifies teardown resumes a suspended picker)
+    func stopLoginWindow() {
         removeLoginOverlay()
+        // Release a suspended org-picker await (if any) so teardown never leaks the awaiting task;
+        // resume-once makes this a no-op when the sheet's own handler already resumed.
+        resumeOrgPicker(with: nil)
         loginTimeoutTask?.cancel()
         loginTimeoutTask = nil
         cookieEnumerationTask?.cancel()
@@ -732,7 +755,6 @@ class AuthManager: NSObject, ObservableObject {
         guard let request = ClaudeAPI.makeRequest(path: "/api/organizations", sessionKey: sessionKey, cookieHeader: pendingCookieHeader) else {
             logger.error("Failed to construct organizations API URL")
             handleOrgDiscoveryFailure("Connection error. Please try again.")
-            showLoginAlert("Connection Error", "Could not complete sign-in. Please close this window and try again.")
             return
         }
 
@@ -744,7 +766,6 @@ class AuthManager: NSObject, ObservableObject {
             guard let httpResponse = response as? HTTPURLResponse else {
                 logger.error("Non-HTTP response from organizations API")
                 handleOrgDiscoveryFailure("Connection error. Please try again.")
-                showLoginAlert("Connection Error", "Could not complete sign-in. Please close this window and try again.")
                 return
             }
 
@@ -762,7 +783,6 @@ class AuthManager: NSObject, ObservableObject {
                 logger.warning("Auth failure during org discovery (HTTP \(httpResponse.statusCode)): \(body.prefix(500))")
                 #endif
                 handleOrgDiscoveryFailure("Sign-in failed. Please try again.")
-                showLoginAlert("Sign-in Failed", "The session could not be verified. Please close this window and try again.")
                 return
             }
 
@@ -777,8 +797,7 @@ class AuthManager: NSObject, ObservableObject {
 
             if orgs.isEmpty {
                 logger.info("No organizations found — user may not have Pro/Max subscription")
-                handleOrgDiscoveryFailure("No organizations found for this account.")
-                showLoginAlert("No Organizations", "No Claude organizations were found for this account. A Pro or Team subscription may be required.")
+                handleOrgDiscoveryFailure("No Claude organizations were found for this account. A Pro or Max plan may be required.")
                 return
             }
 
@@ -795,7 +814,11 @@ class AuthManager: NSObject, ObservableObject {
                 // org name — both can carry PII, and os_log lines can be read off-device.
                 logger.info("Re-auth auto-selected org for account \(accountId.uuidString)")
             case .needsChoice(let choices):
-                guard let picked = await showOrgPicker(orgs: choices) else {
+                let picked = await showOrgPicker(orgs: choices)
+                // If teardown (timeout / window close) resumed the picker with nil, orgDiscoveryTask
+                // is already cancelled — do not fight the teardown by re-driving login state.
+                guard !Task.isCancelled else { return }
+                guard let picked else {
                     // User cancelled the picker
                     handleOrgDiscoveryFailure("Sign-in cancelled.")
                     return
@@ -829,7 +852,6 @@ class AuthManager: NSObject, ObservableObject {
             } else {
                 logger.warning("Failed to add account (limit reached)")
                 handleOrgDiscoveryFailure("Account limit reached.")
-                showLoginAlert("Account Limit", "You can have up to \(AccountStore.maxAccounts) accounts. Remove one in Settings before adding another.")
                 return
             }
 
@@ -843,7 +865,6 @@ class AuthManager: NSObject, ObservableObject {
             guard !Task.isCancelled else { return }
             logger.error("Org discovery failed: \(error.localizedDescription)")
             handleOrgDiscoveryFailure("Connection error. Please try again.")
-            showLoginAlert("Connection Error", "Could not complete sign-in. Please close this window and try again.")
         }
     }
 
@@ -854,20 +875,15 @@ class AuthManager: NSObject, ObservableObject {
         loginState = .error(message)
     }
 
-    private func showLoginAlert(_ title: String, _ message: String) {
-        guard let window = loginWindowController?.window else { return }
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        alert.beginSheetModal(for: window)
-    }
-
     private func showOrgPicker(orgs: [Organization]) async -> Organization? {
         guard let window = loginWindowController?.window else { return nil }
 
         return await withCheckedContinuation { continuation in
+            // Store the continuation so a teardown (timeout / stopLoginWindow) that closes the window
+            // out from under this sheet can resume it instead of leaking the suspended
+            // fetchOrganizationId task. resumeOrgPicker is resume-once, so whichever fires first —
+            // this completion handler or teardown — wins and the other is a no-op.
+            orgPickerContinuation = continuation
             let alert = NSAlert()
             alert.messageText = "Choose Organization"
             alert.informativeText = "Multiple organizations found. Select which one to monitor."
@@ -887,19 +903,30 @@ class AuthManager: NSObject, ObservableObject {
             }
             alert.accessoryView = popup
 
-            alert.beginSheetModal(for: window) { response in
+            alert.beginSheetModal(for: window) { [weak self] response in
                 if response == .alertFirstButtonReturn {
                     let selectedIndex = popup.indexOfSelectedItem
                     guard selectedIndex >= 0, selectedIndex < orgs.count else {
-                        continuation.resume(returning: nil)
+                        self?.resumeOrgPicker(with: nil)
                         return
                     }
-                    continuation.resume(returning: orgs[selectedIndex])
+                    self?.resumeOrgPicker(with: orgs[selectedIndex])
                 } else {
-                    continuation.resume(returning: nil)
+                    self?.resumeOrgPicker(with: nil)
                 }
             }
         }
+    }
+
+    /// Resume the stored org-picker continuation AT MOST ONCE and clear it. Both the sheet's
+    /// completion handler and a teardown (`stopLoginWindow`) call this; the nil-check makes the
+    /// second caller a no-op, so a checked continuation is never double-resumed (a trap) and a
+    /// suspended picker is never leaked when the window is torn down mid-choice.
+    // internal for @testable access in AuthManagerTests
+    func resumeOrgPicker(with org: Organization?) {
+        guard let continuation = orgPickerContinuation else { return }
+        orgPickerContinuation = nil
+        continuation.resume(returning: org)
     }
 
     private func extractEmail(from orgs: [Organization], rawData: Data) -> String? {

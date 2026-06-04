@@ -448,6 +448,121 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(auth.accountStore.accounts.count, 0)
     }
 
+    // MARK: - extractEmail branches (the org-body -> Account.email path; previously untested)
+
+    @MainActor
+    func testManualSignIn_extractsEmailFromModelEmailAddress() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org1","email_address":"model@example.com"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        _ = await auth.manualSignIn("sessionKey=sk-x; __cf_bm=cf")
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "model@example.com")
+    }
+
+    @MainActor
+    func testManualSignIn_extractsEmailFromRawBillingEmail() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org1","billing_email":"billing@example.com"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        _ = await auth.manualSignIn("sessionKey=sk-x; __cf_bm=cf")
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "billing@example.com")
+    }
+
+    @MainActor
+    func testManualSignIn_extractsEmailFromNestedBilling() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org1","billing":{"email":"nested@example.com"}}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        _ = await auth.manualSignIn("sessionKey=sk-x; __cf_bm=cf")
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "nested@example.com")
+    }
+
+    @MainActor
+    func testManualSignIn_emailAddressTakesPrecedenceOverRawKeys() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org1","email_address":"model@example.com","billing_email":"billing@example.com"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        _ = await auth.manualSignIn("sessionKey=sk-x; __cf_bm=cf")
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "model@example.com",
+                       "model email_address must win over a raw billing_email")
+    }
+
+    @MainActor
+    func testManualSignIn_noEmailFallsBackToAccountLabel() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org1"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        _ = await auth.manualSignIn("sessionKey=sk-x; __cf_bm=cf")
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "Account 1",
+                       "no email in org body must fall back to the positional account label")
+    }
+
+    // MARK: - Org-picker continuation funnel (P2 fix: resume-once / no leak on teardown)
+
+    @MainActor
+    func testOrgPickerContinuation_stopLoginWindowResumesSuspendedPickerWithNil() async {
+        let auth = makeAuthManager()
+        // showOrgPicker needs a real window/sheet (unavailable headless), so drive the funnel it uses
+        // directly: a child task suspends on a continuation stored in orgPickerContinuation.
+        let picked = Task { @MainActor () -> Organization? in
+            await withCheckedContinuation { (cont: CheckedContinuation<Organization?, Never>) in
+                auth.orgPickerContinuation = cont
+            }
+        }
+        let stored = await waitUntil { auth.orgPickerContinuation != nil }
+        XCTAssertTrue(stored, "continuation should be stored before teardown")
+
+        // Teardown MUST resume the suspended picker with nil (no leaked task) and clear it.
+        // Reverting the `resumeOrgPicker(with: nil)` line in stopLoginWindow hangs this test.
+        auth.stopLoginWindow()
+        let result = await picked.value
+        XCTAssertNil(result, "stopLoginWindow must resume the suspended picker with nil")
+        XCTAssertNil(auth.orgPickerContinuation, "continuation must be nil after resume")
+    }
+
+    @MainActor
+    func testOrgPickerContinuation_doubleResumeIsNoOpNotTrap() async {
+        let auth = makeAuthManager()
+        let picked = Task { @MainActor () -> Organization? in
+            await withCheckedContinuation { (cont: CheckedContinuation<Organization?, Never>) in
+                auth.orgPickerContinuation = cont
+            }
+        }
+        _ = await waitUntil { auth.orgPickerContinuation != nil }
+
+        auth.resumeOrgPicker(with: nil)
+        let result = await picked.value
+        XCTAssertNil(result)
+        XCTAssertNil(auth.orgPickerContinuation)
+        // A SECOND resume (e.g. a late sheet handler after teardown already resumed) must be a
+        // harmless no-op, not a CheckedContinuation double-resume trap. Reverting the nil-guard in
+        // resumeOrgPicker turns this into a fatalError.
+        auth.resumeOrgPicker(with: nil)
+        XCTAssertNil(auth.orgPickerContinuation, "double-resume must remain a no-op")
+    }
+
+    // MARK: - Capture funnel gated on error state (P2 fix: cancelled login must not auto-recapture)
+
+    @MainActor
+    func testCaptureSessionCookie_blockedWhileInErrorState() {
+        let auth = makeAuthManager()
+        auth.loginState = .error("Sign-in cancelled.")
+        // A live session cookie is still in hand after a Cancel; the funnel must NOT re-capture it.
+        auth.captureSessionCookie(from: [makeCookie()])
+        XCTAssertEqual(auth.loginState, .error("Sign-in cancelled."),
+                       "capture must stay blocked in .error (no flip to .signingIn) so Cancel is not undone")
+    }
+
+    @MainActor
+    func testCaptureSessionCookie_proceedsInNonErrorState() {
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org1"}]"#.data(using: .utf8)!
+        auth.loginState = .idle
+        auth.captureSessionCookie(from: [makeCookie()])
+        XCTAssertEqual(auth.loginState, .signingIn,
+                       "in the normal (non-error) state the funnel proceeds and drives .signingIn")
+    }
+
     @MainActor
     func testManualSignIn_multiOrgRequiresPickerNotOrgsZero() async {
         let auth = makeAuthManager()
@@ -840,8 +955,10 @@ final class AuthManagerTests: XCTestCase {
         await auth.fetchOrganizationId()
 
         if case .error(let message) = auth.loginState {
-            XCTAssertTrue(message.lowercased().contains("no organizations"),
-                          "Expected 'no organizations' message, got: \(message)")
+            XCTAssertTrue(message.contains("No Claude organizations were found"),
+                          "Expected the no-organizations message, got: \(message)")
+            XCTAssertTrue(message.contains("Pro or Max"),
+                          "Expected the subscription hint folded into the overlay copy, got: \(message)")
         } else {
             XCTFail("Expected .error state, got \(auth.loginState)")
         }

@@ -298,7 +298,7 @@ private struct ManualSignInSection: View {
                 : "Couldn't verify those cookies. They may have expired. Sign in to claude.ai again and copy a fresh header."
         case .noOrganizations:
             statusIsError = true
-            statusText = "No Claude organizations were found for this account."
+            statusText = "No Claude organizations were found for this account. A Pro or Max plan may be required."
         case .accountLimitReached:
             statusIsError = true
             statusText = "You can have up to \(AccountStore.maxAccounts) accounts. Remove one first."
