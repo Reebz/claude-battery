@@ -329,20 +329,26 @@ struct UsageTier: Codable {
     /// rendered blank "--" while `utilization` still decoded (issue #23). Parse
     /// tolerantly here, and when a value is present but unmappable, log it instead of
     /// failing silently.
-    static func decodeResetsAt(from container: KeyedDecodingContainer<CodingKeys>) -> Date? {
+    private static func decodeResetsAt(from container: KeyedDecodingContainer<CodingKeys>) -> Date? {
         // Absent or explicit null is normal - a plan/tier may simply have no reset window.
         guard container.contains(.resetsAt),
               (try? container.decodeNil(forKey: .resetsAt)) != true else { return nil }
 
         // UNIX epoch as a JSON number (seconds or milliseconds).
         if let epoch = try? container.decode(Double.self, forKey: .resetsAt) {
-            return dateFromEpoch(epoch)
+            if let date = dateFromEpoch(epoch) { return date }
+            logger.warning("resets_at numeric value out of range")
+            return nil
         }
 
         // String form: epoch-as-string, or ISO8601 with/without fractional seconds.
         if let raw = try? container.decode(String.self, forKey: .resetsAt) {
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let epoch = Double(trimmed) { return dateFromEpoch(epoch) }
+            if let epoch = Double(trimmed) {
+                if let date = dateFromEpoch(epoch) { return date }
+                logger.warning("resets_at numeric string out of range")
+                return nil
+            }
             if let date = iso8601Fractional.date(from: trimmed) { return date }
             if let date = iso8601Plain.date(from: trimmed) { return date }
             logger.warning("resets_at present but unparseable (string form)")
@@ -353,10 +359,15 @@ struct UsageTier: Codable {
         return nil
     }
 
-    /// Values at or above 1e11 are treated as milliseconds (epoch seconds do not reach
-    /// 1e11 until roughly the year 5138), everything below as seconds.
-    private static func dateFromEpoch(_ value: Double) -> Date {
+    /// Parses a UNIX epoch, returning nil for non-finite or implausibly out-of-range
+    /// values so a malformed numeric `resets_at` degrades to "unavailable" rather than a
+    /// Date that traps the downstream `Int(timeIntervalSinceNow)` countdown conversion.
+    /// Values at or above 1e11 are milliseconds (epoch seconds do not reach 1e11 until
+    /// roughly the year 5138); the result is bounded to roughly years 2001-2100.
+    private static func dateFromEpoch(_ value: Double) -> Date? {
+        guard value.isFinite else { return nil }
         let seconds = value >= 1e11 ? value / 1000 : value
+        guard seconds > 978_307_200, seconds < 4_102_444_800 else { return nil }
         return Date(timeIntervalSince1970: seconds)
     }
 

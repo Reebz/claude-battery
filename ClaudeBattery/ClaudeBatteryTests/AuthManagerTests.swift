@@ -689,8 +689,11 @@ final class AuthManagerTests: XCTestCase {
         // Exact/leading-dot matching must still reject spoofs, ccTLDs Google does not
         // serve, and trailing-domain injection. The earlier `labels.last?.count == 2`
         // wildcard would have wrongly accepted accounts.google.io and accounts.google.zz.
+        // Fail-closed: case variants and trailing-dot FQDN forms are rejected (WKWebView
+        // lowercases the host and strips the trailing dot before this is reached).
         for host in ["evilaccounts.google.com.tr", "accounts.google.io",
-                     "accounts.google.zz", "accounts.google.com.tr.evil.com"] {
+                     "accounts.google.zz", "accounts.google.com.tr.evil.com",
+                     "ACCOUNTS.GOOGLE.COM.TR", "accounts.google.com.tr."] {
             XCTAssertFalse(auth.isAllowedDomain(host), "\(host) must be rejected (pattern #2)")
         }
     }

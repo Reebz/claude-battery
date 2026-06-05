@@ -400,7 +400,9 @@ struct UsagePopoverView: View {
 
     private func formatCountdown(_ date: Date) -> String {
         let remaining = date.timeIntervalSinceNow
-        guard remaining > 0 else { return "00m 00s" }
+        // isFinite + Int.max bound are defense-in-depth: a non-finite or absurd date must
+        // never reach Int(remaining), which traps fatally (issue #23 follow-up).
+        guard remaining > 0, remaining.isFinite, remaining < Double(Int.max) else { return "00m 00s" }
 
         let total = Int(remaining)
         let d = total / 86400

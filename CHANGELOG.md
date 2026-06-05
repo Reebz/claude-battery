@@ -9,7 +9,7 @@
 - Sign-in recovery is cleaner: an org-discovery failure now shows a single recoverable error card with "Try again" / "Sign in manually" instead of a redundant alert sheet that blocked those buttons, cancelling the organization picker no longer silently retries on the next cookie poll, and the no-organizations message now notes that a Pro or Max plan may be required.
 - Continuing with Google now works in non-US regions. The sign-in window was blocking Google's country-specific account hosts (e.g. `accounts.google.com.tr`) that the OAuth flow redirects through after login, leaving a blank screen. Those localized Google hosts are now allowed, matched exactly per the OAuth-domain hardening rule (issues #17, #25; fix contributed by @MidnightCoke in #24).
 - The Session and Weekly reset countdowns no longer render blank for accounts whose usage API returns `resets_at` as a UNIX epoch or a fractional-second timestamp. The value is now parsed tolerantly, and a plan with no reset window shows "Reset times unavailable" instead of empty placeholders (issue #23).
-- 337 automated tests (up from 173).
+- 342 automated tests (up from 173).
 
 ### v1.48
 

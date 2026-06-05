@@ -176,6 +176,44 @@ final class UsageDataTests: XCTestCase {
         XCTAssertNil(tier.resetsAt)
         XCTAssertEqual(tier.utilization ?? -1, 35, accuracy: 0.01)
     }
+
+    func testResetsAt_nonFiniteAndHuge_isNilNoCrash() {
+        // Regression guard: Double("inf")/"1e400" and a huge finite number used to flow into
+        // Date(timeIntervalSince1970:) and trap Int(remaining) in formatCountdown (#23 follow-up).
+        for raw in ["\"inf\"", "\"-inf\"", "\"nan\"", "\"1e400\"", "1e308", "9.9e21"] {
+            XCTAssertNil(decodeTier(resetsAtRawJSON: raw).resetsAt,
+                         "resets_at \(raw) must decode to nil, never a trapping Date")
+        }
+    }
+
+    func testResetsAt_absurdEpoch_outOfRangeIsNil() {
+        // Values mapping outside ~2001-2100 are not real reset times.
+        XCTAssertNil(decodeTier(resetsAtRawJSON: "99999999999").resetsAt)  // ~year 5138 as seconds
+        XCTAssertNil(decodeTier(resetsAtRawJSON: "0").resetsAt)            // 1970
+        XCTAssertNil(decodeTier(resetsAtRawJSON: "-1775714400").resetsAt)  // pre-1970
+    }
+
+    func testResetsAt_wrongJSONType_isNilKeepsUtilization() {
+        for raw in ["true", "[]", "{}"] {
+            let tier = decodeTier(resetsAtRawJSON: raw)
+            XCTAssertNil(tier.resetsAt, "resets_at \(raw) must be nil")
+            XCTAssertEqual(tier.utilization ?? -1, 35, accuracy: 0.01, "utilization must still decode for \(raw)")
+        }
+    }
+
+    func testResetsAt_emptyString_isNil() {
+        XCTAssertNil(decodeTier(resetsAtRawJSON: "\"\"").resetsAt)
+    }
+
+    func testResetsAt_iso8601FractionalAndBareZ_sameExactInstant() {
+        // Strong assertion: both ISO forms resolve to the exact same instant (no silent
+        // formatter fallback to a wrong epoch).
+        let reference = ISO8601DateFormatter().date(from: "2026-04-10T14:00:00Z")!
+        let frac = decodeTier(resetsAtRawJSON: "\"2026-04-10T14:00:00.000Z\"").resetsAt
+        let bare = decodeTier(resetsAtRawJSON: "\"2026-04-10T14:00:00Z\"").resetsAt
+        XCTAssertEqual(frac?.timeIntervalSince1970 ?? -1, reference.timeIntervalSince1970, accuracy: 0.001)
+        XCTAssertEqual(bare?.timeIntervalSince1970 ?? -2, reference.timeIntervalSince1970, accuracy: 0.001)
+    }
 }
 
 // MARK: - ExtraUsageData Tests

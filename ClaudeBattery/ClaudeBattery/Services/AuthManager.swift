@@ -1182,11 +1182,8 @@ class AuthManager: NSObject, ObservableObject {
     /// so `accounts.google.com.tr` and `x.accounts.google.com.tr` pass while
     /// `evilaccounts.google.com.tr` and `accounts.google.com.tr.evil.com` do not.
     static func isLocalizedGoogleAccountsHost(_ host: String) -> Bool {
-        if googleAccountsLocalizedHosts.contains(host) { return true }
-        for apex in googleAccountsLocalizedHosts where host.hasSuffix("." + apex) {
-            return true
-        }
-        return false
+        googleAccountsLocalizedHosts.contains(host)
+            || googleAccountsLocalizedHosts.contains { host.hasSuffix("." + $0) }
     }
 
     // internal for @testable access in AuthManagerTests
