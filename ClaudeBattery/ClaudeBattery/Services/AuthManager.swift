@@ -1133,6 +1133,62 @@ class AuthManager: NSObject, ObservableObject {
 
     // MARK: - Allowed Domains
 
+    /// Google serves "Continue with Google" on country-specific accounts hosts
+    /// (e.g. `accounts.google.com.tr`, `accounts.google.co.uk`, `accounts.google.de`)
+    /// that 302 back to `accounts.google.com`. The navigation allowlist evaluates the
+    /// localized host *before* that redirect fires, so unless it is allowed the OAuth
+    /// flow dead-ends on a blank screen for users in those regions. A Turkish reporter's
+    /// NetLog confirmed `Blocked navigation to disallowed domain: accounts.google.com.tr`
+    /// (issues #17, #25; original fix by @MidnightCoke in PR #24).
+    ///
+    /// Per the OAuth-domain hardening rule (docs/solutions/security-issues/
+    /// keychain-credential-storage-and-auth-hardening.md) these are enumerated as exact
+    /// Google ccTLD hosts and matched with `==` for the apex plus a `.`-prefixed
+    /// `hasSuffix` for subdomains - never a structural `accounts.google.<any-tld>`
+    /// wildcard, which would trust hosts Google does not serve (`accounts.google.io`)
+    /// or `google.<tld>` registrations Google may not own. Every entry is a
+    /// Google-operated country domain. A locale we miss surfaces in the exported
+    /// nav-decision diagnostics as a blocked `accounts.google.*` host; add it here.
+    static let googleAccountsLocalizedHosts: Set<String> = [
+        // Europe
+        "accounts.google.co.uk", "accounts.google.de", "accounts.google.fr",
+        "accounts.google.es", "accounts.google.it", "accounts.google.nl",
+        "accounts.google.pl", "accounts.google.ru", "accounts.google.ch",
+        "accounts.google.at", "accounts.google.be", "accounts.google.se",
+        "accounts.google.no", "accounts.google.dk", "accounts.google.fi",
+        "accounts.google.pt", "accounts.google.gr", "accounts.google.cz",
+        "accounts.google.hu", "accounts.google.ro", "accounts.google.ie",
+        "accounts.google.sk", "accounts.google.bg", "accounts.google.hr",
+        "accounts.google.lt", "accounts.google.lv", "accounts.google.ee",
+        "accounts.google.si", "accounts.google.com.ua",
+        // Americas
+        "accounts.google.ca", "accounts.google.com.br", "accounts.google.com.mx",
+        "accounts.google.com.ar", "accounts.google.com.co", "accounts.google.com.pe",
+        "accounts.google.cl",
+        // Middle East & Africa
+        "accounts.google.com.tr", "accounts.google.com.sa", "accounts.google.ae",
+        "accounts.google.com.eg", "accounts.google.co.za", "accounts.google.com.ng",
+        "accounts.google.co.ke", "accounts.google.co.il",
+        // Asia-Pacific
+        "accounts.google.co.jp", "accounts.google.co.kr", "accounts.google.co.in",
+        "accounts.google.co.id", "accounts.google.co.th", "accounts.google.com.sg",
+        "accounts.google.com.hk", "accounts.google.com.tw", "accounts.google.com.ph",
+        "accounts.google.com.vn", "accounts.google.com.my", "accounts.google.com.pk",
+        "accounts.google.com.au", "accounts.google.co.nz",
+    ]
+
+    /// Exact-or-subdomain membership test for `googleAccountsLocalizedHosts`: matches
+    /// the apex with `==` and subdomains with a leading-dot `hasSuffix` (pattern #2),
+    /// so `accounts.google.com.tr` and `x.accounts.google.com.tr` pass while
+    /// `evilaccounts.google.com.tr` and `accounts.google.com.tr.evil.com` do not.
+    static func isLocalizedGoogleAccountsHost(_ host: String) -> Bool {
+        if googleAccountsLocalizedHosts.contains(host) { return true }
+        for apex in googleAccountsLocalizedHosts where host.hasSuffix("." + apex) {
+            return true
+        }
+        return false
+    }
+
     // internal for @testable access in AuthManagerTests
     func isAllowedDomain(_ host: String) -> Bool {
         // Exact match plus `".X"` suffix for multi-label domains - rejects
@@ -1143,6 +1199,7 @@ class AuthManager: NSObject, ObservableObject {
         host.hasSuffix(".anthropic.com") ||
         host == "accounts.google.com" ||
         host.hasSuffix(".accounts.google.com") ||
+        Self.isLocalizedGoogleAccountsHost(host) ||
         host == "google.com" ||
         host.hasSuffix(".google.com") ||
         host.hasSuffix(".gstatic.com") ||

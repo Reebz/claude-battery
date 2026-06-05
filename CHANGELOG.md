@@ -7,7 +7,9 @@
 - New opt-in Diagnostics section in Settings: turn on logging, reproduce a sign-in problem, then export a redacted log archive to attach to a GitHub issue. No passwords, tokens, or emails are ever saved - the export ships only controlled, redacted logs, and the producer stays completely off until you opt in.
 - Hardened the redaction and export internals so a future logging change cannot leak a secret: airtight handling of values nested under credential keys, per-launch log files with retention, and an end-to-end no-secrets gate in the test suite. A follow-up adversarial fuzz pass closed every remaining redaction edge case (unusually shaped or padded credential keys, delimiter remnants, decomposed-Unicode emails, and non-Bearer auth schemes), and the diagnostic export now writes over an existing file atomically so a failed save can never destroy it.
 - Sign-in recovery is cleaner: an org-discovery failure now shows a single recoverable error card with "Try again" / "Sign in manually" instead of a redundant alert sheet that blocked those buttons, cancelling the organization picker no longer silently retries on the next cookie poll, and the no-organizations message now notes that a Pro or Max plan may be required.
-- 328 automated tests (up from 173).
+- Continuing with Google now works in non-US regions. The sign-in window was blocking Google's country-specific account hosts (e.g. `accounts.google.com.tr`) that the OAuth flow redirects through after login, leaving a blank screen. Those localized Google hosts are now allowed, matched exactly per the OAuth-domain hardening rule (issues #17, #25; fix contributed by @MidnightCoke in #24).
+- The Session and Weekly reset countdowns no longer render blank for accounts whose usage API returns `resets_at` as a UNIX epoch or a fractional-second timestamp. The value is now parsed tolerantly, and a plan with no reset window shows "Reset times unavailable" instead of empty placeholders (issue #23).
+- 337 automated tests (up from 173).
 
 ### v1.48
 

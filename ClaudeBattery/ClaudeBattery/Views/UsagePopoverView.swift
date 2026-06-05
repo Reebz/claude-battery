@@ -130,8 +130,17 @@ struct UsagePopoverView: View {
     private func resetsCard(usage: UsageData) -> some View {
         UsageCard(title: "Resets") {
             VStack(alignment: .leading, spacing: 8) {
-                resetRow(label: "Session", date: usage.sessionResetDate)
-                resetRow(label: "Weekly", date: usage.weeklyResetDate)
+                if usage.sessionResetDate == nil && usage.weeklyResetDate == nil {
+                    // Both reset times missing: show one explicit line rather than two
+                    // bare "--" rows that read as a broken/blank section (issue #23).
+                    Text("Reset times unavailable")
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(white: 0.5))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    resetRow(label: "Session", date: usage.sessionResetDate)
+                    resetRow(label: "Weekly", date: usage.weeklyResetDate)
+                }
             }
             .frame(maxHeight: .infinity, alignment: .center)
         }

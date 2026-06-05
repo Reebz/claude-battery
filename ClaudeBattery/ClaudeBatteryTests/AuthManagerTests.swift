@@ -677,6 +677,25 @@ final class AuthManagerTests: XCTestCase {
     }
 
     @MainActor
+    func testIsAllowedDomain_localizedGoogleOAuthCCTLDs() {
+        let auth = makeAuthManager()
+        // Localized Google OAuth hosts 302 back to accounts.google.com; blocking them
+        // dead-ends sign-in on a blank screen in those regions (#17, #25; PR #24).
+        for host in ["accounts.google.com.tr", "accounts.google.co.uk",
+                     "accounts.google.de", "accounts.google.com.br",
+                     "foo.accounts.google.com.tr"] {
+            XCTAssertTrue(auth.isAllowedDomain(host), "\(host) should be allowed")
+        }
+        // Exact/leading-dot matching must still reject spoofs, ccTLDs Google does not
+        // serve, and trailing-domain injection. The earlier `labels.last?.count == 2`
+        // wildcard would have wrongly accepted accounts.google.io and accounts.google.zz.
+        for host in ["evilaccounts.google.com.tr", "accounts.google.io",
+                     "accounts.google.zz", "accounts.google.com.tr.evil.com"] {
+            XCTAssertFalse(auth.isAllowedDomain(host), "\(host) must be rejected (pattern #2)")
+        }
+    }
+
+    @MainActor
     func testAllowsOAuthPopup_schemeBeforeHost() {
         let auth = makeAuthManager()
         // about: bootstraps have no host and must be allowed BEFORE any host check (pattern #7).

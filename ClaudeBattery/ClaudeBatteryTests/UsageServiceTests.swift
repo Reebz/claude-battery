@@ -115,6 +115,67 @@ final class UsageDataTests: XCTestCase {
         decoder.dateDecodingStrategy = .iso8601
         return try! decoder.decode(UsageTier.self, from: data)
     }
+
+    /// Decode a UsageTier with a raw `resets_at` JSON value (number, string, or null)
+    /// through the production decoder config, to lock the tolerant date parsing (#23).
+    private func decodeTier(resetsAtRawJSON: String) -> UsageTier {
+        let json = "{\"utilization\": 35, \"resets_at\": \(resetsAtRawJSON)}"
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        return try! decoder.decode(UsageTier.self, from: Data(json.utf8))
+    }
+
+    // MARK: - resets_at tolerant decoding (issue #23: blank Session/Weekly resets)
+
+    func testResetsAt_epochSeconds_decodes() {
+        // The live API returns resets_at as a UNIX epoch for some accounts; .iso8601
+        // can never parse a JSON number, so the old try? nil-ed it and the card went blank.
+        let tier = decodeTier(resetsAtRawJSON: "1775714400")
+        XCTAssertEqual(tier.resetsAt?.timeIntervalSince1970 ?? 0, 1775714400, accuracy: 0.5)
+    }
+
+    func testResetsAt_epochMilliseconds_decodes() {
+        let tier = decodeTier(resetsAtRawJSON: "1775714400000")
+        XCTAssertEqual(tier.resetsAt?.timeIntervalSince1970 ?? 0, 1775714400, accuracy: 0.5)
+    }
+
+    func testResetsAt_epochString_decodes() {
+        let tier = decodeTier(resetsAtRawJSON: "\"1775714400\"")
+        XCTAssertEqual(tier.resetsAt?.timeIntervalSince1970 ?? 0, 1775714400, accuracy: 0.5)
+    }
+
+    func testResetsAt_iso8601Fractional_decodes() {
+        let tier = decodeTier(resetsAtRawJSON: "\"2026-04-10T14:00:00.000Z\"")
+        XCTAssertNotNil(tier.resetsAt)
+    }
+
+    func testResetsAt_iso8601BareZ_stillDecodes() {
+        // Regression guard: the format that already worked must keep working.
+        let tier = decodeTier(resetsAtRawJSON: "\"2026-04-10T14:00:00Z\"")
+        XCTAssertNotNil(tier.resetsAt)
+    }
+
+    func testResetsAt_presentButUnparseable_isNil() {
+        let tier = decodeTier(resetsAtRawJSON: "\"not-a-date\"")
+        XCTAssertNil(tier.resetsAt)
+        XCTAssertEqual(tier.utilization ?? -1, 35, accuracy: 0.01)
+    }
+
+    func testResetsAt_null_decodesNilButKeepsUtilization() {
+        let tier = decodeTier(resetsAtRawJSON: "null")
+        XCTAssertNil(tier.resetsAt)
+        XCTAssertEqual(tier.utilization ?? -1, 35, accuracy: 0.01)
+    }
+
+    func testResetsAt_absent_decodesNilButKeepsUtilization() {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        let tier = try! decoder.decode(UsageTier.self, from: Data("{\"utilization\": 35}".utf8))
+        XCTAssertNil(tier.resetsAt)
+        XCTAssertEqual(tier.utilization ?? -1, 35, accuracy: 0.01)
+    }
 }
 
 // MARK: - ExtraUsageData Tests

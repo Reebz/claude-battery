@@ -318,8 +318,59 @@ struct UsageTier: Codable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         utilization = try? container.decode(Double.self, forKey: .utilization)
-        resetsAt = try? container.decode(Date.self, forKey: .resetsAt)
+        resetsAt = Self.decodeResetsAt(from: container)
     }
+
+    /// `resets_at` arrives in shapes a single `JSONDecoder` date strategy cannot all
+    /// cover: ISO8601 with or without fractional seconds, AND a UNIX epoch as a JSON
+    /// number or a numeric string. The old `try? decode(Date.self)` under the decoder's
+    /// `.iso8601` strategy silently nil-ed every non-bare-ISO value - including any
+    /// epoch number, which `.iso8601` can never parse into a Date - so the Resets card
+    /// rendered blank "--" while `utilization` still decoded (issue #23). Parse
+    /// tolerantly here, and when a value is present but unmappable, log it instead of
+    /// failing silently.
+    static func decodeResetsAt(from container: KeyedDecodingContainer<CodingKeys>) -> Date? {
+        // Absent or explicit null is normal - a plan/tier may simply have no reset window.
+        guard container.contains(.resetsAt),
+              (try? container.decodeNil(forKey: .resetsAt)) != true else { return nil }
+
+        // UNIX epoch as a JSON number (seconds or milliseconds).
+        if let epoch = try? container.decode(Double.self, forKey: .resetsAt) {
+            return dateFromEpoch(epoch)
+        }
+
+        // String form: epoch-as-string, or ISO8601 with/without fractional seconds.
+        if let raw = try? container.decode(String.self, forKey: .resetsAt) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let epoch = Double(trimmed) { return dateFromEpoch(epoch) }
+            if let date = iso8601Fractional.date(from: trimmed) { return date }
+            if let date = iso8601Plain.date(from: trimmed) { return date }
+            logger.warning("resets_at present but unparseable (string form)")
+            return nil
+        }
+
+        logger.warning("resets_at present but unparseable (non-numeric, non-string)")
+        return nil
+    }
+
+    /// Values at or above 1e11 are treated as milliseconds (epoch seconds do not reach
+    /// 1e11 until roughly the year 5138), everything below as seconds.
+    private static func dateFromEpoch(_ value: Double) -> Date {
+        let seconds = value >= 1e11 ? value / 1000 : value
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    private static let iso8601Fractional: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    private static let iso8601Plain: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
 }
 
 struct ExtraUsageData: Equatable {
