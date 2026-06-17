@@ -483,23 +483,6 @@ struct SpendInfo: Codable, Equatable {
     }
 }
 
-struct ExtraUsageData: Equatable {
-    let spent: Double
-    let limit: Double
-    let percentage: Double
-
-    init?(from tier: ExtraUsageTier?) {
-        guard let tier, tier.isEnabled == true,
-              let spentCents = tier.usedCredits,
-              let limitCents = tier.monthlyLimit,
-              limitCents > 0 else { return nil }
-
-        self.spent = spentCents / 100.0
-        self.limit = limitCents / 100.0
-        self.percentage = min(100, max(0, spentCents / limitCents * 100))
-    }
-}
-
 /// One model's weekly usage, derived from a `weekly_scoped` limit (or the legacy
 /// `seven_day_*` fields). Absence of data means no entry - never a fabricated 100% bar (KTD3).
 struct ModelUsage: Equatable, Identifiable {
@@ -567,8 +550,6 @@ struct UsageData: Equatable {
     let sessionRemaining: Double
     let sessionResetDate: Date?
     let modelUsages: [ModelUsage]
-    let extraUsage: ExtraUsageData?
-    let prepaidBalance: PrepaidBalance?
     let usageCredits: UsageCreditsData?
 
     init(from response: UsageResponse, prepaidCredits: PrepaidCreditsResponse? = nil) {
@@ -607,8 +588,6 @@ struct UsageData: Equatable {
             modelUsages = UsageData.legacyModelUsages(from: response)
         }
 
-        extraUsage = ExtraUsageData(from: response.extraUsage)
-        prepaidBalance = PrepaidBalance(from: prepaidCredits)
         usageCredits = UsageCreditsData.derive(spend: response.spend, prepaidCredits: prepaidCredits)
     }
 
@@ -628,45 +607,20 @@ struct UsageData: Equatable {
 
 // MARK: - Prepaid Credits
 
-/// Raw API response from /api/organizations/{orgId}/prepaid/credits.
-/// Optional fields decode to nil automatically for accounts without prepaid.
-/// `currency` drives currency-aware formatting (KTD6); the remaining fields round-trip
-/// the response shape without the widget consuming them.
+/// Raw API response from /api/organizations/{orgId}/prepaid/credits. `currency` drives
+/// currency-aware formatting (KTD6); `amount` is the balance in minor units. Unknown keys
+/// (auto-reload settings, pending invoice, etc.) are ignored by the lenient decode.
 struct PrepaidCreditsResponse: Codable {
     let amount: Double?
     let currency: String?
-    let autoReloadSettings: AutoReloadSettings?
-    let pendingInvoiceAmountCents: Double?
-    let lastPaidPurchaseCents: Double?
 
     enum CodingKeys: String, CodingKey {
-        case amount, currency, autoReloadSettings, pendingInvoiceAmountCents, lastPaidPurchaseCents
+        case amount, currency
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         amount = try? container.decode(Double.self, forKey: .amount)
         currency = try? container.decode(String.self, forKey: .currency)
-        // decodeIfPresent so an explicit JSON `null` (the captured shape) yields nil rather
-        // than a present empty struct - an empty Decodable struct otherwise decodes from null.
-        autoReloadSettings = (try? container.decodeIfPresent(AutoReloadSettings.self, forKey: .autoReloadSettings)) ?? nil
-        pendingInvoiceAmountCents = try? container.decode(Double.self, forKey: .pendingInvoiceAmountCents)
-        lastPaidPurchaseCents = try? container.decode(Double.self, forKey: .lastPaidPurchaseCents)
-    }
-}
-
-/// Opaque auto-reload configuration; shape unconfirmed and unused by the widget. Modeled
-/// as a presence-only struct so the field round-trips without constraining its contents.
-struct AutoReloadSettings: Codable, Equatable {}
-
-/// Display model for prepaid credit balance. Separate from ExtraUsageData
-/// because these are different financial concepts — prepaid is a pre-purchased
-/// balance that depletes, extra usage is pay-as-you-go overage against a cap.
-struct PrepaidBalance: Equatable {
-    let dollars: Double
-
-    init?(from response: PrepaidCreditsResponse?) {
-        guard let response, let amountCents = response.amount, amountCents > 0 else { return nil }
-        self.dollars = amountCents / 100.0
     }
 }

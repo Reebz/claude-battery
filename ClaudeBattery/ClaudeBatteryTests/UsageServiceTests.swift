@@ -61,7 +61,6 @@ final class UsageDataTests: XCTestCase {
         XCTAssertTrue(usage.modelUsages.isEmpty)
         XCTAssertNil(usage.weeklyResetDate)
         XCTAssertNil(usage.sessionResetDate)
-        XCTAssertNil(usage.extraUsage)
     }
 
     // MARK: - Clamping: utilization > 100
@@ -221,160 +220,6 @@ final class UsageDataTests: XCTestCase {
         let bare = decodeTier(resetsAtRawJSON: "\"2026-04-10T14:00:00Z\"").resetsAt
         XCTAssertEqual(frac?.timeIntervalSince1970 ?? -1, reference.timeIntervalSince1970, accuracy: 0.001)
         XCTAssertEqual(bare?.timeIntervalSince1970 ?? -2, reference.timeIntervalSince1970, accuracy: 0.001)
-    }
-}
-
-// MARK: - ExtraUsageData Tests
-
-final class ExtraUsageDataTests: XCTestCase {
-
-    // MARK: - Happy path
-
-    func testEnabledWithValidValues_correctConversion() {
-        let tier = makeExtraTier(isEnabled: true, monthlyLimit: 5000, usedCredits: 1250)
-        let extra = ExtraUsageData(from: tier)
-
-        XCTAssertNotNil(extra)
-        // Cents to dollars: 1250 / 100 = 12.50
-        XCTAssertEqual(extra!.spent, 12.50, accuracy: 0.01)
-        // Cents to dollars: 5000 / 100 = 50.00
-        XCTAssertEqual(extra!.limit, 50.00, accuracy: 0.01)
-        // Percentage: 1250 / 5000 * 100 = 25%
-        XCTAssertEqual(extra!.percentage, 25.0, accuracy: 0.01)
-    }
-
-    // MARK: - Disabled -> nil
-
-    func testDisabled_returnsNil() {
-        let tier = makeExtraTier(isEnabled: false, monthlyLimit: 5000, usedCredits: 1000)
-        XCTAssertNil(ExtraUsageData(from: tier))
-    }
-
-    func testNilTier_returnsNil() {
-        XCTAssertNil(ExtraUsageData(from: nil))
-    }
-
-    // MARK: - Zero limit -> nil (division guard)
-
-    func testZeroLimit_returnsNil() {
-        let tier = makeExtraTier(isEnabled: true, monthlyLimit: 0, usedCredits: 100)
-        XCTAssertNil(ExtraUsageData(from: tier))
-    }
-
-    // MARK: - Percentage clamping
-
-    func testPercentageClamped_doesNotExceed100() {
-        // usedCredits exceeds monthlyLimit
-        let tier = makeExtraTier(isEnabled: true, monthlyLimit: 1000, usedCredits: 2000)
-        let extra = ExtraUsageData(from: tier)
-
-        XCTAssertNotNil(extra)
-        XCTAssertEqual(extra!.percentage, 100.0, accuracy: 0.01)
-    }
-
-    func testPercentageClamped_doesNotGoBelowZero() {
-        // Negative usedCredits (unlikely but defensive)
-        let tier = makeExtraTier(isEnabled: true, monthlyLimit: 1000, usedCredits: -500)
-        let extra = ExtraUsageData(from: tier)
-
-        XCTAssertNotNil(extra)
-        XCTAssertEqual(extra!.percentage, 0.0, accuracy: 0.01)
-    }
-
-    // MARK: - Helpers
-
-    private func makeExtraTier(
-        isEnabled: Bool,
-        monthlyLimit: Double,
-        usedCredits: Double
-    ) -> ExtraUsageTier {
-        var json: [String: Any] = [
-            "is_enabled": isEnabled,
-            "monthly_limit": monthlyLimit,
-            "used_credits": usedCredits,
-            "utilization": usedCredits / max(monthlyLimit, 1) * 100
-        ]
-        // Handle zero limit edge case for utilization
-        if monthlyLimit == 0 {
-            json["utilization"] = 0.0
-        }
-        let data = try! JSONSerialization.data(withJSONObject: json)
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        return try! decoder.decode(ExtraUsageTier.self, from: data)
-    }
-}
-
-// MARK: - PrepaidBalance Tests
-
-final class PrepaidBalanceTests: XCTestCase {
-
-    func testPositiveAmount_convertsCentsToDollars() {
-        let response = makePrepaidResponse(amount: 3750)
-        let balance = PrepaidBalance(from: response)
-        XCTAssertNotNil(balance)
-        XCTAssertEqual(balance!.dollars, 37.50, accuracy: 0.01)
-    }
-
-    func testLargeAmount_convertsCentsToDollars() {
-        let response = makePrepaidResponse(amount: 50000)
-        let balance = PrepaidBalance(from: response)
-        XCTAssertNotNil(balance)
-        XCTAssertEqual(balance!.dollars, 500.00, accuracy: 0.01)
-    }
-
-    func testZeroAmount_returnsNil() {
-        let response = makePrepaidResponse(amount: 0)
-        XCTAssertNil(PrepaidBalance(from: response))
-    }
-
-    func testNegativeAmount_returnsNil() {
-        let response = makePrepaidResponse(amount: -100)
-        XCTAssertNil(PrepaidBalance(from: response))
-    }
-
-    func testNilResponse_returnsNil() {
-        XCTAssertNil(PrepaidBalance(from: nil))
-    }
-
-    func testNilAmount_returnsNil() {
-        let response = makePrepaidResponse(amount: nil)
-        XCTAssertNil(PrepaidBalance(from: response))
-    }
-
-    func testDecodesFromJSON() {
-        let json = """
-        {"amount": 1250}
-        """.data(using: .utf8)!
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let response = try! decoder.decode(PrepaidCreditsResponse.self, from: json)
-        let balance = PrepaidBalance(from: response)
-        XCTAssertNotNil(balance)
-        XCTAssertEqual(balance!.dollars, 12.50, accuracy: 0.01)
-    }
-
-    func testDecodesFromEmptyJSON() {
-        let json = "{}".data(using: .utf8)!
-        let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let response = try! decoder.decode(PrepaidCreditsResponse.self, from: json)
-        XCTAssertNil(response.amount)
-        XCTAssertNil(PrepaidBalance(from: response))
-    }
-
-    private func makePrepaidResponse(amount: Double?) -> PrepaidCreditsResponse {
-        if let amount {
-            let json = "{\"amount\": \(amount)}".data(using: .utf8)!
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            return try! decoder.decode(PrepaidCreditsResponse.self, from: json)
-        } else {
-            let json = "{}".data(using: .utf8)!
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            return try! decoder.decode(PrepaidCreditsResponse.self, from: json)
-        }
     }
 }
 
@@ -622,63 +467,10 @@ final class UsageServicePollTests: XCTestCase {
         XCTAssertNil(service.latestUsage)
     }
 
-    // MARK: - Extra usage populated from fixture
-
-    @MainActor
-    func testPoll200WithExtraUsage_populatesExtraUsageData() async {
-        mockSession.responseData = fixtureData("usage_extra_usage")
-        mockSession.responseStatusCode = 200
-
-        let service = UsageService(
-            storage: storage,
-            accountStore: accountStore,
-            session: mockSession
-        )
-
-        await service.pollUsage()
-
-        let extra = try! XCTUnwrap(service.latestUsage?.extraUsage)
-        // 7500 cents / 100 = $75.00
-        XCTAssertEqual(extra.spent, 75.0, accuracy: 0.01)
-        // 10000 cents / 100 = $100.00
-        XCTAssertEqual(extra.limit, 100.0, accuracy: 0.01)
-        // 7500 / 10000 * 100 = 75%
-        XCTAssertEqual(extra.percentage, 75.0, accuracy: 0.01)
-    }
-
     // MARK: - Prepaid credits integration
 
     @MainActor
-    func testPoll200WithPrepaidCredits_populatesPrepaidBalance() async {
-        mockSession.responseData = fixtureData("usage_full")
-        mockSession.responseStatusCode = 200
-        mockSession.urlOverrides["prepaid/credits"] = (
-            data: """
-            {"amount": 2500}
-            """.data(using: .utf8)!,
-            statusCode: 200
-        )
-
-        let service = UsageService(
-            storage: storage,
-            accountStore: accountStore,
-            session: mockSession
-        )
-
-        await service.pollUsage()
-
-        XCTAssertNotNil(service.latestUsage)
-        let balance = service.latestUsage?.prepaidBalance
-        XCTAssertNotNil(balance,
-                        "Prepaid balance should be populated when credits endpoint returns valid data")
-        if let dollars = balance?.dollars {
-            XCTAssertEqual(dollars, 25.0, accuracy: 0.01,
-                           "2500 cents should convert to $25.00")
-        }
-    }
-
-    @MainActor
-    func testPoll200WithCredits401_prepaidBalanceIsNil() async {
+    func testPoll200WithCredits401_creditsBalanceIsNil() async {
         mockSession.responseData = fixtureData("usage_full")
         mockSession.responseStatusCode = 200
         mockSession.urlOverrides["prepaid/credits"] = (
@@ -695,8 +487,8 @@ final class UsageServicePollTests: XCTestCase {
         await service.pollUsage()
 
         XCTAssertNotNil(service.latestUsage)
-        XCTAssertNil(service.latestUsage?.prepaidBalance,
-                     "Prepaid balance should be nil when credits endpoint returns 401")
+        XCTAssertNil(service.latestUsage?.usageCredits?.balance,
+                     "Credits balance should be nil when credits endpoint returns 401")
         XCTAssertEqual(service.consecutiveFailures, 0,
                        "Credits 401 should not affect consecutiveFailures")
     }
@@ -720,12 +512,9 @@ final class UsageServicePollTests: XCTestCase {
 
         await service.pollUsage()
 
-        let balance = service.latestUsage?.prepaidBalance
-        XCTAssertNotNil(balance)
-        XCTAssertEqual(balance?.dollars ?? .nan, 200.0, accuracy: 0.01)  // 20000 cents -> $200
-        // Currency flows through the poll into the unified credits balance (KTD6).
+        // Currency + amount flow through the poll into the unified credits balance (KTD4/KTD6).
         XCTAssertEqual(service.latestUsage?.usageCredits?.balance?.currency, "AUD")
-        XCTAssertEqual(service.latestUsage?.usageCredits?.balance?.major ?? .nan, 200.0, accuracy: 0.01)
+        XCTAssertEqual(service.latestUsage?.usageCredits?.balance?.major ?? .nan, 200.0, accuracy: 0.01)  // 20000 cents -> 200
     }
 
     @MainActor
@@ -746,8 +535,8 @@ final class UsageServicePollTests: XCTestCase {
         await service.pollUsage()
 
         XCTAssertNotNil(service.latestUsage)
-        XCTAssertNil(service.latestUsage?.prepaidBalance,
-                     "Prepaid balance should be nil when credits response is malformed")
+        XCTAssertNil(service.latestUsage?.usageCredits?.balance,
+                     "Credits balance should be nil when credits response is malformed")
     }
 
     // MARK: - Auth failure clears latestUsage
@@ -941,9 +730,6 @@ final class UsageLimitsSpendDecodeTests: XCTestCase {
         let p = try decodePrepaid("prepaid_credits_aud")
         XCTAssertEqual(p.amount, 7152)
         XCTAssertEqual(p.currency, "AUD")
-        XCTAssertNil(p.autoReloadSettings)
-        XCTAssertNil(p.pendingInvoiceAmountCents)
-        XCTAssertNil(p.lastPaidPurchaseCents)
     }
 
     // MARK: - Derivation: limits[]/spend -> UsageData (U2)
