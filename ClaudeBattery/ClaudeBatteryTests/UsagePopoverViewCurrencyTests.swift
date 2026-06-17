@@ -62,6 +62,15 @@ final class UsageCreditsSectionTests: XCTestCase {
         )
     }
 
+    func testDisabledText_withResetDate_includesResets() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let reset = cal.date(from: DateComponents(year: 2026, month: 7, day: 1))!
+        let text = UsagePopoverView.usageCreditsDisabledText(reason: "org_level_disabled_until", resetDate: reset)
+        XCTAssertTrue(text.hasPrefix("Paused - monthly limit reached, resets "), "got `\(text)`")
+        XCTAssertTrue(text.contains("2026"), "got `\(text)`")
+    }
+
     func testFirstOfNextMonth_rollsToFirstDayOfNextMonth() {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "UTC")!

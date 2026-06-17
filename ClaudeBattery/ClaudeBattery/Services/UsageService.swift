@@ -506,7 +506,10 @@ struct ModelUsage: Equatable, Identifiable {
     let displayName: String
     let remainingPercent: Double
     let resetDate: Date?
-    var id: String { displayName }
+    /// API model id when present; identity prefers it over the human label so two
+    /// scoped limits sharing a display_name do not collide in a SwiftUI ForEach.
+    let modelId: String?
+    var id: String { modelId ?? displayName }
 }
 
 /// Unified Usage-credits display model (KTD5). `state` reflects the `spend` object
@@ -595,7 +598,10 @@ struct UsageData: Equatable {
                 .filter { $0.kind == "weekly_scoped" }
                 .compactMap { limit in
                     guard let name = limit.scope?.model?.displayName, let percent = limit.percent else { return nil }
-                    return ModelUsage(displayName: name, remainingPercent: UsageData.clamp(100 - percent), resetDate: limit.resetsAt)
+                    return ModelUsage(displayName: name,
+                                      remainingPercent: UsageData.clamp(100 - percent),
+                                      resetDate: limit.resetsAt,
+                                      modelId: limit.scope?.model?.id)
                 }
         } else {
             modelUsages = UsageData.legacyModelUsages(from: response)
@@ -611,10 +617,10 @@ struct UsageData: Equatable {
     private static func legacyModelUsages(from response: UsageResponse) -> [ModelUsage] {
         var models: [ModelUsage] = []
         if let opus = response.sevenDayOpus, let utilization = opus.utilization {
-            models.append(ModelUsage(displayName: "Opus", remainingPercent: clamp(100 - utilization), resetDate: opus.resetsAt))
+            models.append(ModelUsage(displayName: "Opus", remainingPercent: clamp(100 - utilization), resetDate: opus.resetsAt, modelId: nil))
         }
         if let sonnet = response.sevenDaySonnet, let utilization = sonnet.utilization {
-            models.append(ModelUsage(displayName: "Sonnet", remainingPercent: clamp(100 - utilization), resetDate: sonnet.resetsAt))
+            models.append(ModelUsage(displayName: "Sonnet", remainingPercent: clamp(100 - utilization), resetDate: sonnet.resetsAt, modelId: nil))
         }
         return models
     }

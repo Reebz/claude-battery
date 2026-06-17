@@ -187,10 +187,10 @@ struct UsagePopoverView: View {
         }
     }
 
+    /// Gauge/arc/model-bar color, sharing the exact thresholds the tested `batteryColor`
+    /// twin uses (red <20, orange <45) so one test set locks both (U7).
     private func gaugeColor(for value: Double) -> Color {
-        if value < 20 { return .red }
-        if value < 45 { return .orange }
-        return .green
+        Self.batteryColor(remainingPercent: value)
     }
 
     private func spendColor(for percent: Double) -> Color {
@@ -252,9 +252,20 @@ struct UsagePopoverView: View {
         return formatter
     }
 
+    /// Currency formatters are comparatively heavy to build, so cache one per code
+    /// (NSCache is thread-safe). Keyed by code only - callers always use the current locale.
+    private static let currencyFormatterCache = NSCache<NSString, NumberFormatter>()
+
     private func formatCurrency(_ value: Double, code: String = "USD") -> String {
-        Self.makeCurrencyFormatter(code: code).string(from: NSNumber(value: value))
-            ?? String(format: "$%.2f", value)
+        let resolved = code.isEmpty ? "USD" : code
+        let formatter: NumberFormatter
+        if let cached = Self.currencyFormatterCache.object(forKey: resolved as NSString) {
+            formatter = cached
+        } else {
+            formatter = Self.makeCurrencyFormatter(code: resolved)
+            Self.currencyFormatterCache.setObject(formatter, forKey: resolved as NSString)
+        }
+        return formatter.string(from: NSNumber(value: value)) ?? String(format: "$%.2f", value)
     }
 
     /// Unified Usage-credits section (KTD5): one enabled/disabled spend state plus a prepaid
@@ -343,11 +354,15 @@ struct UsagePopoverView: View {
         return calendar.date(byAdding: .month, value: 1, to: startOfMonth) ?? date
     }
 
-    private static func shortDate(_ date: Date) -> String {
+    private static let creditsResetDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
         formatter.timeStyle = .none
-        return formatter.string(from: date)
+        return formatter
+    }()
+
+    private static func shortDate(_ date: Date) -> String {
+        creditsResetDateFormatter.string(from: date)
     }
 
     private func claudeDesignRow() -> some View {

@@ -707,7 +707,7 @@ final class UsageServicePollTests: XCTestCase {
         mockSession.responseStatusCode = 200
         mockSession.urlOverrides["prepaid/credits"] = (
             data: """
-            {"amount": 20000}
+            {"amount": 20000, "currency": "AUD"}
             """.data(using: .utf8)!,
             statusCode: 200
         )
@@ -723,6 +723,9 @@ final class UsageServicePollTests: XCTestCase {
         let balance = service.latestUsage?.prepaidBalance
         XCTAssertNotNil(balance)
         XCTAssertEqual(balance?.dollars ?? .nan, 200.0, accuracy: 0.01)  // 20000 cents -> $200
+        // Currency flows through the poll into the unified credits balance (KTD6).
+        XCTAssertEqual(service.latestUsage?.usageCredits?.balance?.currency, "AUD")
+        XCTAssertEqual(service.latestUsage?.usageCredits?.balance?.major ?? .nan, 200.0, accuracy: 0.01)
     }
 
     @MainActor
@@ -953,7 +956,19 @@ final class UsageLimitsSpendDecodeTests: XCTestCase {
         XCTAssertEqual(usage.modelUsages.count, 1)
         XCTAssertEqual(usage.modelUsages.first?.displayName, "Sonnet")
         XCTAssertEqual(usage.modelUsages.first?.remainingPercent ?? -1, 97, accuracy: 0.01)  // 100 - 3
+        XCTAssertNotNil(usage.modelUsages.first?.resetDate)  // weekly_scoped resets_at wired through
         XCTAssertFalse(usage.modelUsages.contains { $0.displayName == "Opus" })
+    }
+
+    func testLegacyPerModel_presentTierWithNullUtilization_dropsBar() throws {
+        // A present seven_day_opus tier whose utilization is null must hide the bar, not
+        // render a fabricated 100% (KTD3) - the gate is on utilization, not just the tier.
+        let json = """
+        { "seven_day_opus": { "utilization": null },
+          "seven_day_sonnet": { "utilization": 10.0 } }
+        """
+        let usage = UsageData(from: try decoder().decode(UsageResponse.self, from: Data(json.utf8)))
+        XCTAssertEqual(usage.modelUsages.map(\.displayName), ["Sonnet"])
     }
 
     func testDisabledCredits_withPrepaidBalance() throws {
