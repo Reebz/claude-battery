@@ -55,9 +55,15 @@ struct UsagePopoverView: View {
 
             claudeDesignRow()
 
-            LazyVGrid(columns: columns, spacing: 8) {
+            // Models card is omitted entirely when no per-model data is present (KTD3);
+            // Resets then spans the full width rather than leaving a lonely half-card.
+            if usage.modelUsages.isEmpty {
                 resetsCard(usage: usage)
-                modelsCard(usage: usage)
+            } else {
+                LazyVGrid(columns: columns, spacing: 8) {
+                    resetsCard(usage: usage)
+                    modelsCard(usage: usage)
+                }
             }
 
             // Account list (hidden when only 1 account)
@@ -150,8 +156,11 @@ struct UsagePopoverView: View {
     private func modelsCard(usage: UsageData) -> some View {
         UsageCard(title: "Models") {
             VStack(spacing: 8) {
-                ModelBar(name: "Opus", value: usage.opusRemaining, color: gaugeColor(for: usage.opusRemaining))
-                ModelBar(name: "Sonnet", value: usage.sonnetRemaining, color: gaugeColor(for: usage.sonnetRemaining))
+                ForEach(usage.modelUsages) { model in
+                    ModelBar(name: model.displayName,
+                             value: model.remainingPercent,
+                             color: gaugeColor(for: model.remainingPercent))
+                }
             }
             .frame(maxHeight: .infinity, alignment: .center)
         }

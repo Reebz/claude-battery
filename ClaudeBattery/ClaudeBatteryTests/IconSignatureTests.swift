@@ -166,7 +166,9 @@ final class RenderStateTests: XCTestCase {
             sevenDay: tier,
             sevenDayOpus: tier,
             sevenDaySonnet: tier,
-            extraUsage: nil
+            extraUsage: nil,
+            limits: nil,
+            spend: nil
         )
         return UsageData(from: response)
     }

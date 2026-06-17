@@ -38,8 +38,12 @@ final class UsageDataTests: XCTestCase {
         // remaining = 100 - utilization
         XCTAssertEqual(usage.weeklyRemaining, 40.0, accuracy: 0.01)   // 100 - 60
         XCTAssertEqual(usage.sessionRemaining, 65.0, accuracy: 0.01)  // 100 - 35
-        XCTAssertEqual(usage.opusRemaining, 20.0, accuracy: 0.01)     // 100 - 80
-        XCTAssertEqual(usage.sonnetRemaining, 90.0, accuracy: 0.01)   // 100 - 10
+        // Per-model now derives from seven_day_* gated on non-null (KTD3), in [Opus, Sonnet] order.
+        XCTAssertEqual(usage.modelUsages.count, 2)
+        XCTAssertEqual(usage.modelUsages[0].displayName, "Opus")
+        XCTAssertEqual(usage.modelUsages[0].remainingPercent, 20.0, accuracy: 0.01)  // 100 - 80
+        XCTAssertEqual(usage.modelUsages[1].displayName, "Sonnet")
+        XCTAssertEqual(usage.modelUsages[1].remainingPercent, 90.0, accuracy: 0.01)  // 100 - 10
         XCTAssertNotNil(usage.weeklyResetDate)
         XCTAssertNotNil(usage.sessionResetDate)
     }
@@ -53,8 +57,8 @@ final class UsageDataTests: XCTestCase {
         // When utilization is nil, formula is 100 - 0 = 100
         XCTAssertEqual(usage.weeklyRemaining, 100.0)
         XCTAssertEqual(usage.sessionRemaining, 100.0)
-        XCTAssertEqual(usage.opusRemaining, 100.0)
-        XCTAssertEqual(usage.sonnetRemaining, 100.0)
+        // Null per-model now hides the bar entirely - no fabricated 100% (KTD3).
+        XCTAssertTrue(usage.modelUsages.isEmpty)
         XCTAssertNil(usage.weeklyResetDate)
         XCTAssertNil(usage.sessionResetDate)
         XCTAssertNil(usage.extraUsage)
@@ -69,15 +73,17 @@ final class UsageDataTests: XCTestCase {
             sevenDay: tier,
             sevenDayOpus: tier,
             sevenDaySonnet: tier,
-            extraUsage: nil
+            extraUsage: nil,
+            limits: nil,
+            spend: nil
         )
         let usage = UsageData(from: response)
 
         // max(0, min(100, 100 - 150)) = max(0, -50) = 0
         XCTAssertEqual(usage.weeklyRemaining, 0.0)
         XCTAssertEqual(usage.sessionRemaining, 0.0)
-        XCTAssertEqual(usage.opusRemaining, 0.0)
-        XCTAssertEqual(usage.sonnetRemaining, 0.0)
+        XCTAssertEqual(usage.modelUsages.count, 2)
+        XCTAssertTrue(usage.modelUsages.allSatisfy { $0.remainingPercent == 0.0 })
     }
 
     // MARK: - Clamping: utilization < 0
@@ -89,15 +95,17 @@ final class UsageDataTests: XCTestCase {
             sevenDay: tier,
             sevenDayOpus: tier,
             sevenDaySonnet: tier,
-            extraUsage: nil
+            extraUsage: nil,
+            limits: nil,
+            spend: nil
         )
         let usage = UsageData(from: response)
 
         // max(0, min(100, 100 - (-30))) = min(100, 130) = 100
         XCTAssertEqual(usage.weeklyRemaining, 100.0)
         XCTAssertEqual(usage.sessionRemaining, 100.0)
-        XCTAssertEqual(usage.opusRemaining, 100.0)
-        XCTAssertEqual(usage.sonnetRemaining, 100.0)
+        XCTAssertEqual(usage.modelUsages.count, 2)
+        XCTAssertTrue(usage.modelUsages.allSatisfy { $0.remainingPercent == 100.0 })
     }
 
     // MARK: - Helpers
@@ -852,5 +860,195 @@ final class UsageServicePollTests: XCTestCase {
             .appendingPathComponent("Fixtures")
             .appendingPathComponent("\(name).json")
         return try! Data(contentsOf: url)
+    }
+}
+
+// MARK: - limits[] / spend decode (U1)
+
+/// Locks the newer `/usage` `limits[]`/`spend` decode and the expanded `/prepaid/credits`
+/// decode, plus the shared tolerant `resets_at` parser reaching `UsageLimit` (KTD1/KTD2).
+final class UsageLimitsSpendDecodeTests: XCTestCase {
+
+    private func decoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }
+
+    private func fixtureURL(named name: String) -> URL {
+        URL(fileURLWithPath: #file)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures")
+            .appendingPathComponent("\(name).json")
+    }
+
+    private func decodeUsage(_ name: String) throws -> UsageResponse {
+        let url = Bundle(for: type(of: self)).url(forResource: name, withExtension: "json")
+            ?? fixtureURL(named: name)
+        return try decoder().decode(UsageResponse.self, from: Data(contentsOf: url))
+    }
+
+    private func decodePrepaid(_ name: String) throws -> PrepaidCreditsResponse {
+        let url = Bundle(for: type(of: self)).url(forResource: name, withExtension: "json")
+            ?? fixtureURL(named: name)
+        return try decoder().decode(PrepaidCreditsResponse.self, from: Data(contentsOf: url))
+    }
+
+    /// Decode a single `UsageLimit` with a raw `resets_at` JSON value through the production
+    /// decoder config, mirroring `decodeTier` so the shared `ResetDate` parser is locked for
+    /// `UsageLimit` too.
+    private func decodeLimit(resetsAtRawJSON: String) -> UsageLimit {
+        let json = "{\"kind\": \"session\", \"resets_at\": \(resetsAtRawJSON)}"
+        return try! decoder().decode(UsageLimit.self, from: Data(json.utf8))
+    }
+
+    // MARK: - Structure
+
+    func testLimitsSpend_decodesStructure() throws {
+        let r = try decodeUsage("usage_limits_spend")
+
+        let limits = try XCTUnwrap(r.limits)
+        XCTAssertEqual(limits.count, 3)
+        XCTAssertEqual(limits.map(\.kind), ["session", "weekly_all", "weekly_scoped"])
+
+        let scoped = try XCTUnwrap(limits.first { $0.kind == "weekly_scoped" })
+        XCTAssertEqual(scoped.scope?.model?.displayName, "Sonnet")
+        XCTAssertEqual(scoped.percent ?? -1, 3, accuracy: 0.01)
+
+        let spend = try XCTUnwrap(r.spend)
+        XCTAssertEqual(spend.enabled, false)
+        XCTAssertEqual(spend.disabledReason, "org_level_disabled_until")
+        XCTAssertEqual(spend.percent ?? -1, 0, accuracy: 0.01)
+        XCTAssertNil(spend.limit)
+        XCTAssertEqual(spend.used?.amountMinor, 0)
+        XCTAssertEqual(spend.used?.currency, "USD")
+        XCTAssertEqual(spend.used?.exponent, 2)
+    }
+
+    func testLimitsSpend_legacyFieldsStillDecode() throws {
+        // KTD1: the newer shape must not break the existing per-field decode.
+        let r = try decodeUsage("usage_limits_spend")
+        XCTAssertEqual(r.fiveHour?.utilization ?? -1, 6, accuracy: 0.01)
+        XCTAssertEqual(r.sevenDay?.utilization ?? -1, 37, accuracy: 0.01)
+        XCTAssertEqual(r.sevenDaySonnet?.utilization ?? -1, 3, accuracy: 0.01)
+        XCTAssertNil(r.sevenDayOpus)
+        XCTAssertNotNil(r.fiveHour?.resetsAt)
+    }
+
+    func testLegacyFixture_hasNoLimitsOrSpend() throws {
+        // No regression: a legacy body decodes with limits/spend absent.
+        let r = try decodeUsage("usage_full")
+        XCTAssertNil(r.limits)
+        XCTAssertNil(r.spend)
+    }
+
+    func testUsageBodyLackingLimitsSpend_doesNotThrow() throws {
+        let r = try decoder().decode(UsageResponse.self, from: Data("{}".utf8))
+        XCTAssertNil(r.limits)
+        XCTAssertNil(r.spend)
+    }
+
+    // MARK: - Shared resets_at parser reaches UsageLimit (KTD2, #23 matrix)
+
+    func testLimitResetsAt_epochSeconds_decodes() {
+        XCTAssertEqual(decodeLimit(resetsAtRawJSON: "1775714400").resetsAt?.timeIntervalSince1970 ?? 0,
+                       1775714400, accuracy: 0.5)
+    }
+
+    func testLimitResetsAt_epochMilliseconds_decodes() {
+        XCTAssertEqual(decodeLimit(resetsAtRawJSON: "1775714400000").resetsAt?.timeIntervalSince1970 ?? 0,
+                       1775714400, accuracy: 0.5)
+    }
+
+    func testLimitResetsAt_epochString_decodes() {
+        XCTAssertEqual(decodeLimit(resetsAtRawJSON: "\"1775714400\"").resetsAt?.timeIntervalSince1970 ?? 0,
+                       1775714400, accuracy: 0.5)
+    }
+
+    func testLimitResetsAt_iso8601Fractional_decodes() {
+        XCTAssertNotNil(decodeLimit(resetsAtRawJSON: "\"2026-04-10T14:00:00.000Z\"").resetsAt)
+    }
+
+    func testLimitResetsAt_iso8601BareZ_decodes() {
+        XCTAssertNotNil(decodeLimit(resetsAtRawJSON: "\"2026-04-10T14:00:00Z\"").resetsAt)
+    }
+
+    func testLimitResetsAt_null_isNil() {
+        XCTAssertNil(decodeLimit(resetsAtRawJSON: "null").resetsAt)
+    }
+
+    func testLimitResetsAt_nonFiniteAndOutOfRange_isNil() {
+        for raw in ["\"inf\"", "\"nan\"", "\"1e400\"", "1e308", "99999999999", "0", "-1775714400"] {
+            XCTAssertNil(decodeLimit(resetsAtRawJSON: raw).resetsAt,
+                         "limit resets_at \(raw) must decode to nil, never a trapping Date")
+        }
+    }
+
+    // MARK: - Prepaid credits (expanded shape)
+
+    func testPrepaidCreditsAUD_decodes() throws {
+        let p = try decodePrepaid("prepaid_credits_aud")
+        XCTAssertEqual(p.amount, 7152)
+        XCTAssertEqual(p.currency, "AUD")
+        XCTAssertNil(p.autoReloadSettings)
+        XCTAssertNil(p.pendingInvoiceAmountCents)
+        XCTAssertNil(p.lastPaidPurchaseCents)
+    }
+
+    // MARK: - Derivation: limits[]/spend -> UsageData (U2)
+
+    func testLimitsPrimary_derivesSessionWeeklyModels() throws {
+        // Covers R0.4: limits[] is the primary source when present.
+        let usage = UsageData(from: try decodeUsage("usage_limits_spend"))
+        XCTAssertEqual(usage.sessionRemaining, 94, accuracy: 0.01)  // 100 - 6 (session limit)
+        XCTAssertEqual(usage.weeklyRemaining, 63, accuracy: 0.01)   // 100 - 37 (weekly_all)
+        XCTAssertEqual(usage.modelUsages.count, 1)
+        XCTAssertEqual(usage.modelUsages.first?.displayName, "Sonnet")
+        XCTAssertEqual(usage.modelUsages.first?.remainingPercent ?? -1, 97, accuracy: 0.01)  // 100 - 3
+        XCTAssertFalse(usage.modelUsages.contains { $0.displayName == "Opus" })
+    }
+
+    func testDisabledCredits_withPrepaidBalance() throws {
+        // Reporter's live data: spend disabled, prepaid balance still shown (KTD5).
+        let usage = UsageData(from: try decodeUsage("usage_limits_spend"),
+                              prepaidCredits: try decodePrepaid("prepaid_credits_aud"))
+        let credits = try XCTUnwrap(usage.usageCredits)
+        guard case let .disabled(reason, resetDate) = credits.state else {
+            return XCTFail("expected disabled state, got \(String(describing: credits.state))")
+        }
+        XCTAssertEqual(reason, "org_level_disabled_until")
+        XCTAssertNil(resetDate)
+        XCTAssertEqual(credits.balance?.major ?? -1, 71.52, accuracy: 0.001)  // 7152 cents -> A$71.52
+        XCTAssertEqual(credits.balance?.currency, "AUD")
+    }
+
+    func testEnabledCredits_over100PercentUncapped() throws {
+        // KTD7: spend.percent can exceed 100; the derived state keeps it uncapped.
+        // KTD4: amount_minor / 10^exponent converts to major units exactly once.
+        let json = """
+        { "spend": { "used": { "amount_minor": 20513, "currency": "AUD", "exponent": 2 },
+                     "limit": { "amount_minor": 20000, "currency": "AUD", "exponent": 2 },
+                     "percent": 103, "severity": "normal", "enabled": true } }
+        """
+        let usage = UsageData(from: try decoder().decode(UsageResponse.self, from: Data(json.utf8)))
+        let credits = try XCTUnwrap(usage.usageCredits)
+        guard case let .enabled(spent, limit, percent, currency, _) = credits.state else {
+            return XCTFail("expected enabled state, got \(String(describing: credits.state))")
+        }
+        XCTAssertEqual(spent, 205.13, accuracy: 0.001)   // 20513 minor / 10^2
+        XCTAssertEqual(limit ?? -1, 200, accuracy: 0.001) // 20000 minor / 10^2
+        XCTAssertEqual(percent, 103, accuracy: 0.01)      // uncapped
+        XCTAssertEqual(currency, "AUD")
+    }
+
+    func testBalanceOnly_whenSpendAbsent() throws {
+        // Legacy body (no spend) + prepaid balance -> credits carry only a balance.
+        let usage = UsageData(from: try decodeUsage("usage_full"),
+                              prepaidCredits: try decodePrepaid("prepaid_credits_aud"))
+        let credits = try XCTUnwrap(usage.usageCredits)
+        XCTAssertNil(credits.state)
+        XCTAssertEqual(credits.balance?.major ?? -1, 71.52, accuracy: 0.001)
+        XCTAssertEqual(credits.balance?.currency, "AUD")
     }
 }

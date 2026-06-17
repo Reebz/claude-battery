@@ -39,6 +39,8 @@
 		C10000050000000000000005 /* usage_full.json in Resources */ = {isa = PBXBuildFile; fileRef = C20000050000000000000005 /* usage_full.json */; };
 		C10000060000000000000006 /* usage_nil_fields.json in Resources */ = {isa = PBXBuildFile; fileRef = C20000060000000000000006 /* usage_nil_fields.json */; };
 		C10000070000000000000007 /* usage_extra_usage.json in Resources */ = {isa = PBXBuildFile; fileRef = C20000070000000000000007 /* usage_extra_usage.json */; };
+		C10000080000000000000008 /* usage_limits_spend.json in Resources */ = {isa = PBXBuildFile; fileRef = C20000080000000000000008 /* usage_limits_spend.json */; };
+		C10000090000000000000009 /* prepaid_credits_aud.json in Resources */ = {isa = PBXBuildFile; fileRef = C20000090000000000000009 /* prepaid_credits_aud.json */; };
 		D10000010000000000000001 /* AuthManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000010000000000000001 /* AuthManagerTests.swift */; };
 		D10000020000000000000002 /* OrganizationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000020000000000000002 /* OrganizationTests.swift */; };
 		D10000030000000000000003 /* orgs_single.json in Resources */ = {isa = PBXBuildFile; fileRef = D20000030000000000000003 /* orgs_single.json */; };
@@ -104,6 +106,8 @@
 		C20000050000000000000005 /* usage_full.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = usage_full.json; path = Fixtures/usage_full.json; sourceTree = "<group>"; };
 		C20000060000000000000006 /* usage_nil_fields.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = usage_nil_fields.json; path = Fixtures/usage_nil_fields.json; sourceTree = "<group>"; };
 		C20000070000000000000007 /* usage_extra_usage.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = usage_extra_usage.json; path = Fixtures/usage_extra_usage.json; sourceTree = "<group>"; };
+		C20000080000000000000008 /* usage_limits_spend.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = usage_limits_spend.json; path = Fixtures/usage_limits_spend.json; sourceTree = "<group>"; };
+		C20000090000000000000009 /* prepaid_credits_aud.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = prepaid_credits_aud.json; path = Fixtures/prepaid_credits_aud.json; sourceTree = "<group>"; };
 		D20000010000000000000001 /* AuthManagerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AuthManagerTests.swift; path = AuthManagerTests.swift; sourceTree = "<group>"; };
 		D20000020000000000000002 /* OrganizationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = OrganizationTests.swift; path = OrganizationTests.swift; sourceTree = "<group>"; };
 		D20000030000000000000003 /* orgs_single.json */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.json; name = orgs_single.json; path = Fixtures/orgs_single.json; sourceTree = "<group>"; };
@@ -165,6 +169,8 @@
 				C20000050000000000000005 /* usage_full.json */,
 				C20000060000000000000006 /* usage_nil_fields.json */,
 				C20000070000000000000007 /* usage_extra_usage.json */,
+				C20000080000000000000008 /* usage_limits_spend.json */,
+				C20000090000000000000009 /* prepaid_credits_aud.json */,
 				D20000010000000000000001 /* AuthManagerTests.swift */,
 				D20000020000000000000002 /* OrganizationTests.swift */,
 				D20000030000000000000003 /* orgs_single.json */,
@@ -371,6 +377,8 @@
 				C10000050000000000000005 /* usage_full.json in Resources */,
 				C10000060000000000000006 /* usage_nil_fields.json in Resources */,
 				C10000070000000000000007 /* usage_extra_usage.json in Resources */,
+				C10000080000000000000008 /* usage_limits_spend.json in Resources */,
+				C10000090000000000000009 /* prepaid_credits_aud.json in Resources */,
 				D10000030000000000000003 /* orgs_single.json in Resources */,
 				D10000040000000000000004 /* orgs_multiple.json in Resources */,
 				D10000050000000000000005 /* orgs_empty.json in Resources */,
