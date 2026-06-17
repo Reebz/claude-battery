@@ -86,16 +86,18 @@ final class UsageCreditsSectionTests: XCTestCase {
 }
 
 final class UsagePopoverViewBatteryColorTests: XCTestCase {
+    // Thresholds: red < 20, orange < 45, green otherwise (U7).
     func testHighRemainingIsGreen() {
         XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 75), .green)
         XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 100), .green)
-        XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 50), .green)
+        XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 46), .green)
+        XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 45), .green)  // boundary
     }
 
     func testMidRemainingIsOrange() {
         XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 30), .orange)
-        XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 20), .orange)
-        XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 49), .orange)
+        XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 44), .orange)
+        XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 20), .orange)  // boundary
     }
 
     func testLowRemainingIsRed() {

@@ -115,7 +115,9 @@ struct UsagePopoverView: View {
 
     private func sessionCard(usage: UsageData) -> some View {
         UsageCard(title: "Session") {
-            ArcGauge(value: usage.sessionRemaining, color: gaugeColor(for: usage.sessionRemaining))
+            ArcGauge(value: usage.sessionRemaining,
+                     color: gaugeColor(for: usage.sessionRemaining),
+                     tickCount: 5)
                 .frame(height: 58)
         }
         .frame(height: cardHeight)
@@ -123,7 +125,9 @@ struct UsagePopoverView: View {
 
     private func weeklyCard(usage: UsageData) -> some View {
         UsageCard(title: "Weekly") {
-            ArcGauge(value: usage.weeklyRemaining, color: gaugeColor(for: usage.weeklyRemaining))
+            ArcGauge(value: usage.weeklyRemaining,
+                     color: gaugeColor(for: usage.weeklyRemaining),
+                     tickCount: 7)
                 .frame(height: 58)
         }
         .frame(height: cardHeight)
@@ -185,7 +189,7 @@ struct UsagePopoverView: View {
 
     private func gaugeColor(for value: Double) -> Color {
         if value < 20 { return .red }
-        if value < 50 { return .orange }
+        if value < 45 { return .orange }
         return .green
     }
 
@@ -198,7 +202,7 @@ struct UsagePopoverView: View {
     static func batteryColor(remainingPercent: Double) -> Color {
         let clamped = max(0, min(100, remainingPercent))
         if clamped < 20 { return .red }
-        if clamped < 50 { return .orange }
+        if clamped < 45 { return .orange }
         return .green
     }
 
@@ -348,13 +352,14 @@ struct UsagePopoverView: View {
 
     private func claudeDesignRow() -> some View {
         unifiedBarRow(label: "Claude Design", remainingPercent: nil) {
-            Text("Coming soon")
+            Text("Shares standard usage limits")
                 .font(.system(size: 10, weight: .regular))
                 .foregroundColor(Color(white: 0.45))
+                .multilineTextAlignment(.trailing)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Claude Design, coming soon, no usage data yet")
-        .accessibilityHint("Claude Design usage will appear here when Anthropic exposes the API")
+        .accessibilityLabel("Claude Design, shares standard usage limits")
+        .accessibilityHint("Claude Design counts against your standard session and weekly usage")
     }
 
     // MARK: - States
@@ -656,6 +661,9 @@ private struct UsageCard<Content: View>: View {
 private struct ArcGauge: View {
     let value: Double
     let color: Color
+    /// Number of evenly-spaced quota segments; `count - 1` interior ticks are drawn.
+    /// 0 disables ticks (e.g. the menu-bar gauge, which is excluded - U6).
+    var tickCount: Int = 0
 
     var body: some View {
         ZStack {
@@ -664,11 +672,31 @@ private struct ArcGauge: View {
             ArcShape()
                 .trim(from: 0, to: value / 100)
                 .stroke(color, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+            if tickCount > 1 {
+                ArcTicks(count: tickCount)
+                    .stroke(Color(white: 0.12), lineWidth: 1.5)
+            }
             Text(String(format: "%.0f%%", value))
                 .font(.system(size: 15, weight: .bold, design: .rounded))
                 .foregroundColor(.white)
                 .offset(y: 2)
         }
+    }
+}
+
+/// Pure geometry for the popover gauge notches (U6), extracted from the views so the
+/// tick math is unit-testable. The arc starts at 135 deg and sweeps 270 deg.
+enum GaugeTicks {
+    /// Interior tick fractions for an N-segment gauge: `i / N` for `i` in `1..<N`.
+    /// Returns an empty array for counts below 2 (no interior ticks).
+    static func fractions(count: Int) -> [Double] {
+        guard count > 1 else { return [] }
+        return (1..<count).map { Double($0) / Double(count) }
+    }
+
+    /// Angle in degrees for a fraction along the arc geometry (`135 + 270 * fraction`).
+    static func angle(fraction: Double) -> Double {
+        135 + 270 * fraction
     }
 }
 
@@ -680,6 +708,27 @@ private struct ArcShape: Shape {
         path.addArc(center: center, radius: radius,
                     startAngle: .degrees(135), endAngle: .degrees(405),
                     clockwise: false)
+        return path
+    }
+}
+
+/// Short radial marks across the gauge stroke at each interior quota fraction, on the same
+/// geometry as `ArcShape` (U6).
+private struct ArcTicks: Shape {
+    let count: Int
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let center = CGPoint(x: rect.midX, y: rect.midY + 6)
+        let radius = min(rect.width, rect.height) / 2 - 3
+        let inner = radius - 3.5
+        let outer = radius + 3.5
+        for fraction in GaugeTicks.fractions(count: count) {
+            let radians = GaugeTicks.angle(fraction: fraction) * .pi / 180
+            let dx = cos(radians), dy = sin(radians)
+            path.move(to: CGPoint(x: center.x + inner * dx, y: center.y + inner * dy))
+            path.addLine(to: CGPoint(x: center.x + outer * dx, y: center.y + outer * dy))
+        }
         return path
     }
 }
