@@ -25,6 +25,8 @@ dist/
 docs/
 todos/
 .context/
+graphify-out/
+excalidraw.log
 
 # Secrets & signing materials
 *.p12
