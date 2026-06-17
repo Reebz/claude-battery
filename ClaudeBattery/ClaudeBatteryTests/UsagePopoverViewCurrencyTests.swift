@@ -4,7 +4,8 @@ import SwiftUI
 
 final class UsagePopoverViewCurrencyTests: XCTestCase {
     func testFormatterPinsUSDUnderRussianLocale() {
-        let formatter = UsagePopoverView.makeUSDCurrencyFormatter(
+        let formatter = UsagePopoverView.makeCurrencyFormatter(
+            code: "USD",
             locale: Locale(identifier: "ru_RU")
         )
 
@@ -22,6 +23,27 @@ final class UsagePopoverViewCurrencyTests: XCTestCase {
             formatted.contains("\u{20BD}"),
             "Expected no ruble symbol under ru_RU locale, got `\(formatted)`"
         )
+    }
+
+    func testFormatterUsesAUDCodeUnderUSLocale() {
+        // KTD6: an AUD account must render in AUD even under a US locale, not as plain USD.
+        let formatter = UsagePopoverView.makeCurrencyFormatter(
+            code: "AUD",
+            locale: Locale(identifier: "en_US")
+        )
+        let formatted = formatter.string(from: NSNumber(value: 71.52)) ?? ""
+
+        XCTAssertEqual(formatter.currencyCode, "AUD")
+        XCTAssertTrue(
+            formatted.contains("A$") || formatted.contains("AUD"),
+            "Expected an AUD rendering, got `\(formatted)`"
+        )
+        XCTAssertTrue(formatted.contains("71.52"), "Expected the amount, got `\(formatted)`")
+    }
+
+    func testEmptyCodeFallsBackToUSD() {
+        XCTAssertEqual(UsagePopoverView.makeCurrencyFormatter(code: "").currencyCode, "USD")
+        XCTAssertEqual(UsagePopoverView.makeCurrencyFormatter().currencyCode, "USD")
     }
 }
 

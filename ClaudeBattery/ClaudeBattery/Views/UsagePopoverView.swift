@@ -239,20 +239,22 @@ struct UsagePopoverView: View {
         .cornerRadius(12)
     }
 
-    static func makeUSDCurrencyFormatter(locale: Locale = .current) -> NumberFormatter {
+    /// Currency formatter parameterized by the API-supplied currency code (KTD6); falls
+    /// back to USD when the code is missing or empty. Setting `currencyCode` explicitly
+    /// keeps a non-USD account (e.g. AUD) from rendering as USD under a US locale.
+    static func makeCurrencyFormatter(code: String = "USD", locale: Locale = .current) -> NumberFormatter {
         let formatter = NumberFormatter()
         formatter.numberStyle = .currency
         formatter.locale = locale
-        formatter.currencyCode = "USD"
+        formatter.currencyCode = code.isEmpty ? "USD" : code
         formatter.maximumFractionDigits = 2
         formatter.minimumFractionDigits = 2
         return formatter
     }
 
-    private static let currencyFormatter: NumberFormatter = makeUSDCurrencyFormatter()
-
-    private func formatCurrency(_ value: Double) -> String {
-        Self.currencyFormatter.string(from: NSNumber(value: value)) ?? String(format: "$%.2f", value)
+    private func formatCurrency(_ value: Double, code: String = "USD") -> String {
+        Self.makeCurrencyFormatter(code: code).string(from: NSNumber(value: value))
+            ?? String(format: "$%.2f", value)
     }
 
     private func extraUsageBar(extraUsage: ExtraUsageData) -> some View {
