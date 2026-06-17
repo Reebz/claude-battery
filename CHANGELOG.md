@@ -9,7 +9,14 @@
 - Sign-in recovery is cleaner: an org-discovery failure now shows a single recoverable error card with "Try again" / "Sign in manually" instead of a redundant alert sheet that blocked those buttons, cancelling the organization picker no longer silently retries on the next cookie poll, and the no-organizations message now notes that a Pro or Max plan may be required.
 - Continuing with Google now works in non-US regions. The sign-in window was blocking Google's country-specific account hosts (e.g. `accounts.google.com.tr`) that the OAuth flow redirects through after login, leaving a blank screen. Those localized Google hosts are now allowed, matched exactly per the OAuth-domain hardening rule (issues #17, #25; fix contributed by @MidnightCoke in #24).
 - The Session and Weekly reset countdowns no longer render blank for accounts whose usage API returns `resets_at` as a UNIX epoch or a fractional-second timestamp. The value is now parsed tolerantly, and a plan with no reset window shows "Reset times unavailable" instead of empty placeholders (issue #23).
-- 342 automated tests (up from 173).
+
+**Usage Panel Overhaul**
+- Per-model usage now comes straight from the usage API and is labeled with the model name the API reports (for example "Sonnet"). A model with no data for your account hides its bar instead of showing a frozen, full one, so the Opus bar that used to read 100% on accounts without Opus data is gone.
+- The Session and Weekly gauges now carry evenly-spaced tick marks, so you can read roughly how much of each window is left at a glance.
+- The credits section was rebuilt around the usage API's current shape. It shows whether spend-based usage is enabled, paused, or just a balance, reads the currency from each value (an Australian account now sees A$ instead of $), and shows the true percentage when you are over your limit (for example 103%) instead of capping the label at 100%. The rolling balance guess from v1.48 is gone.
+- Usage bars turn orange below 45% remaining and red below 20%, a little earlier than before, so a low window stands out sooner.
+- The "Claude Design" row now reads "Shares standard usage limits" instead of "Coming soon", since Claude Design draws from the same shared usage pool rather than a separate meter.
+- 343 automated tests (up from 173).
 
 ### v1.48
 
