@@ -25,9 +25,19 @@ class MenuBarController: NSObject {
     private var settingsWindowController: NSWindowController?
     private var appearanceObservation: NSKeyValueObservation?
     private var iconStyleObservation: NSKeyValueObservation?
+    private var showSessionCountdownObservation: NSKeyValueObservation?
     private var wakeObserver: NSObjectProtocol?
     private var stalenessTimer: Timer?
     private var counterFlushTimer: Timer?
+
+    /// Dedicated per-minute timer that decrements the menu-bar countdown title. Kept separate
+    /// from `stalenessTimer` so the title path never lowers the staleness interval nor
+    /// piggybacks `updateIcon` (KTD3). Started only while the countdown toggle is on.
+    private var countdownTimer: Timer?
+
+    /// Last countdown string written to the button, so an unchanged title is a no-op (KTD3).
+    /// nil means "never written"; an empty string is a distinct, already-cleared state.
+    private var lastTitle: String?
 
     @AppStorage("iconStyle") private var iconStyleRaw: String = IconStyle.dualHorizontal.rawValue
 
@@ -76,6 +86,10 @@ class MenuBarController: NSObject {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         button.action = #selector(handleClick)
         button.target = self
+        // Countdown text rides button.attributedTitle on a path separate from the
+        // IconSignature-gated button.image render (KTD2). imageRight puts that text to the
+        // LEFT of the icon. This is the only edit to the image path's setup.
+        button.imagePosition = .imageRight
     }
 
     private func setupPopover() {
@@ -106,6 +120,7 @@ class MenuBarController: NSObject {
             .sink { [weak self] combined, authFailed in
                 let (usage, _, activeId) = combined
                 self?.updateIcon(usage, isAuthenticated: activeId != nil, authFailed: authFailed)
+                self?.updateCountdownTitle()
             }
             .store(in: &cancellables)
 
@@ -117,6 +132,17 @@ class MenuBarController: NSObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
+            }
+        }
+
+        // Targeted KVO on the countdown toggle key only (mirrors iconStyle, never a global
+        // observer - the v1.46 CPU anti-pattern, KTD4). On change: start/stop the dedicated
+        // title timer and refresh the title immediately.
+        showSessionCountdownObservation = UserDefaults.standard.observe(\.showSessionCountdown, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.syncCountdownTimer()
+                self.updateCountdownTitle()
             }
         }
 
@@ -134,6 +160,9 @@ class MenuBarController: NSObject {
                 guard let self else { return }
                 self.appearanceKVODispatched += 1
                 self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
+                // attributedTitle's NSColor does not auto-adapt to light/dark, so re-set the
+                // title here on a real brightness flip to pick up the new color (KTD5).
+                self.refreshCountdownTitleColor()
             }
         }
 
@@ -177,6 +206,10 @@ class MenuBarController: NSObject {
         counterFlushTimer?.tolerance = 30
         counterFlushTimer?.fireDate = Date(timeIntervalSinceNow: 30)
         if let counterFlushTimer { RunLoop.main.add(counterFlushTimer, forMode: .common) }
+
+        // Initialize the countdown title + its timer to the current toggle state.
+        syncCountdownTimer()
+        updateCountdownTitle()
     }
 
     private func flushCounters() {
@@ -191,8 +224,10 @@ class MenuBarController: NSObject {
     deinit {
         stalenessTimer?.invalidate()
         counterFlushTimer?.invalidate()
+        countdownTimer?.invalidate()
         appearanceObservation?.invalidate()
         iconStyleObservation?.invalidate()
+        showSessionCountdownObservation?.invalidate()
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
@@ -337,6 +372,82 @@ class MenuBarController: NSObject {
             return renderer.makeStatusIcon(text: "...", color: color, alpha: 1.0)
         }
     }
+
+    // MARK: - Countdown Title (separate path from updateIcon; KTD2-KTD5)
+
+    /// Pure mapping from usage + toggle to the compact menu-bar countdown string. Returns the
+    /// 3-char `compactCountdown` for the session reset when enabled and a positive countdown
+    /// exists, else "" (the cleared state). `nonisolated static` so it is reachable from tests
+    /// and free of controller state, mirroring `renderState`.
+    nonisolated static func countdownTitle(usage: UsageData?, enabled: Bool, now: Date = Date()) -> String {
+        guard enabled, let resetDate = usage?.sessionResetDate else { return "" }
+        return CountdownFormat.compactCountdown(until: resetDate, now: now) ?? ""
+    }
+
+    /// Compute the current countdown string and, if it differs from `lastTitle`, write it to
+    /// the button as an `attributedTitle` colored for the current menu-bar appearance. An
+    /// empty string clears the title. Deduped against `lastTitle` so an unchanged title is a
+    /// no-op (KTD3). Never touches `button.image` or the `IconSignature` dedup.
+    private func updateCountdownTitle() {
+        guard let button = statusItem.button else { return }
+        let title = Self.countdownTitle(
+            usage: usageService.latestUsage,
+            enabled: UserDefaults.standard.bool(forKey: MenuBarDefaults.showSessionCountdownKey)
+        )
+        guard title != lastTitle else { return }
+        setButtonTitle(title, on: button)
+        lastTitle = title
+    }
+
+    /// Re-apply the current title with a freshly resolved color. Used by the appearance KVO
+    /// handler because an `attributedTitle`'s `NSColor` does not auto-adapt to light/dark
+    /// (KTD5). Bypasses the `lastTitle` dedup since the string is unchanged but the color is
+    /// not; skips work when there is no visible title.
+    private func refreshCountdownTitleColor() {
+        guard let button = statusItem.button, let title = lastTitle, !title.isEmpty else { return }
+        setButtonTitle(title, on: button)
+    }
+
+    private func setButtonTitle(_ title: String, on button: NSStatusBarButton) {
+        if title.isEmpty {
+            button.attributedTitle = NSAttributedString(string: "")
+            return
+        }
+        let color: NSColor = isMenuBarDark ? .white : .black
+        button.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [.foregroundColor: color]
+        )
+    }
+
+    /// Start the dedicated countdown timer when the toggle is on, invalidate it when off.
+    /// Interval 60 with 30s tolerance (matching `stalenessTimer`) so the OS can coalesce
+    /// wakes; added to `.common` mode so it fires while menus/tracking are active.
+    private func syncCountdownTimer() {
+        let enabled = UserDefaults.standard.bool(forKey: MenuBarDefaults.showSessionCountdownKey)
+        if enabled {
+            guard countdownTimer == nil else { return }
+            let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.updateCountdownTitle()
+                }
+            }
+            timer.tolerance = 30
+            countdownTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        } else {
+            countdownTimer?.invalidate()
+            countdownTimer = nil
+        }
+    }
+}
+
+// MARK: - Shared defaults keys
+
+/// Single source of truth for menu-bar defaults keys, so the SwiftUI `@AppStorage` binding
+/// (SettingsView) and the targeted-KVO `@objc dynamic` accessor below cannot drift.
+enum MenuBarDefaults {
+    static let showSessionCountdownKey = "showSessionCountdown"
 }
 
 // MARK: - UserDefaults KVO Support
@@ -344,6 +455,10 @@ class MenuBarController: NSObject {
 extension UserDefaults {
     @objc dynamic var iconStyle: String? {
         string(forKey: "iconStyle")
+    }
+
+    @objc dynamic var showSessionCountdown: Bool {
+        bool(forKey: MenuBarDefaults.showSessionCountdownKey)
     }
 }
 

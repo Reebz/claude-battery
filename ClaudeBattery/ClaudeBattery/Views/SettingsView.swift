@@ -10,6 +10,7 @@ struct SettingsView: View {
 
     @State private var launchAtLogin = false
     @AppStorage("notificationsEnabled") private var notificationsEnabled = false
+    @AppStorage(MenuBarDefaults.showSessionCountdownKey) private var showSessionCountdown = false
     @AppStorage("iconStyle") private var iconStyleRaw: String = IconStyle.dualHorizontal.rawValue
     @State private var confirmRemoveId: UUID?
     /// Scales the decorative coffee-button font with Dynamic Type (the only fixed-size SwiftUI font
@@ -52,6 +53,14 @@ struct SettingsView: View {
                             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
                         }
                     }
+            }
+
+            Section {
+                Toggle("Show session countdown in menu bar", isOn: $showSessionCountdown)
+                Text("Adds a compact session countdown (e.g. \"4h+\", \"32m\") to the left of the menu bar icon. Hidden when there is no active session.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // Account management section
@@ -119,7 +128,8 @@ struct SettingsView: View {
         // issues link, and the manual-sign-in status + org picker + button — which are subview
         // @State not visible to this calc. The 90% screen cap below is the backstop on small
         // displays. (The +110/+30 over the prior 570/440 is that headroom.)
-        let base: CGFloat = accountStore.canAddAccount ? 680 : 470
+        // +50 over the prior 680/470 covers the session-countdown toggle row + its caption.
+        let base: CGFloat = accountStore.canAddAccount ? 730 : 520
         // Each account row: ~40pt, plus ~45pt for threshold slider when notifications on
         let perAccount: CGFloat = notificationsEnabled ? 85 : 40
         let accountCount = CGFloat(max(accountStore.accounts.count, 1))

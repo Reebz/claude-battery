@@ -32,6 +32,12 @@
 		CBCF1234ABCD5678EF901234 /* IconSignatureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBCF1234ABCD5678EF901235 /* IconSignatureTests.swift */; };
 		E10000010000000000000001 /* UsagePopoverViewCurrencyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000010000000000000001 /* UsagePopoverViewCurrencyTests.swift */; };
 		E10000020000000000000002 /* ArcGaugeNotchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000020000000000000002 /* ArcGaugeNotchTests.swift */; };
+		F10000010000000000000001 /* CountdownFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000010000000000000001 /* CountdownFormatTests.swift */; };
+		F10000020000000000000002 /* PaceBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000020000000000000002 /* PaceBarTests.swift */; };
+		F10000030000000000000003 /* ModelsCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000030000000000000003 /* ModelsCardTests.swift */; };
+		F10000040000000000000004 /* UsageCreditsRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000040000000000000004 /* UsageCreditsRowTests.swift */; };
+		F10000050000000000000005 /* SettingsCountdownToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000050000000000000005 /* SettingsCountdownToggleTests.swift */; };
+		F10000060000000000000006 /* MenuBarCountdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000060000000000000006 /* MenuBarCountdownTests.swift */; };
 		C10000010000000000000001 /* StorageServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000010000000000000001 /* StorageServiceTests.swift */; };
 		C10000020000000000000002 /* AccountStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000020000000000000002 /* AccountStoreTests.swift */; };
 		C10000030000000000000003 /* UsageServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000030000000000000003 /* UsageServiceTests.swift */; };
@@ -100,6 +106,12 @@
 		C20000010000000000000001 /* StorageServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = StorageServiceTests.swift; path = StorageServiceTests.swift; sourceTree = "<group>"; };
 		E20000010000000000000001 /* UsagePopoverViewCurrencyTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = UsagePopoverViewCurrencyTests.swift; path = UsagePopoverViewCurrencyTests.swift; sourceTree = "<group>"; };
 		E20000020000000000000002 /* ArcGaugeNotchTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ArcGaugeNotchTests.swift; path = ArcGaugeNotchTests.swift; sourceTree = "<group>"; };
+		F20000010000000000000001 /* CountdownFormatTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = CountdownFormatTests.swift; path = CountdownFormatTests.swift; sourceTree = "<group>"; };
+		F20000020000000000000002 /* PaceBarTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = PaceBarTests.swift; path = PaceBarTests.swift; sourceTree = "<group>"; };
+		F20000030000000000000003 /* ModelsCardTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ModelsCardTests.swift; path = ModelsCardTests.swift; sourceTree = "<group>"; };
+		F20000040000000000000004 /* UsageCreditsRowTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = UsageCreditsRowTests.swift; path = UsageCreditsRowTests.swift; sourceTree = "<group>"; };
+		F20000050000000000000005 /* SettingsCountdownToggleTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = SettingsCountdownToggleTests.swift; path = SettingsCountdownToggleTests.swift; sourceTree = "<group>"; };
+		F20000060000000000000006 /* MenuBarCountdownTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MenuBarCountdownTests.swift; path = MenuBarCountdownTests.swift; sourceTree = "<group>"; };
 		C20000020000000000000002 /* AccountStoreTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AccountStoreTests.swift; path = AccountStoreTests.swift; sourceTree = "<group>"; };
 		C20000030000000000000003 /* UsageServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = UsageServiceTests.swift; path = UsageServiceTests.swift; sourceTree = "<group>"; };
 		C20000040000000000000004 /* MockHTTPSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MockHTTPSession.swift; path = Helpers/MockHTTPSession.swift; sourceTree = "<group>"; };
@@ -165,6 +177,12 @@
 				C20000030000000000000003 /* UsageServiceTests.swift */,
 				E20000010000000000000001 /* UsagePopoverViewCurrencyTests.swift */,
 				E20000020000000000000002 /* ArcGaugeNotchTests.swift */,
+				F20000010000000000000001 /* CountdownFormatTests.swift */,
+				F20000020000000000000002 /* PaceBarTests.swift */,
+				F20000030000000000000003 /* ModelsCardTests.swift */,
+				F20000040000000000000004 /* UsageCreditsRowTests.swift */,
+				F20000050000000000000005 /* SettingsCountdownToggleTests.swift */,
+				F20000060000000000000006 /* MenuBarCountdownTests.swift */,
 				C20000040000000000000004 /* MockHTTPSession.swift */,
 				C20000050000000000000005 /* usage_full.json */,
 				C20000060000000000000006 /* usage_nil_fields.json */,
@@ -441,6 +459,12 @@
 				CBCF1234ABCD5678EF901234 /* IconSignatureTests.swift in Sources */,
 				E10000010000000000000001 /* UsagePopoverViewCurrencyTests.swift in Sources */,
 				E10000020000000000000002 /* ArcGaugeNotchTests.swift in Sources */,
+				F10000010000000000000001 /* CountdownFormatTests.swift in Sources */,
+				F10000020000000000000002 /* PaceBarTests.swift in Sources */,
+				F10000030000000000000003 /* ModelsCardTests.swift in Sources */,
+				F10000040000000000000004 /* UsageCreditsRowTests.swift in Sources */,
+				F10000050000000000000005 /* SettingsCountdownToggleTests.swift in Sources */,
+				F10000060000000000000006 /* MenuBarCountdownTests.swift in Sources */,
 				FB000000000000000000FB01 /* SecretRedactorTests.swift in Sources */,
 				FB000000000000000000FB02 /* DiagnosticsLoggerTests.swift in Sources */,
 				FB000000000000000000FB03 /* LogsExporterTests.swift in Sources */,

@@ -111,26 +111,66 @@ struct UsagePopoverView: View {
 
     // MARK: - Cards
 
-    private let cardHeight: CGFloat = 110
+    // Grown from 110 to fit the pace bar (U3) under each arc without clipping; both cards
+    // share this so Session and Weekly stay equal height.
+    private let cardHeight: CGFloat = 128
 
     private func sessionCard(usage: UsageData) -> some View {
         UsageCard(title: "Session") {
-            ArcGauge(value: usage.sessionRemaining,
-                     color: gaugeColor(for: usage.sessionRemaining),
-                     tickCount: 5)
-                .frame(height: 58)
+            VStack(spacing: 6) {
+                ArcGauge(value: usage.sessionRemaining,
+                         color: gaugeColor(for: usage.sessionRemaining),
+                         tickCount: 5)
+                    .frame(height: 58)
+                paceBar(resetsAt: usage.sessionResetDate,
+                        window: Self.sessionWindow,
+                        usageRemaining: usage.sessionRemaining)
+            }
         }
         .frame(height: cardHeight)
     }
 
     private func weeklyCard(usage: UsageData) -> some View {
         UsageCard(title: "Weekly") {
-            ArcGauge(value: usage.weeklyRemaining,
-                     color: gaugeColor(for: usage.weeklyRemaining),
-                     tickCount: 7)
-                .frame(height: 58)
+            VStack(spacing: 6) {
+                ArcGauge(value: usage.weeklyRemaining,
+                         color: gaugeColor(for: usage.weeklyRemaining),
+                         tickCount: 7)
+                    .frame(height: 58)
+                paceBar(resetsAt: usage.weeklyResetDate,
+                        window: Self.weeklyWindow,
+                        usageRemaining: usage.weeklyRemaining)
+            }
         }
         .frame(height: cardHeight)
+    }
+
+    /// Thin time-remaining bar under an arc (U3): fills to the time-remaining percent and is
+    /// colored by pace (KTD8), with a small trailing percent label as the non-color cue (KTD9).
+    /// When the reset date is unknown the percent is nil and the bar is omitted entirely (KTD4)
+    /// rather than shown as a misleading empty or full track.
+    // Test expectation: none - SwiftUI layout; the fill (timeRemainingPercent) and color
+    // (paceColor) are covered by PaceBarTests (U2).
+    @ViewBuilder
+    private func paceBar(resetsAt: Date?, window: TimeInterval, usageRemaining: Double) -> some View {
+        if let timeRemaining = Self.timeRemainingPercent(resetsAt: resetsAt, window: window) {
+            HStack(spacing: 6) {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Color(white: 0.25))
+                        RoundedRectangle(cornerRadius: 3)
+                            .fill(Self.paceColor(timeRemaining: timeRemaining, usageRemaining: usageRemaining))
+                            .frame(width: max(0, geo.size.width * timeRemaining / 100))
+                    }
+                }
+                .frame(height: 6)
+                Text("\(Int(timeRemaining.rounded()))%")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(Color(white: 0.6))
+                    .fixedSize()
+            }
+        }
     }
 
     private func resetsCard(usage: UsageData) -> some View {
@@ -153,13 +193,19 @@ struct UsagePopoverView: View {
         .frame(height: cardHeight)
     }
 
+    /// Bars for the Models card (U4): an "All Models" bar from the real weekly aggregate
+    /// (`weeklyRemaining`, never fabricated - KTD6) above the per-model bars, in order.
+    static func modelBars(for usage: UsageData) -> [(name: String, value: Double)] {
+        [("All Models", usage.weeklyRemaining)] + usage.modelUsages.map { ($0.displayName, $0.remainingPercent) }
+    }
+
     private func modelsCard(usage: UsageData) -> some View {
         UsageCard(title: "Models") {
             VStack(spacing: 8) {
-                ForEach(usage.modelUsages) { model in
-                    ModelBar(name: model.displayName,
-                             value: model.remainingPercent,
-                             color: gaugeColor(for: model.remainingPercent))
+                ForEach(Self.modelBars(for: usage), id: \.name) { bar in
+                    ModelBar(name: bar.name,
+                             value: bar.value,
+                             color: gaugeColor(for: bar.value))
                 }
             }
             .frame(maxHeight: .infinity, alignment: .center)
@@ -204,6 +250,34 @@ struct UsagePopoverView: View {
         if clamped < 20 { return .red }
         if clamped < 45 { return .orange }
         return .green
+    }
+
+    // MARK: - Pace (U2)
+
+    /// Session window length: 5h, consistent with the 5-tick session gauge (A3).
+    static let sessionWindow: TimeInterval = 5 * 3600
+    /// Weekly window length: 7 days.
+    static let weeklyWindow: TimeInterval = 7 * 24 * 3600
+
+    /// Time remaining in the window as a percent (counts down 100 -> 0), clamped 0-100.
+    /// The API supplies only `resetsAt` (the window end); the start is derived as
+    /// `resetsAt - window` (KTD10). Returns nil when `resetsAt` is nil or the guarded delta
+    /// is nil (past, non-finite, or out of range, KTD1) so callers can omit the bar (KTD4).
+    static func timeRemainingPercent(resetsAt: Date?, window: TimeInterval, now: Date = Date()) -> Double? {
+        guard let resetsAt,
+              let remaining = CountdownFormat.remainingSeconds(until: resetsAt, now: now) else { return nil }
+        let percent = remaining / window * 100
+        return max(0, min(100, percent))
+    }
+
+    /// Pace color encodes the relationship between time- and usage-remaining, not a level, so
+    /// it is a deliberately separate scale (KTD8): deficit = time-remaining% minus usage-remaining%
+    /// (positive = burning faster than the clock). deficit <= 10 green, <= 30 orange, else red.
+    static func paceColor(timeRemaining: Double, usageRemaining: Double) -> Color {
+        let deficit = timeRemaining - usageRemaining
+        if deficit <= 10 { return .green }
+        if deficit <= 30 { return .orange }
+        return .red
     }
 
     @ViewBuilder
@@ -268,41 +342,37 @@ struct UsagePopoverView: View {
         return formatter.string(from: NSNumber(value: value)) ?? String(format: "$%.2f", value)
     }
 
-    /// Unified Usage-credits section (KTD5): one enabled/disabled spend state plus a prepaid
-    /// balance row whenever a positive balance exists, each formatted in its own currency.
-    private func usageCreditsSection(credits: UsageCreditsData) -> some View {
-        VStack(spacing: 8) {
-            if let state = credits.state {
-                usageCreditsStateView(state: state)
-            }
-            if let balance = credits.balance {
-                unifiedBarRow(label: "Prepaid Balance", remainingPercent: nil) {
-                    Text(formatCurrency(balance.major, code: balance.currency))
-                        .font(.system(size: 11, weight: .semibold, design: .rounded))
-                        .foregroundColor(.white)
-                }
-            }
-        }
-    }
-
+    /// Unified Usage-credits section (U5, KTD5/KTD7): one "Credits" row carries the spend state
+    /// and the prepaid balance on a single line. The status segment flexes and truncates; the
+    /// balance is right-pinned and never truncates. Each value formats in its own currency.
     @ViewBuilder
-    private func usageCreditsStateView(state: UsageCreditsData.State) -> some View {
-        switch state {
-        case let .enabled(spent, limit, percent, currency, resetDate):
-            VStack(spacing: 6) {
-                unifiedBarRow(label: "Usage Credits", remainingPercent: nil) {
-                    HStack(spacing: 0) {
-                        Text(formatCurrency(spent, code: currency))
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundColor(.white)
-                        // percent is uncapped (KTD7); over-limit colors red via spendColor.
-                        Text(" spent · \(Int(percent.rounded()))% used")
-                            .font(.system(size: 10))
-                            .foregroundColor(spendColor(for: percent))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+    private func usageCreditsSection(credits: UsageCreditsData) -> some View {
+        VStack(spacing: 6) {
+            // Bar fill shows spend percent only in the enabled state; nil (empty track) otherwise.
+            let barPercent: Double? = {
+                if case let .enabled(_, _, percent, _, _) = credits.state {
+                    return max(0, min(100, percent))
+                }
+                return nil
+            }()
+
+            unifiedBarRow(label: "Credits", remainingPercent: barPercent) {
+                HStack(spacing: 6) {
+                    creditsStatusSegment(state: credits.state)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if let balance = credits.balance {
+                        Spacer(minLength: 6)
+                        creditsBalanceSegment(balance: balance)
+                            // Balance is the right-pinned anchor and must never truncate (KTD7).
+                            .layoutPriority(1)
+                            .fixedSize()
                     }
                 }
+            }
+
+            // Enabled state keeps its detail lines below the combined row.
+            if case let .enabled(_, limit, _, currency, resetDate) = credits.state {
                 VStack(spacing: 2) {
                     if let limit {
                         creditsDetailRow(label: "Monthly spend limit",
@@ -314,14 +384,33 @@ struct UsagePopoverView: View {
                                      value: Self.shortDate(resetDate ?? Self.firstOfNextMonth(after: Date())))
                 }
             }
-        case let .disabled(reason, resetDate):
-            unifiedBarRow(label: "Usage Credits", remainingPercent: nil) {
-                Text(Self.usageCreditsDisabledText(reason: reason, resetDate: resetDate))
-                    .font(.system(size: 10))
-                    .foregroundColor(Color(white: 0.6))
-                    .multilineTextAlignment(.trailing)
-            }
         }
+    }
+
+    /// The flexing status segment: enabled spend line (colored by spendColor) or the mapped
+    /// disabled reason. Renders empty when there is no spend state (balance-only).
+    @ViewBuilder
+    private func creditsStatusSegment(state: UsageCreditsData.State?) -> some View {
+        switch state {
+        case let .enabled(spent, _, percent, currency, _):
+            // percent is uncapped (KTD7); over-limit colors red via spendColor.
+            Text(Self.usageCreditsEnabledStatus(spentFormatted: formatCurrency(spent, code: currency),
+                                                percent: percent))
+                .font(.system(size: 10))
+                .foregroundColor(spendColor(for: percent))
+        case let .disabled(reason, resetDate):
+            Text(Self.usageCreditsDisabledText(reason: reason, resetDate: resetDate))
+                .font(.system(size: 10))
+                .foregroundColor(Color(white: 0.6))
+        case nil:
+            EmptyView()
+        }
+    }
+
+    private func creditsBalanceSegment(balance: UsageCreditsData.Balance) -> some View {
+        Text(formatCurrency(balance.major, code: balance.currency))
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .foregroundColor(.white)
     }
 
     private func creditsDetailRow(label: String, value: String) -> some View {
@@ -335,6 +424,13 @@ struct UsagePopoverView: View {
                 .foregroundColor(Color(white: 0.7))
         }
         .padding(.horizontal, 10)
+    }
+
+    /// Enabled-credits status text for the combined row (U5), e.g. "$12.00 spent · 60% used".
+    /// `spent` is pre-formatted in its own currency; `percent` is uncapped (KTD7) and rounded
+    /// for display. Pure so the composition is testable without the SwiftUI view.
+    static func usageCreditsEnabledStatus(spentFormatted: String, percent: Double) -> String {
+        "\(spentFormatted) spent · \(Int(percent.rounded()))% used"
     }
 
     /// Maps a `spend.disabled_reason` to human text. `org_level_disabled_until` means the
@@ -479,10 +575,9 @@ struct UsagePopoverView: View {
     }
 
     private func formatCountdown(_ date: Date) -> String {
-        let remaining = date.timeIntervalSinceNow
-        // isFinite + Int.max bound are defense-in-depth: a non-finite or absurd date must
-        // never reach Int(remaining), which traps fatally (issue #23 follow-up).
-        guard remaining > 0, remaining.isFinite, remaining < Double(Int.max) else { return "00m 00s" }
+        // Route through the shared guarded core (U1, KTD1) so the popover and menu-bar
+        // countdowns inherit the same issue-#23 trap protection.
+        guard let remaining = CountdownFormat.remainingSeconds(until: date) else { return "00m 00s" }
 
         let total = Int(remaining)
         let d = total / 86400
@@ -497,6 +592,35 @@ struct UsagePopoverView: View {
         } else {
             return String(format: "%dm %02ds", m, s)
         }
+    }
+}
+
+// MARK: - Countdown Formatting
+
+/// Shared, testable countdown helpers (U1, KTD1). Both the popover `formatCountdown` and the
+/// menu-bar compact countdown route through `remainingSeconds` so they inherit the same
+/// issue-#23 trap protection: a past, non-finite, or absurdly large date yields nil rather
+/// than reaching `Int(...)`, which traps fatally.
+enum CountdownFormat {
+    /// Seconds until `date`, or nil when there is no positive, finite, in-range countdown.
+    static func remainingSeconds(until date: Date, now: Date = Date()) -> TimeInterval? {
+        let remaining = date.timeIntervalSince(now)
+        guard remaining > 0, remaining.isFinite, remaining < Double(Int.max) else { return nil }
+        return remaining
+    }
+
+    /// Compact menu-bar countdown, never more than 3 characters:
+    /// `>= 1h` -> `"Nh+"` (e.g. "4h+"), `>= 1m` -> `"Nm"` (e.g. "32m"),
+    /// `> 0 but < 1m` -> `"<1m"`. Returns nil when there is nothing to count down.
+    /// Hours are single-digit for the session window (<= 5h), keeping the result <= 3 chars.
+    static func compactCountdown(until date: Date, now: Date = Date()) -> String? {
+        guard let remaining = remainingSeconds(until: date, now: now) else { return nil }
+        let total = Int(remaining)
+        let hours = total / 3600
+        let minutes = (total % 3600) / 60
+        if hours >= 1 { return "\(hours)h+" }
+        if minutes >= 1 { return "\(minutes)m" }
+        return "<1m"
     }
 }
 
