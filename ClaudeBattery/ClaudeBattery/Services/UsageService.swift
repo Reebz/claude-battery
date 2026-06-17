@@ -190,16 +190,7 @@ class UsageService: NSObject, ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            // Record the observation for the 100-day high-water-mark window; read back the HWM
-            // so the popover bar has a meaningful "remaining of N" denominator.
-            var prepaidMaximum: Double?
-            if let amountCents = prepaidCredits?.amount, amountCents > 0 {
-                let dollars = amountCents / 100.0
-                storage.recordPrepaidObservation(accountId: account.id, balance: dollars)
-                prepaidMaximum = storage.prepaidHighWaterMark(accountId: account.id)
-            }
-
-            latestUsage = UsageData(from: usage, prepaidCredits: prepaidCredits, prepaidMaximum: prepaidMaximum)
+            latestUsage = UsageData(from: usage, prepaidCredits: prepaidCredits)
             lastSuccessfulFetch = Date()
             if consecutiveFailures != 0 { consecutiveFailures = 0 }
             if authFailed { authFailed = false }
@@ -577,7 +568,7 @@ struct UsageData: Equatable {
     let prepaidBalance: PrepaidBalance?
     let usageCredits: UsageCreditsData?
 
-    init(from response: UsageResponse, prepaidCredits: PrepaidCreditsResponse? = nil, prepaidMaximum: Double? = nil) {
+    init(from response: UsageResponse, prepaidCredits: PrepaidCreditsResponse? = nil) {
         let limits = response.limits
 
         // Session / weekly: prefer limits[] (newer shape), else the legacy per-field tiers.
@@ -611,7 +602,7 @@ struct UsageData: Equatable {
         }
 
         extraUsage = ExtraUsageData(from: response.extraUsage)
-        prepaidBalance = PrepaidBalance(from: prepaidCredits, maximum: prepaidMaximum)
+        prepaidBalance = PrepaidBalance(from: prepaidCredits)
         usageCredits = UsageCreditsData.derive(spend: response.spend, prepaidCredits: prepaidCredits)
     }
 
@@ -667,14 +658,9 @@ struct AutoReloadSettings: Codable, Equatable {}
 /// balance that depletes, extra usage is pay-as-you-go overage against a cap.
 struct PrepaidBalance: Equatable {
     let dollars: Double
-    /// 100-day rolling high-water-mark of observed balances. Nil before any history is
-    /// recorded for the account; otherwise the maximum of `recordPrepaidObservation`
-    /// inputs in the trailing window. Drives the popover bar's "remaining of N" denominator.
-    let maximum: Double?
 
-    init?(from response: PrepaidCreditsResponse?, maximum: Double? = nil) {
+    init?(from response: PrepaidCreditsResponse?) {
         guard let response, let amountCents = response.amount, amountCents > 0 else { return nil }
         self.dollars = amountCents / 100.0
-        self.maximum = maximum
     }
 }

@@ -45,12 +45,8 @@ struct UsagePopoverView: View {
                 weeklyCard(usage: usage)
             }
 
-            if let extraUsage = usage.extraUsage {
-                extraUsageBar(extraUsage: extraUsage)
-            }
-
-            if let prepaid = usage.prepaidBalance {
-                prepaidBalanceRow(balance: prepaid)
+            if let credits = usage.usageCredits {
+                usageCreditsSection(credits: credits)
             }
 
             claudeDesignRow()
@@ -257,24 +253,97 @@ struct UsagePopoverView: View {
             ?? String(format: "$%.2f", value)
     }
 
-    private func extraUsageBar(extraUsage: ExtraUsageData) -> some View {
-        let remaining = max(0, extraUsage.limit - extraUsage.spent)
-        let remainingPercent = extraUsage.limit > 0
-            ? max(0, min(100, remaining / extraUsage.limit * 100))
-            : 0
-
-        return unifiedBarRow(label: "Extra Usage", remainingPercent: remainingPercent) {
-            HStack(spacing: 0) {
-                Text(formatCurrency(remaining))
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white)
-                Text(" remaining of \(formatCurrency(extraUsage.limit))")
-                    .font(.system(size: 10, weight: .regular))
-                    .foregroundColor(Color(white: 0.45))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+    /// Unified Usage-credits section (KTD5): one enabled/disabled spend state plus a prepaid
+    /// balance row whenever a positive balance exists, each formatted in its own currency.
+    private func usageCreditsSection(credits: UsageCreditsData) -> some View {
+        VStack(spacing: 8) {
+            if let state = credits.state {
+                usageCreditsStateView(state: state)
+            }
+            if let balance = credits.balance {
+                unifiedBarRow(label: "Prepaid Balance", remainingPercent: nil) {
+                    Text(formatCurrency(balance.major, code: balance.currency))
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundColor(.white)
+                }
             }
         }
+    }
+
+    @ViewBuilder
+    private func usageCreditsStateView(state: UsageCreditsData.State) -> some View {
+        switch state {
+        case let .enabled(spent, limit, percent, currency, resetDate):
+            VStack(spacing: 6) {
+                unifiedBarRow(label: "Usage Credits", remainingPercent: nil) {
+                    HStack(spacing: 0) {
+                        Text(formatCurrency(spent, code: currency))
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundColor(.white)
+                        // percent is uncapped (KTD7); over-limit colors red via spendColor.
+                        Text(" spent · \(Int(percent.rounded()))% used")
+                            .font(.system(size: 10))
+                            .foregroundColor(spendColor(for: percent))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                VStack(spacing: 2) {
+                    if let limit {
+                        creditsDetailRow(label: "Monthly spend limit",
+                                         value: formatCurrency(limit, code: currency))
+                    }
+                    // Reset is provisional until a credits-ENABLED capture confirms the field
+                    // (A3): show first-of-next-month when the API carries no reset.
+                    creditsDetailRow(label: "Resets",
+                                     value: Self.shortDate(resetDate ?? Self.firstOfNextMonth(after: Date())))
+                }
+            }
+        case let .disabled(reason, resetDate):
+            unifiedBarRow(label: "Usage Credits", remainingPercent: nil) {
+                Text(Self.usageCreditsDisabledText(reason: reason, resetDate: resetDate))
+                    .font(.system(size: 10))
+                    .foregroundColor(Color(white: 0.6))
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+    }
+
+    private func creditsDetailRow(label: String, value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundColor(Color(white: 0.5))
+            Spacer()
+            Text(value)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(Color(white: 0.7))
+        }
+        .padding(.horizontal, 10)
+    }
+
+    /// Maps a `spend.disabled_reason` to human text. `org_level_disabled_until` means the
+    /// monthly spend limit was reached and credits pause until the next cycle.
+    static func usageCreditsDisabledText(reason: String, resetDate: Date?) -> String {
+        let base = reason == "org_level_disabled_until" ? "Paused - monthly limit reached" : "Paused"
+        if let resetDate {
+            return "\(base), resets \(shortDate(resetDate))"
+        }
+        return base
+    }
+
+    /// First day of the month following `date` - the provisional monthly-credits reset used
+    /// for display until a credits-ENABLED capture confirms the real field (A3).
+    static func firstOfNextMonth(after date: Date, calendar: Calendar = .current) -> Date {
+        let startOfMonth = calendar.date(from: calendar.dateComponents([.year, .month], from: date)) ?? date
+        return calendar.date(byAdding: .month, value: 1, to: startOfMonth) ?? date
+    }
+
+    private static func shortDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter.string(from: date)
     }
 
     private func claudeDesignRow() -> some View {
@@ -286,26 +355,6 @@ struct UsagePopoverView: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Claude Design, coming soon, no usage data yet")
         .accessibilityHint("Claude Design usage will appear here when Anthropic exposes the API")
-    }
-
-    private func prepaidBalanceRow(balance: PrepaidBalance) -> some View {
-        let maximum = balance.maximum ?? balance.dollars
-        let remainingPercent = maximum > 0
-            ? max(0, min(100, balance.dollars / maximum * 100))
-            : 100
-
-        return unifiedBarRow(label: "Prepaid", remainingPercent: remainingPercent) {
-            HStack(spacing: 0) {
-                Text(formatCurrency(balance.dollars))
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white)
-                Text(" remaining of \(formatCurrency(maximum))")
-                    .font(.system(size: 10, weight: .regular))
-                    .foregroundColor(Color(white: 0.45))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-        }
     }
 
     // MARK: - States

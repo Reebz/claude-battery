@@ -31,7 +31,6 @@
 		B8B7E94DFB5BF777D586E1F6 /* IconStyleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55346AC851D0669ADFB2113D /* IconStyleTests.swift */; };
 		CBCF1234ABCD5678EF901234 /* IconSignatureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBCF1234ABCD5678EF901235 /* IconSignatureTests.swift */; };
 		E10000010000000000000001 /* UsagePopoverViewCurrencyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000010000000000000001 /* UsagePopoverViewCurrencyTests.swift */; };
-		E10000020000000000000002 /* PrepaidHistoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000020000000000000002 /* PrepaidHistoryTests.swift */; };
 		C10000010000000000000001 /* StorageServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000010000000000000001 /* StorageServiceTests.swift */; };
 		C10000020000000000000002 /* AccountStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000020000000000000002 /* AccountStoreTests.swift */; };
 		C10000030000000000000003 /* UsageServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000030000000000000003 /* UsageServiceTests.swift */; };
@@ -99,7 +98,6 @@
 		B20000070000000000000007 /* StackedBarsRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StackedBarsRenderer.swift; sourceTree = "<group>"; };
 		C20000010000000000000001 /* StorageServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = StorageServiceTests.swift; path = StorageServiceTests.swift; sourceTree = "<group>"; };
 		E20000010000000000000001 /* UsagePopoverViewCurrencyTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = UsagePopoverViewCurrencyTests.swift; path = UsagePopoverViewCurrencyTests.swift; sourceTree = "<group>"; };
-		E20000020000000000000002 /* PrepaidHistoryTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = PrepaidHistoryTests.swift; path = PrepaidHistoryTests.swift; sourceTree = "<group>"; };
 		C20000020000000000000002 /* AccountStoreTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AccountStoreTests.swift; path = AccountStoreTests.swift; sourceTree = "<group>"; };
 		C20000030000000000000003 /* UsageServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = UsageServiceTests.swift; path = UsageServiceTests.swift; sourceTree = "<group>"; };
 		C20000040000000000000004 /* MockHTTPSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MockHTTPSession.swift; path = Helpers/MockHTTPSession.swift; sourceTree = "<group>"; };
@@ -164,7 +162,6 @@
 				C20000020000000000000002 /* AccountStoreTests.swift */,
 				C20000030000000000000003 /* UsageServiceTests.swift */,
 				E20000010000000000000001 /* UsagePopoverViewCurrencyTests.swift */,
-				E20000020000000000000002 /* PrepaidHistoryTests.swift */,
 				C20000040000000000000004 /* MockHTTPSession.swift */,
 				C20000050000000000000005 /* usage_full.json */,
 				C20000060000000000000006 /* usage_nil_fields.json */,
@@ -440,7 +437,6 @@
 				B8B7E94DFB5BF777D586E1F6 /* IconStyleTests.swift in Sources */,
 				CBCF1234ABCD5678EF901234 /* IconSignatureTests.swift in Sources */,
 				E10000010000000000000001 /* UsagePopoverViewCurrencyTests.swift in Sources */,
-				E10000020000000000000002 /* PrepaidHistoryTests.swift in Sources */,
 				FB000000000000000000FB01 /* SecretRedactorTests.swift in Sources */,
 				FB000000000000000000FB02 /* DiagnosticsLoggerTests.swift in Sources */,
 				FB000000000000000000FB03 /* LogsExporterTests.swift in Sources */,

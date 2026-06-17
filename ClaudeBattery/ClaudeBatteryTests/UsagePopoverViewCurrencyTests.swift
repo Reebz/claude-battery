@@ -47,6 +47,44 @@ final class UsagePopoverViewCurrencyTests: XCTestCase {
     }
 }
 
+final class UsageCreditsSectionTests: XCTestCase {
+    func testDisabledReasonMapsToPausedText() {
+        XCTAssertEqual(
+            UsagePopoverView.usageCreditsDisabledText(reason: "org_level_disabled_until", resetDate: nil),
+            "Paused - monthly limit reached"
+        )
+    }
+
+    func testUnknownDisabledReasonFallsBackToPaused() {
+        XCTAssertEqual(
+            UsagePopoverView.usageCreditsDisabledText(reason: "something_else", resetDate: nil),
+            "Paused"
+        )
+    }
+
+    func testFirstOfNextMonth_rollsToFirstDayOfNextMonth() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let jan15 = cal.date(from: DateComponents(year: 2026, month: 1, day: 15, hour: 9))!
+        let comps = cal.dateComponents([.year, .month, .day],
+                                       from: UsagePopoverView.firstOfNextMonth(after: jan15, calendar: cal))
+        XCTAssertEqual(comps.year, 2026)
+        XCTAssertEqual(comps.month, 2)
+        XCTAssertEqual(comps.day, 1)
+    }
+
+    func testFirstOfNextMonth_decemberRollsToJanuaryNextYear() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let dec20 = cal.date(from: DateComponents(year: 2026, month: 12, day: 20))!
+        let comps = cal.dateComponents([.year, .month, .day],
+                                       from: UsagePopoverView.firstOfNextMonth(after: dec20, calendar: cal))
+        XCTAssertEqual(comps.year, 2027)
+        XCTAssertEqual(comps.month, 1)
+        XCTAssertEqual(comps.day, 1)
+    }
+}
+
 final class UsagePopoverViewBatteryColorTests: XCTestCase {
     func testHighRemainingIsGreen() {
         XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 75), .green)
