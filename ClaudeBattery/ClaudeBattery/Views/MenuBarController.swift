@@ -384,6 +384,13 @@ class MenuBarController: NSObject {
         return CountdownFormat.compactCountdown(until: resetDate, now: now) ?? ""
     }
 
+    /// Whether a freshly computed title should be written to the button: only when it differs
+    /// from the last-written value. Pure + `nonisolated static` so the issue-#11 CPU-safety
+    /// dedup (an unchanged title is a no-op, KTD3) is unit-testable as a seam.
+    nonisolated static func shouldRewriteTitle(new: String, last: String?) -> Bool {
+        new != last
+    }
+
     /// Compute the current countdown string and, if it differs from `lastTitle`, write it to
     /// the button as an `attributedTitle` colored for the current menu-bar appearance. An
     /// empty string clears the title. Deduped against `lastTitle` so an unchanged title is a
@@ -394,7 +401,7 @@ class MenuBarController: NSObject {
             usage: usageService.latestUsage,
             enabled: UserDefaults.standard.bool(forKey: MenuBarDefaults.showSessionCountdownKey)
         )
-        guard title != lastTitle else { return }
+        guard Self.shouldRewriteTitle(new: title, last: lastTitle) else { return }
         setButtonTitle(title, on: button)
         lastTitle = title
     }

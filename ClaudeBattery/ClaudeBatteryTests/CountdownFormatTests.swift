@@ -20,6 +20,12 @@ final class CountdownFormatTests: XCTestCase {
         XCTAssertEqual(CountdownFormat.compactCountdown(until: future(3600), now: now), "1h+")
     }
 
+    func testCompact_tenHours_saturatesToNineHoursPlus() {
+        // >= 10h would render "10h+" (4 chars), violating the <= 3-char invariant under clock
+        // skew / stale reset dates, so it saturates to the truthful "at least 9h" form.
+        XCTAssertEqual(CountdownFormat.compactCountdown(until: future(10 * 3600 + 5), now: now), "9h+")
+    }
+
     func testCompact_fiftyNineMinutesThirtySeconds_minutes() {
         XCTAssertEqual(CountdownFormat.compactCountdown(until: future(59 * 60 + 30), now: now), "59m")
     }
@@ -41,15 +47,17 @@ final class CountdownFormatTests: XCTestCase {
     }
 
     func testCompact_everyNonNilResultIsAtMostThreeChars() {
+        // Every swept interval is positive, so compactCountdown never returns nil here; the
+        // >= 10h and >= 100h entries exercise the saturation that keeps the invariant universal.
         let intervals: [TimeInterval] = [
             5, 40, 59, 60, 90, 30 * 60, 59 * 60 + 59,
-            3600, 3600 + 59, 2 * 3600, 4 * 3600 + 20 * 60, 5 * 3600
+            3600, 3600 + 59, 2 * 3600, 4 * 3600 + 20 * 60, 5 * 3600,
+            10 * 3600 + 5, 100 * 3600
         ]
         for interval in intervals {
-            guard let result = CountdownFormat.compactCountdown(until: future(interval), now: now) else {
-                continue
-            }
-            XCTAssertLessThanOrEqual(result.count, 3, "compact `\(result)` for \(interval)s exceeds 3 chars")
+            let result = CountdownFormat.compactCountdown(until: future(interval), now: now)
+            XCTAssertNotNil(result, "compact unexpectedly nil for \(interval)s")
+            XCTAssertLessThanOrEqual(result?.count ?? .max, 3, "compact `\(result ?? "nil")` for \(interval)s exceeds 3 chars")
         }
     }
 

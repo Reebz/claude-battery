@@ -30,7 +30,7 @@ final class PaceBarTests: XCTestCase {
         XCTAssertEqual(percent ?? -1, 20, accuracy: 0.001)  // 1/5 * 100
     }
 
-    func testPast_clampsToZeroViaNilGuard() {
+    func testPast_returnsNil_barOmitted() {
         // A past reset has no positive guarded delta, so the percent is nil (bar omitted, KTD4).
         let percent = UsagePopoverView.timeRemainingPercent(
             resetsAt: resetsIn(-3600),

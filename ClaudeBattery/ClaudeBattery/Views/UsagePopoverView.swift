@@ -194,15 +194,18 @@ struct UsagePopoverView: View {
     }
 
     /// Bars for the Models card (U4): an "All Models" bar from the real weekly aggregate
-    /// (`weeklyRemaining`, never fabricated - KTD6) above the per-model bars, in order.
-    static func modelBars(for usage: UsageData) -> [(name: String, value: Double)] {
-        [("All Models", usage.weeklyRemaining)] + usage.modelUsages.map { ($0.displayName, $0.remainingPercent) }
+    /// (`weeklyRemaining`, never fabricated - KTD6) above the per-model bars, in order. Each
+    /// bar carries `ModelUsage.id` so two scoped limits sharing a display_name (and any model
+    /// literally named "All Models") stay distinct ForEach keys rather than colliding.
+    static func modelBars(for usage: UsageData) -> [(id: String, name: String, value: Double)] {
+        [(id: "__all_models__", name: "All Models", value: usage.weeklyRemaining)]
+            + usage.modelUsages.map { (id: $0.id, name: $0.displayName, value: $0.remainingPercent) }
     }
 
     private func modelsCard(usage: UsageData) -> some View {
         UsageCard(title: "Models") {
             VStack(spacing: 8) {
-                ForEach(Self.modelBars(for: usage), id: \.name) { bar in
+                ForEach(Self.modelBars(for: usage), id: \.id) { bar in
                     ModelBar(name: bar.name,
                              value: bar.value,
                              color: gaugeColor(for: bar.value))
@@ -267,6 +270,8 @@ struct UsagePopoverView: View {
         guard let resetsAt,
               let remaining = CountdownFormat.remainingSeconds(until: resetsAt, now: now) else { return nil }
         let percent = remaining / window * 100
+        // The `max(0, ...)` lower clamp is defense-in-depth, made unreachable by remainingSeconds'
+        // positive-delta guard (a non-positive delta returns nil above); kept regardless.
         return max(0, min(100, percent))
     }
 
@@ -284,6 +289,7 @@ struct UsagePopoverView: View {
     private func unifiedBarRow<Trailing: View>(
         label: String,
         remainingPercent: Double?,
+        fillColor: Color? = nil,
         @ViewBuilder trailing: () -> Trailing
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -301,7 +307,7 @@ struct UsagePopoverView: View {
                     if let remaining = remainingPercent {
                         let clamped = max(0, min(100, remaining))
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(Self.batteryColor(remainingPercent: clamped))
+                            .fill(fillColor ?? Self.batteryColor(remainingPercent: clamped))
                             .frame(width: max(0, geo.size.width * clamped / 100))
                     }
                 }
@@ -356,7 +362,17 @@ struct UsagePopoverView: View {
                 return nil
             }()
 
-            unifiedBarRow(label: "Credits", remainingPercent: barPercent) {
+            // The bar carries SPEND semantics (high = closer to the limit), so color it by
+            // spendColor (high = red) rather than the remaining-semantics batteryColor (high =
+            // green); otherwise a near-limit bar would read green and contradict the status text.
+            let barFillColor: Color? = {
+                if case let .enabled(_, _, percent, _, _) = credits.state {
+                    return spendColor(for: percent)
+                }
+                return nil
+            }()
+
+            unifiedBarRow(label: "Credits", remainingPercent: barPercent, fillColor: barFillColor) {
                 HStack(spacing: 6) {
                     creditsStatusSegment(state: credits.state)
                         .lineLimit(1)
@@ -609,15 +625,16 @@ enum CountdownFormat {
         return remaining
     }
 
-    /// Compact menu-bar countdown, never more than 3 characters:
-    /// `>= 1h` -> `"Nh+"` (e.g. "4h+"), `>= 1m` -> `"Nm"` (e.g. "32m"),
-    /// `> 0 but < 1m` -> `"<1m"`. Returns nil when there is nothing to count down.
-    /// Hours are single-digit for the session window (<= 5h), keeping the result <= 3 chars.
+    /// Compact menu-bar countdown, never more than 3 characters (enforced for ALL inputs):
+    /// `>= 10h` -> `"9h+"` (saturates; still truthful as "at least 9h" and guarantees <= 3 chars
+    /// under clock skew / stale reset dates), `>= 1h` -> `"Nh+"` (e.g. "4h+"), `>= 1m` -> `"Nm"`
+    /// (e.g. "32m"), `> 0 but < 1m` -> `"<1m"`. Returns nil when there is nothing to count down.
     static func compactCountdown(until date: Date, now: Date = Date()) -> String? {
         guard let remaining = remainingSeconds(until: date, now: now) else { return nil }
         let total = Int(remaining)
         let hours = total / 3600
         let minutes = (total % 3600) / 60
+        if hours >= 10 { return "9h+" }
         if hours >= 1 { return "\(hours)h+" }
         if minutes >= 1 { return "\(minutes)m" }
         return "<1m"

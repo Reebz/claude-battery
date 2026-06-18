@@ -99,4 +99,29 @@ final class MenuBarCountdownTests: XCTestCase {
         )
         XCTAssertEqual(title, "")
     }
+
+    // MARK: - shouldRewriteTitle (issue-#11 CPU-safety dedup seam, KTD3)
+
+    func testShouldRewriteTitle_equal_isFalse() {
+        XCTAssertFalse(MenuBarController.shouldRewriteTitle(new: "4h+", last: "4h+"))
+    }
+
+    func testShouldRewriteTitle_differing_isTrue() {
+        XCTAssertTrue(MenuBarController.shouldRewriteTitle(new: "4h+", last: "3h+"))
+    }
+
+    func testShouldRewriteTitle_nilLast_isTrue() {
+        // First write (never-written state) always rewrites.
+        XCTAssertTrue(MenuBarController.shouldRewriteTitle(new: "4h+", last: nil))
+    }
+
+    func testShouldRewriteTitle_emptyNewNilLast_isTrue() {
+        // Clearing from never-written is still a write (nil != "").
+        XCTAssertTrue(MenuBarController.shouldRewriteTitle(new: "", last: nil))
+    }
+
+    func testShouldRewriteTitle_bothEmpty_isFalse() {
+        // Already-cleared stays a no-op.
+        XCTAssertFalse(MenuBarController.shouldRewriteTitle(new: "", last: ""))
+    }
 }
