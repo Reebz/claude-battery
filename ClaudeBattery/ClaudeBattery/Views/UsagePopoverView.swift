@@ -56,7 +56,9 @@ struct UsagePopoverView: View {
             } else {
                 LazyVGrid(columns: columns, spacing: 8) {
                     resetsCard(usage: usage)
+                        .frame(maxHeight: .infinity)
                     modelsCard(usage: usage)
+                        .frame(maxHeight: .infinity)
                 }
             }
 
@@ -113,9 +115,10 @@ struct UsagePopoverView: View {
 
     // Gauge cards (Session/Weekly) are taller to give the arc and pace bar breathing room (U3).
     private let gaugeCardHeight: CGFloat = 142
-    // Info cards (Resets/Models) top-align their content under the title (no centered gap).
-    // Height fits up to three model bars (legacy Opus+Sonnet plus All Models) without clipping.
-    private let infoCardHeight: CGFloat = 120
+    // Info cards (Resets/Models) take no fixed height: they size to their content and equalize to
+    // each other in the grid (maxHeight at the call site), with content vertically centered. This
+    // hugs the content (no excess bottom padding), keeps the two boxes symmetric, and never clips
+    // the 3-bar model case the way a fixed height would.
 
     private func sessionCard(usage: UsageData) -> some View {
         UsageCard(title: "Session") {
@@ -196,9 +199,8 @@ struct UsagePopoverView: View {
                     resetRow(label: "Weekly", date: usage.weeklyResetDate)
                 }
             }
-            .frame(maxHeight: .infinity, alignment: .top)
+            .frame(maxHeight: .infinity, alignment: .center)
         }
-        .frame(height: infoCardHeight)
     }
 
     /// Bars for the Models card (U4): an "All Models" bar from the real weekly aggregate
@@ -219,9 +221,8 @@ struct UsagePopoverView: View {
                              color: gaugeColor(for: bar.value))
                 }
             }
-            .frame(maxHeight: .infinity, alignment: .top)
+            .frame(maxHeight: .infinity, alignment: .center)
         }
-        .frame(height: infoCardHeight)
     }
 
     // MARK: - Components
