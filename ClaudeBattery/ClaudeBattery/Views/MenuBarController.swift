@@ -30,14 +30,11 @@ class MenuBarController: NSObject {
     private var stalenessTimer: Timer?
     private var counterFlushTimer: Timer?
 
-    /// Dedicated per-minute timer that decrements the menu-bar countdown title. Kept separate
-    /// from `stalenessTimer` so the title path never lowers the staleness interval nor
-    /// piggybacks `updateIcon` (KTD3). Started only while the countdown toggle is on.
+    /// Dedicated per-minute timer that re-renders the menu-bar icon so the composed countdown
+    /// cell ticks down. Kept separate from `stalenessTimer` so its interval is independent.
+    /// Started only while the countdown toggle is on. Its `updateIcon` re-render is gated to one
+    /// render per countdown-string change by the IconSignature `countdown` field (issue #11 safe).
     private var countdownTimer: Timer?
-
-    /// Last countdown string written to the button, so an unchanged title is a no-op (KTD3).
-    /// nil means "never written"; an empty string is a distinct, already-cleared state.
-    private var lastTitle: String?
 
     @AppStorage("iconStyle") private var iconStyleRaw: String = IconStyle.dualHorizontal.rawValue
 
@@ -86,10 +83,6 @@ class MenuBarController: NSObject {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         button.action = #selector(handleClick)
         button.target = self
-        // Countdown text rides button.attributedTitle on a path separate from the
-        // IconSignature-gated button.image render (KTD2). imageRight puts that text to the
-        // LEFT of the icon. This is the only edit to the image path's setup.
-        button.imagePosition = .imageRight
     }
 
     private func setupPopover() {
@@ -120,7 +113,6 @@ class MenuBarController: NSObject {
             .sink { [weak self] combined, authFailed in
                 let (usage, _, activeId) = combined
                 self?.updateIcon(usage, isAuthenticated: activeId != nil, authFailed: authFailed)
-                self?.updateCountdownTitle()
             }
             .store(in: &cancellables)
 
@@ -137,12 +129,12 @@ class MenuBarController: NSObject {
 
         // Targeted KVO on the countdown toggle key only (mirrors iconStyle, never a global
         // observer - the v1.46 CPU anti-pattern, KTD4). On change: start/stop the dedicated
-        // title timer and refresh the title immediately.
+        // timer and re-render the icon so the cell appears/disappears immediately.
         showSessionCountdownObservation = UserDefaults.standard.observe(\.showSessionCountdown, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.syncCountdownTimer()
-                self.updateCountdownTitle()
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
             }
         }
 
@@ -159,10 +151,10 @@ class MenuBarController: NSObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.appearanceKVODispatched += 1
+                // The countdown cell is composed into button.image, so a normal updateIcon
+                // re-render (different isMenuBarDark -> different signature) repaints the cell in
+                // the new color too. No separate title-color refresh needed.
                 self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
-                // attributedTitle's NSColor does not auto-adapt to light/dark, so re-set the
-                // title here on a real brightness flip to pick up the new color (KTD5).
-                self.refreshCountdownTitleColor()
             }
         }
 
@@ -207,9 +199,9 @@ class MenuBarController: NSObject {
         counterFlushTimer?.fireDate = Date(timeIntervalSinceNow: 30)
         if let counterFlushTimer { RunLoop.main.add(counterFlushTimer, forMode: .common) }
 
-        // Initialize the countdown title + its timer to the current toggle state.
+        // Initialize the countdown timer to the current toggle state. The icon itself is
+        // rendered by the init updateIcon call (and subsequent re-renders carry the cell).
         syncCountdownTimer()
-        updateCountdownTitle()
     }
 
     private func flushCounters() {
@@ -342,7 +334,14 @@ class MenuBarController: NSObject {
             consecutiveFailures: usageService.consecutiveFailures,
             isStale: usageService.isStale
         )
-        let signature = IconSignature(style: style, isMenuBarDark: isMenuBarDark, render: render)
+        // "" when the toggle is off or there is no session reset window. Folding it into the
+        // signature is what makes the per-minute timer re-render exactly once per string change
+        // (e.g. "32m" -> "31m") and never in a loop - same-string fires short-circuit below.
+        let countdown = Self.countdownTitle(
+            usage: usage,
+            enabled: UserDefaults.standard.bool(forKey: MenuBarDefaults.showSessionCountdownKey)
+        )
+        let signature = IconSignature(style: style, isMenuBarDark: isMenuBarDark, render: render, countdown: countdown)
 
         guard signature != lastRenderedSignature else {
             updateIconSuppressedBySignature += 1
@@ -350,7 +349,13 @@ class MenuBarController: NSObject {
         }
 
         let color: NSColor = isMenuBarDark ? .white : .black
-        button.image = makeImage(for: render, style: style, color: color)
+        let base = makeImage(for: render, style: style, color: color)
+        // The countdown cell only rides the battery render; status/auth glyphs stay bare.
+        if case .battery = render, !countdown.isEmpty {
+            button.image = Self.imageWithCountdownCell(countdown: countdown, batteryImage: base, color: color)
+        } else {
+            button.image = base
+        }
         lastRenderedSignature = signature
         updateIconRendered += 1
     }
@@ -373,70 +378,88 @@ class MenuBarController: NSObject {
         }
     }
 
-    // MARK: - Countdown Title (separate path from updateIcon; KTD2-KTD5)
+    // MARK: - Countdown Cell (composed into button.image; reverses the U7 title path)
 
-    /// Pure mapping from usage + toggle to the compact menu-bar countdown string. Returns the
-    /// 3-char `compactCountdown` for the session reset when enabled and a positive countdown
-    /// exists, else "" (the cleared state). `nonisolated static` so it is reachable from tests
-    /// and free of controller state, mirroring `renderState`.
+    /// Pure mapping from usage + toggle to the compact countdown string. Returns the 3-char
+    /// `compactCountdown` for the session reset when enabled and a positive countdown exists,
+    /// else "" (the off/none state). `nonisolated static` so it is reachable from tests and
+    /// free of controller state, mirroring `renderState`.
     nonisolated static func countdownTitle(usage: UsageData?, enabled: Bool, now: Date = Date()) -> String {
         guard enabled, let resetDate = usage?.sessionResetDate else { return "" }
         return CountdownFormat.compactCountdown(until: resetDate, now: now) ?? ""
     }
 
-    /// Whether a freshly computed title should be written to the button: only when it differs
-    /// from the last-written value. Pure + `nonisolated static` so the issue-#11 CPU-safety
-    /// dedup (an unchanged title is a no-op, KTD3) is unit-testable as a seam.
-    nonisolated static func shouldRewriteTitle(new: String, last: String?) -> Bool {
-        new != last
-    }
+    /// Compose a leading rounded "tag cell" carrying the countdown onto the front of the
+    /// battery image, matching the battery visual language: `[ 3h+ ] [75] [43]`. This renders
+    /// INSIDE the icon image rather than as a floating `button.attributedTitle`, so the timer
+    /// reads as part of the icon, adapts to light/dark with the rest of the render, and the
+    /// IconSignature dedup (which now includes the countdown string) drives a single re-render
+    /// per minute. The cell font is one weight lighter / a touch smaller than the heavy battery
+    /// digits so the timer reads as secondary while staying in the same monospaced family.
+    nonisolated static func imageWithCountdownCell(countdown: String, batteryImage: NSImage, color: NSColor) -> NSImage {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
+        let iconHeight: CGFloat = 18
+        let cellHeight: CGFloat = 14
+        let cornerRadius: CGFloat = 3
+        let gap: CGFloat = 4
+        let hPadding: CGFloat = 4
 
-    /// Compute the current countdown string and, if it differs from `lastTitle`, write it to
-    /// the button as an `attributedTitle` colored for the current menu-bar appearance. An
-    /// empty string clears the title. Deduped against `lastTitle` so an unchanged title is a
-    /// no-op (KTD3). Never touches `button.image` or the `IconSignature` dedup.
-    private func updateCountdownTitle() {
-        guard let button = statusItem.button else { return }
-        let title = Self.countdownTitle(
-            usage: usageService.latestUsage,
-            enabled: UserDefaults.standard.bool(forKey: MenuBarDefaults.showSessionCountdownKey)
-        )
-        guard Self.shouldRewriteTitle(new: title, last: lastTitle) else { return }
-        setButtonTitle(title, on: button)
-        lastTitle = title
-    }
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+        let text = countdown as NSString
+        let textSize = text.size(withAttributes: attrs)
+        let cellWidth = ceil(textSize.width) + hPadding * 2
 
-    /// Re-apply the current title with a freshly resolved color. Used by the appearance KVO
-    /// handler because an `attributedTitle`'s `NSColor` does not auto-adapt to light/dark
-    /// (KTD5). Bypasses the `lastTitle` dedup since the string is unchanged but the color is
-    /// not; skips work when there is no visible title.
-    private func refreshCountdownTitleColor() {
-        guard let button = statusItem.button, let title = lastTitle, !title.isEmpty else { return }
-        setButtonTitle(title, on: button)
-    }
+        let batterySize = batteryImage.size
+        let totalWidth = cellWidth + gap + batterySize.width
 
-    private func setButtonTitle(_ title: String, on button: NSStatusBarButton) {
-        if title.isEmpty {
-            button.attributedTitle = NSAttributedString(string: "")
-            return
+        let image = NSImage(size: NSSize(width: totalWidth, height: iconHeight), flipped: false) { _ in
+            // Cell: rounded-rect outline matching the batteries (1.0pt stroke, cornerRadius 3,
+            // height 14, vertically centered in the 18-tall canvas).
+            let cellY = (iconHeight - cellHeight) / 2
+            color.setStroke()
+            let outline = NSBezierPath(
+                roundedRect: NSRect(x: 0.5, y: cellY, width: cellWidth - 1, height: cellHeight),
+                xRadius: cornerRadius,
+                yRadius: cornerRadius
+            )
+            outline.lineWidth = 1.0
+            outline.stroke()
+
+            // Countdown text centered inside the cell.
+            text.draw(
+                at: NSPoint(x: (cellWidth - textSize.width) / 2, y: (iconHeight - textSize.height) / 2),
+                withAttributes: attrs
+            )
+
+            // Battery image: [cell][gap][battery], full size, vertically aligned.
+            batteryImage.draw(
+                in: NSRect(x: cellWidth + gap, y: (iconHeight - batterySize.height) / 2,
+                           width: batterySize.width, height: batterySize.height),
+                from: .zero,
+                operation: .sourceOver,
+                fraction: 1.0
+            )
+            return true
         }
-        let color: NSColor = isMenuBarDark ? .white : .black
-        button.attributedTitle = NSAttributedString(
-            string: title,
-            attributes: [.foregroundColor: color]
-        )
+        image.isTemplate = false
+        return image
     }
 
     /// Start the dedicated countdown timer when the toggle is on, invalidate it when off.
     /// Interval 60 with 30s tolerance (matching `stalenessTimer`) so the OS can coalesce
-    /// wakes; added to `.common` mode so it fires while menus/tracking are active.
+    /// wakes; added to `.common` mode so it fires while menus/tracking are active. The closure
+    /// re-renders via `updateIcon` with a fresh countdown string. Issue #11 safety: the
+    /// reassignment re-fires the effectiveAppearance KVO, but `shouldReactToAppearanceChange`
+    /// drops same-brightness-bucket fires, and the IconSignature `countdown` field gates the
+    /// render to exactly once per string change - so there is NO cascade, only ~1 render/min.
     private func syncCountdownTimer() {
         let enabled = UserDefaults.standard.bool(forKey: MenuBarDefaults.showSessionCountdownKey)
         if enabled {
             guard countdownTimer == nil else { return }
             let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.updateCountdownTitle()
+                    guard let self else { return }
+                    self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
                 }
             }
             timer.tolerance = 30
@@ -492,6 +515,10 @@ struct IconSignature: Equatable {
     let style: IconStyle
     let isMenuBarDark: Bool
     let render: RenderState
+    /// The composed countdown-cell string ("" when off/none). Part of the signature so a
+    /// per-minute countdown change re-renders the image exactly once - the dedup must observe
+    /// the string change, otherwise the new countdown would never paint.
+    let countdown: String
 }
 
 extension MenuBarController {

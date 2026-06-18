@@ -298,6 +298,25 @@ final class IconSignatureTests: XCTestCase {
         XCTAssertNotEqual(loading, error)
     }
 
+    // MARK: - Countdown drives the per-minute re-render
+
+    // The countdown string is folded into the signature so a per-minute tick ("32m" -> "31m")
+    // re-renders the composed icon exactly once. Two signatures identical except for the
+    // countdown MUST be unequal, otherwise the new countdown would never paint.
+    func testCountdownChange_producesUnequalSignatures() {
+        let usage = RenderStateTests.makeUsage(weeklyUtilization: 50.0)
+        let sig1 = makeSignature(isAuthenticated: true, usage: usage, countdown: "32m")
+        let sig2 = makeSignature(isAuthenticated: true, usage: usage, countdown: "31m")
+        XCTAssertNotEqual(sig1, sig2)
+    }
+
+    func testCountdownEmptyVsPresent_producesUnequalSignatures() {
+        let usage = RenderStateTests.makeUsage(weeklyUtilization: 50.0)
+        let off = makeSignature(isAuthenticated: true, usage: usage, countdown: "")
+        let on = makeSignature(isAuthenticated: true, usage: usage, countdown: "4h+")
+        XCTAssertNotEqual(off, on)
+    }
+
     // MARK: - Helpers
 
     private func makeSignature(
@@ -306,7 +325,8 @@ final class IconSignatureTests: XCTestCase {
         isAuthenticated: Bool = true,
         usage: UsageData? = nil,
         consecutiveFailures: Int = 0,
-        isStale: Bool = false
+        isStale: Bool = false,
+        countdown: String = ""
     ) -> IconSignature {
         let render = MenuBarController.renderState(
             isAuthenticated: isAuthenticated,
@@ -315,7 +335,7 @@ final class IconSignatureTests: XCTestCase {
             consecutiveFailures: consecutiveFailures,
             isStale: isStale
         )
-        return IconSignature(style: style, isMenuBarDark: isMenuBarDark, render: render)
+        return IconSignature(style: style, isMenuBarDark: isMenuBarDark, render: render, countdown: countdown)
     }
 }
 

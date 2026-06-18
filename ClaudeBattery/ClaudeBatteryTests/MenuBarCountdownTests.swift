@@ -1,11 +1,12 @@
 import XCTest
 @testable import ClaudeBattery
 
-/// Locks the pure `MenuBarController.countdownTitle(usage:enabled:now:)` mapping (U7). The
-/// title rides a path separate from the IconSignature-gated image render; only the string
-/// mapping is unit-tested here. `UsageData` has no public memberwise init, so the fixture
-/// decodes a real `UsageResponse` with a `session` limit and a fixed `resets_at`, then drives
-/// `now` relative to that fixed reset so the deltas are exact and clock-independent.
+/// Locks the pure `MenuBarController.countdownTitle(usage:enabled:now:)` mapping. The returned
+/// string is composed into the menu-bar icon as a leading "tag cell" and folded into the
+/// IconSignature, but only the string mapping is unit-tested here. `UsageData` has no public
+/// memberwise init, so the fixture decodes a real `UsageResponse` with a `session` limit and a
+/// fixed `resets_at`, then drives `now` relative to that fixed reset so the deltas are exact and
+/// clock-independent.
 final class MenuBarCountdownTests: XCTestCase {
 
     /// A fixed epoch inside `ResetDate.dateFromEpoch`'s valid range (roughly 2001-2100),
@@ -98,30 +99,5 @@ final class MenuBarCountdownTests: XCTestCase {
             usage: usage, enabled: true, now: now(secondsBeforeReset: -60)
         )
         XCTAssertEqual(title, "")
-    }
-
-    // MARK: - shouldRewriteTitle (issue-#11 CPU-safety dedup seam, KTD3)
-
-    func testShouldRewriteTitle_equal_isFalse() {
-        XCTAssertFalse(MenuBarController.shouldRewriteTitle(new: "4h+", last: "4h+"))
-    }
-
-    func testShouldRewriteTitle_differing_isTrue() {
-        XCTAssertTrue(MenuBarController.shouldRewriteTitle(new: "4h+", last: "3h+"))
-    }
-
-    func testShouldRewriteTitle_nilLast_isTrue() {
-        // First write (never-written state) always rewrites.
-        XCTAssertTrue(MenuBarController.shouldRewriteTitle(new: "4h+", last: nil))
-    }
-
-    func testShouldRewriteTitle_emptyNewNilLast_isTrue() {
-        // Clearing from never-written is still a write (nil != "").
-        XCTAssertTrue(MenuBarController.shouldRewriteTitle(new: "", last: nil))
-    }
-
-    func testShouldRewriteTitle_bothEmpty_isFalse() {
-        // Already-cleared stays a no-op.
-        XCTAssertFalse(MenuBarController.shouldRewriteTitle(new: "", last: ""))
     }
 }
