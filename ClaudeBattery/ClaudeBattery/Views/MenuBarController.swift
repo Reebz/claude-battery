@@ -398,7 +398,11 @@ class MenuBarController: NSObject {
     /// digits so the timer reads as secondary while staying in the same monospaced family.
     nonisolated static func imageWithCountdownCell(countdown: String, batteryImage: NSImage, color: NSColor) -> NSImage {
         let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
-        let iconHeight: CGFloat = 18
+        // Canvas height derives from the battery image so a taller renderer (the 20x20
+        // DualArcGaugeRenderer) is not clipped or pushed to a negative y in an 18-tall canvas.
+        // Every cell/battery offset below already centers against iconHeight, so this one
+        // constant keeps both aligned across all icon styles.
+        let iconHeight = max(18, batteryImage.size.height)
         let cellHeight: CGFloat = 14
         let cornerRadius: CGFloat = 3
         let gap: CGFloat = 4

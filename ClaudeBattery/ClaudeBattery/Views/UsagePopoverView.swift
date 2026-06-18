@@ -162,7 +162,7 @@ struct UsagePopoverView: View {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(Color(white: 0.25))
+                            .fill(Self.trackColor)
                         RoundedRectangle(cornerRadius: 3)
                             .fill(Self.batteryColor(remainingPercent: timeRemaining))
                             .frame(width: max(0, geo.size.width * timeRemaining / 100))
@@ -172,10 +172,10 @@ struct UsagePopoverView: View {
                 HStack(spacing: 3) {
                     Image(systemName: "clock")
                         .font(.system(size: 8, weight: .medium))
-                        .foregroundColor(Color(white: 0.6))
+                        .foregroundColor(Self.mutedLabelColor)
                     Text("\(Int(timeRemaining.rounded()))%")
                         .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(Color(white: 0.6))
+                        .foregroundColor(Self.mutedLabelColor)
                         .fixedSize()
                 }
             }
@@ -264,6 +264,11 @@ struct UsagePopoverView: View {
         return .green
     }
 
+    /// Shared bar-track gray, so paceBar and unifiedBarRow cannot drift apart.
+    private static let trackColor = Color(white: 0.25)
+    /// Shared muted-label gray used for secondary labels/percent text in the bar rows.
+    private static let mutedLabelColor = Color(white: 0.6)
+
     // MARK: - Pace (U2)
 
     /// Session window length: 5h, consistent with the 5-tick session gauge (A3).
@@ -295,14 +300,14 @@ struct UsagePopoverView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(label)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(Color(white: 0.6))
+                    .foregroundColor(Self.mutedLabelColor)
                 Spacer()
                 trailing()
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 3)
-                        .fill(Color(white: 0.25))
+                        .fill(Self.trackColor)
                     if let remaining = remainingPercent {
                         let clamped = max(0, min(100, remaining))
                         RoundedRectangle(cornerRadius: 3)
