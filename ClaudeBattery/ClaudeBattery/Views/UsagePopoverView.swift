@@ -49,8 +49,6 @@ struct UsagePopoverView: View {
                 usageCreditsSection(credits: credits)
             }
 
-            claudeDesignRow()
-
             // Models card is omitted entirely when no per-model data is present (KTD3);
             // Resets then spans the full width rather than leaving a lonely half-card.
             if usage.modelUsages.isEmpty {
@@ -61,6 +59,8 @@ struct UsagePopoverView: View {
                     modelsCard(usage: usage)
                 }
             }
+
+            claudeDesignRow()
 
             // Account list (hidden when only 1 account)
             if accountStore.accounts.count > 1 {
@@ -111,48 +111,49 @@ struct UsagePopoverView: View {
 
     // MARK: - Cards
 
-    // Grown from 110 to fit the pace bar (U3) under each arc without clipping; both cards
-    // share this so Session and Weekly stay equal height.
-    private let cardHeight: CGFloat = 128
+    // Gauge cards (Session/Weekly) are taller to give the arc and pace bar breathing room (U3).
+    private let gaugeCardHeight: CGFloat = 142
+    // Info cards (Resets/Models) top-align their content under the title (no centered gap).
+    // Height fits up to three model bars (legacy Opus+Sonnet plus All Models) without clipping.
+    private let infoCardHeight: CGFloat = 120
 
     private func sessionCard(usage: UsageData) -> some View {
         UsageCard(title: "Session") {
-            VStack(spacing: 6) {
+            VStack(spacing: 12) {
                 ArcGauge(value: usage.sessionRemaining,
                          color: gaugeColor(for: usage.sessionRemaining),
                          tickCount: 5)
                     .frame(height: 58)
                 paceBar(resetsAt: usage.sessionResetDate,
-                        window: Self.sessionWindow,
-                        usageRemaining: usage.sessionRemaining)
+                        window: Self.sessionWindow)
             }
         }
-        .frame(height: cardHeight)
+        .frame(height: gaugeCardHeight)
     }
 
     private func weeklyCard(usage: UsageData) -> some View {
         UsageCard(title: "Weekly") {
-            VStack(spacing: 6) {
+            VStack(spacing: 12) {
                 ArcGauge(value: usage.weeklyRemaining,
                          color: gaugeColor(for: usage.weeklyRemaining),
                          tickCount: 7)
                     .frame(height: 58)
                 paceBar(resetsAt: usage.weeklyResetDate,
-                        window: Self.weeklyWindow,
-                        usageRemaining: usage.weeklyRemaining)
+                        window: Self.weeklyWindow)
             }
         }
-        .frame(height: cardHeight)
+        .frame(height: gaugeCardHeight)
     }
 
-    /// Thin time-remaining bar under an arc (U3): fills to the time-remaining percent and is
-    /// colored by pace (KTD8), with a small trailing percent label as the non-color cue (KTD9).
+    /// Thin time-remaining bar under an arc (U3): fills to the time-remaining percent and shares
+    /// the arc's remaining-% color scale (batteryColor: <20 red, <45 orange, else green), with a
+    /// small trailing clock glyph + percent label marking it as TIME (the non-color cue, KTD9).
     /// When the reset date is unknown the percent is nil and the bar is omitted entirely (KTD4)
     /// rather than shown as a misleading empty or full track.
-    // Test expectation: none - SwiftUI layout; the fill (timeRemainingPercent) and color
-    // (paceColor) are covered by PaceBarTests (U2).
+    // Test expectation: none - SwiftUI layout; the fill (timeRemainingPercent) is covered by
+    // PaceBarTests (U2) and the color reuses the tested batteryColor scale.
     @ViewBuilder
-    private func paceBar(resetsAt: Date?, window: TimeInterval, usageRemaining: Double) -> some View {
+    private func paceBar(resetsAt: Date?, window: TimeInterval) -> some View {
         if let timeRemaining = Self.timeRemainingPercent(resetsAt: resetsAt, window: window) {
             HStack(spacing: 6) {
                 GeometryReader { geo in
@@ -160,16 +161,23 @@ struct UsagePopoverView: View {
                         RoundedRectangle(cornerRadius: 3)
                             .fill(Color(white: 0.25))
                         RoundedRectangle(cornerRadius: 3)
-                            .fill(Self.paceColor(timeRemaining: timeRemaining, usageRemaining: usageRemaining))
+                            .fill(Self.batteryColor(remainingPercent: timeRemaining))
                             .frame(width: max(0, geo.size.width * timeRemaining / 100))
                     }
                 }
                 .frame(height: 6)
-                Text("\(Int(timeRemaining.rounded()))%")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(Color(white: 0.6))
-                    .fixedSize()
+                HStack(spacing: 3) {
+                    Image(systemName: "clock")
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundColor(Color(white: 0.6))
+                    Text("\(Int(timeRemaining.rounded()))%")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(Color(white: 0.6))
+                        .fixedSize()
+                }
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Time remaining, \(Int(timeRemaining.rounded())) percent")
         }
     }
 
@@ -188,9 +196,9 @@ struct UsagePopoverView: View {
                     resetRow(label: "Weekly", date: usage.weeklyResetDate)
                 }
             }
-            .frame(maxHeight: .infinity, alignment: .center)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
-        .frame(height: cardHeight)
+        .frame(height: infoCardHeight)
     }
 
     /// Bars for the Models card (U4): an "All Models" bar from the real weekly aggregate
@@ -211,9 +219,9 @@ struct UsagePopoverView: View {
                              color: gaugeColor(for: bar.value))
                 }
             }
-            .frame(maxHeight: .infinity, alignment: .center)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
-        .frame(height: cardHeight)
+        .frame(height: infoCardHeight)
     }
 
     // MARK: - Components
@@ -273,16 +281,6 @@ struct UsagePopoverView: View {
         // The `max(0, ...)` lower clamp is defense-in-depth, made unreachable by remainingSeconds'
         // positive-delta guard (a non-positive delta returns nil above); kept regardless.
         return max(0, min(100, percent))
-    }
-
-    /// Pace color encodes the relationship between time- and usage-remaining, not a level, so
-    /// it is a deliberately separate scale (KTD8): deficit = time-remaining% minus usage-remaining%
-    /// (positive = burning faster than the clock). deficit <= 10 green, <= 30 orange, else red.
-    static func paceColor(timeRemaining: Double, usageRemaining: Double) -> Color {
-        let deficit = timeRemaining - usageRemaining
-        if deficit <= 10 { return .green }
-        if deficit <= 30 { return .orange }
-        return .red
     }
 
     @ViewBuilder

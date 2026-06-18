@@ -2,7 +2,8 @@ import XCTest
 import SwiftUI
 @testable import ClaudeBattery
 
-/// Locks the pure pace math and color mapping (U2). The bar itself is SwiftUI layout (U3).
+/// Locks the pure time-remaining math (U2). The bar itself is SwiftUI layout (U3) and reuses
+/// the tested batteryColor scale for its fill.
 final class PaceBarTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -61,33 +62,5 @@ final class PaceBarTests: XCTestCase {
     func testWindowConstants() {
         XCTAssertEqual(UsagePopoverView.sessionWindow, 5 * 3600)
         XCTAssertEqual(UsagePopoverView.weeklyWindow, 7 * 24 * 3600)
-    }
-
-    // MARK: - paceColor (deficit = timeRemaining - usageRemaining)
-
-    func testDeficit51_burningTooFast_red() {
-        // weekly: 71% time left, 20% usage left -> deficit 51 -> red.
-        XCTAssertEqual(UsagePopoverView.paceColor(timeRemaining: 71, usageRemaining: 20), .red)
-    }
-
-    func testDeficit25_moderatelyAhead_orange() {
-        XCTAssertEqual(UsagePopoverView.paceColor(timeRemaining: 50, usageRemaining: 25), .orange)
-    }
-
-    func testDeficit5_onPace_green() {
-        XCTAssertEqual(UsagePopoverView.paceColor(timeRemaining: 50, usageRemaining: 45), .green)
-    }
-
-    func testNegativeDeficit_underPace_green() {
-        // Usage remaining exceeds time remaining (burning slower than the clock) -> safe.
-        XCTAssertEqual(UsagePopoverView.paceColor(timeRemaining: 20, usageRemaining: 80), .green)
-    }
-
-    func testBoundary_deficit10_green() {
-        XCTAssertEqual(UsagePopoverView.paceColor(timeRemaining: 50, usageRemaining: 40), .green)
-    }
-
-    func testBoundary_deficit30_orange() {
-        XCTAssertEqual(UsagePopoverView.paceColor(timeRemaining: 60, usageRemaining: 30), .orange)
     }
 }
