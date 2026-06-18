@@ -1,6 +1,6 @@
 # Change Log
 
-### v1.49
+### v1.50
 
 **Sign-In Reliability & Opt-In Diagnostics**
 - Getting signed in is more reliable for accounts the embedded window could not finish on its own. A clear "use an email code" prompt steers you to the path that works in-app, the "Finishing sign-in" screen now recovers with "Try again" or "Sign in manually" instead of leaving a blank window, and a manual cookie-paste fallback covers Google-federated and passkey-only accounts (issues #7, #17, #25).
@@ -16,7 +16,13 @@
 - The credits section was rebuilt around the usage API's current shape. It shows whether spend-based usage is enabled, paused, or just a balance, reads the currency from each value (an Australian account now sees A$ instead of $), and shows the true percentage when you are over your limit (for example 103%) instead of capping the label at 100%. The rolling balance guess from v1.48 is gone.
 - Usage bars turn orange below 45% remaining and red below 20%, a little earlier than before, so a low window stands out sooner.
 - The "Claude Design" row now reads "Shares standard usage limits" instead of "Coming soon", since Claude Design draws from the same shared usage pool rather than a separate meter.
-- 343 automated tests (up from 173).
+
+**Popover & Menu-Bar Polish**
+- The Session and Weekly cards now show a time-remaining bar beneath each gauge, colored by your pace - green when you are on or under pace, red when you are burning through the window faster than the clock. A small clock icon and a percent label mark the bar as time, so the reading does not depend on color alone.
+- The Models card now leads with an All Models bar (your combined weekly usage) above the per-model bars, so the total is the first thing you see.
+- Usage Credits and Prepaid Balance now share a single line. The balance is pinned to the right and never truncates, while the status text flexes to fit.
+- A new opt-in setting puts a compact session countdown (for example 4h+, then 32m) as a small tag left of the menu-bar icon, drawn in the same visual language as the battery digits. It refreshes about once a minute and rides the issue #11 CPU-fix path, so it does not spin the CPU.
+- 383 automated tests (up from 173).
 
 ### v1.48
 
