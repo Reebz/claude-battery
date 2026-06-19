@@ -879,11 +879,9 @@ public sealed record OrgSelection
     public Guid AccountId { get; private init; }
 
     /// Non-null for <see cref="OrgSelectionKind.NeedsChoice"/>: the orgs to present in the picker.
+    /// Both the WebView and manual-paste call sites read this directly (the prior <c>Choices</c> alias
+    /// was removed in issue #22).
     public IReadOnlyList<Organization>? Orgs { get; private init; }
-
-    /// Alias for <see cref="Orgs"/> (the manual-paste call site reads <c>Choices</c>); both surface
-    /// the same picker list for <see cref="OrgSelectionKind.NeedsChoice"/>.
-    public IReadOnlyList<Organization>? Choices => Orgs;
 
     public static OrgSelection Single(Organization org) =>
         new() { Kind = OrgSelectionKind.Single, Org = org };

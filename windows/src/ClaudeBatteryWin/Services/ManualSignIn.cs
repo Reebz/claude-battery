@@ -14,8 +14,9 @@ namespace ClaudeBatteryWin.Services;
 /// the manual path, built on the same primitives the AuthManager will reuse: the shared
 /// <see cref="IClaudeApi"/> for org discovery and the <see cref="AccountStore"/> for add/re-auth
 /// and cookie priming. The pure validation (<see cref="ParsePastedCredentials"/>,
-/// <see cref="Sanitize"/>, <see cref="SelectOrg"/>) is static so it unit-tests without any network
-/// or registry, and the async router (<see cref="SignInAsync"/>) drives the picker contract.
+/// <see cref="Sanitize"/>) is static so it unit-tests without any network or registry, and the async
+/// router (<see cref="SignInAsync"/>) drives the picker contract. Org selection itself is the shared
+/// <see cref="AuthManager.SelectOrg"/> rule (no duplicate here).
 ///
 /// <para>
 /// <b>Windows-added validation the Mac did not need.</b> Beyond the Mac's parse, the pasted value is
@@ -114,28 +115,9 @@ public sealed class ManualSignIn
         return null;
     }
 
-    /// <summary>
-    /// Pure org-selection rule (never blindly take orgs[0]; the Mac multi-org 100%/100% bug),
-    /// shared with the WebView path. Single org -> take it; else if an existing account's org is in
-    /// the list -> auto-select that match; else the caller shows a picker. Mirrors the Mac
-    /// <c>AuthManager.selectOrg</c>.
-    /// </summary>
-    public static OrgSelection SelectOrg(IReadOnlyList<Organization> orgs, IReadOnlyList<Account> accounts)
-    {
-        if (orgs.Count == 1)
-        {
-            return OrgSelection.Single(orgs[0]);
-        }
-
-        var existing = accounts.FirstOrDefault(acct => orgs.Any(o => o.Uuid == acct.OrganizationId));
-        if (existing is not null)
-        {
-            var match = orgs.First(o => o.Uuid == existing.OrganizationId);
-            return OrgSelection.AutoMatched(match);
-        }
-
-        return OrgSelection.NeedsChoice(orgs);
-    }
+    // Org selection is the ONE pure rule in AuthManager.SelectOrg (never blindly orgs[0]; the Mac
+    // multi-org 100%/100% bug), shared by the WebView and manual-paste paths. The previously-divergent
+    // copy here was deleted (issue #16) so both paths cannot drift.
 
     // MARK: - Async router (drives org discovery + add/re-auth + the picker contract)
 
@@ -165,6 +147,13 @@ public sealed class ManualSignIn
             return ManualSignInResult.InvalidInput;
         }
 
+        // Org discovery MUST run with the PASTED credential, not the active account's primed jar.
+        // Prime the shared jar with the pasted sessionKey/header first, so GetOrganizationsAsync
+        // resolves the PASTED identity's orgs and an invalid paste actually 401s (issue #13). Every
+        // non-success path below restores the prior active account's cookies, so a failed paste
+        // never leaves a healthy active session clobbered by the (possibly invalid) pasted value.
+        _accountStore.PrimeCookies(parsed.SessionKey, parsed.CookieHeader);
+
         IReadOnlyList<Organization> orgs;
         try
         {
@@ -175,31 +164,43 @@ public sealed class ManualSignIn
             // 401/403. A bare key (no full header) most often means a missing HttpOnly __cf_bm
             // (Cloudflare block): steer the user to paste the full header. Pattern #5: the server is
             // authoritative; we do not guess validity client-side.
+            _accountStore.RestoreActiveCookies();
             return ManualSignInResult.AuthFailed(suggestFullHeader: parsed.CookieHeader is null);
         }
         catch (OperationCanceledException)
         {
+            _accountStore.RestoreActiveCookies();
             throw;
         }
         catch
         {
+            _accountStore.RestoreActiveCookies();
             return ManualSignInResult.ConnectionError;
         }
 
         if (orgs.Count == 0)
         {
+            _accountStore.RestoreActiveCookies();
             return ManualSignInResult.NoOrganizations;
         }
 
         var email = ExtractEmail(orgs) ?? $"Account {_accountStore.Accounts.Count + 1}";
 
-        var selection = SelectOrg(orgs, _accountStore.Accounts);
+        // ONE org-selection rule, shared with the WebView path (AuthManager.SelectOrg); never blindly
+        // orgs[0]. The manual path ignores the carried account id and resolves the account by org id.
+        var selection = AuthManager.SelectOrg(orgs, _accountStore.Accounts);
         if (selection.Kind == OrgSelectionKind.NeedsChoice)
         {
+            // Stash the pasted credential for the pick and restore the active jar in the meantime, so
+            // the active account's poll is undisturbed while the user chooses. CompleteWithChosenOrg
+            // re-primes via UpsertAccount + SwitchTo once a choice is made.
             _pending = (parsed.SessionKey, parsed.CookieHeader, email);
-            return ManualSignInResult.NeedsOrgChoice(selection.Choices!);
+            _accountStore.RestoreActiveCookies();
+            return ManualSignInResult.NeedsOrgChoice(selection.Orgs!);
         }
 
+        // Single / AutoMatched: AddOrReactivate re-primes the jar to the chosen account on success,
+        // so there is nothing to restore here.
         return AddOrReactivate(selection.Org!, parsed.SessionKey, parsed.CookieHeader, email);
     }
 
@@ -237,11 +238,16 @@ public sealed class ManualSignIn
             return ManualSignInResult.AccountLimitReached;
         }
 
-        // Make the just-upserted account active so its session is the one polled. UpsertAccount
-        // already activates the first-ever account and re-primes an in-place re-auth of the active
-        // one; SwitchTo covers the add-a-non-first-account and pick-a-different-org cases.
+        // Make the just-upserted account active so its session is the one polled, but only when it is
+        // not already active. UpsertAccount already activates+bumps the first-ever account and an
+        // in-place re-auth of the active one; an unconditional SwitchTo would double-bump the request
+        // generation (the issue #18 pattern, applied here for parity). SwitchTo still covers the
+        // add-a-non-first-account and pick-a-different-org cases.
         var resolved = _accountStore.Accounts.First(a => a.OrganizationId == org.Uuid);
-        _accountStore.SwitchTo(resolved.Id);
+        if (resolved.Id != _accountStore.ActiveAccountId)
+        {
+            _accountStore.SwitchTo(resolved.Id);
+        }
         DebugLog("Manual sign-in added/reactivated an account");
         return ManualSignInResult.Success(resolved.DisplayName);
     }
@@ -267,8 +273,8 @@ public sealed class ManualSignIn
 public sealed record ParsedCredentials(string SessionKey, string? CookieHeader);
 
 // OrgSelection + OrgSelectionKind are defined once, in AuthManager.cs, and shared by both the
-// WebView (U6/U7) and manual-paste (U11) sign-in paths. ManualSignIn.SelectOrg consumes that single
-// type (it reads .Choices, an alias of .Org's NeedsChoice list); no duplicate is defined here.
+// WebView (U6/U7) and manual-paste (U11) sign-in paths. Both call AuthManager.SelectOrg and read
+// the NeedsChoice list off OrgSelection.Orgs; no duplicate rule and no Choices alias remain.
 
 /// <summary>
 /// Outcome of a manual paste sign-in, the C# port of the Mac <c>ManualSignInResult</c> enum

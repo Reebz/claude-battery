@@ -341,6 +341,25 @@ public sealed class AccountStore
     }
 
     /// <summary>
+    /// Re-prime the shared jar from the CURRENT active account, or clear all claude.ai cookies when
+    /// there is none. Used to undo a transient <see cref="PrimeCookies"/> done for an operation that
+    /// then failed - e.g. manual sign-in primes the pasted credential for org discovery, and on a
+    /// failed discovery the healthy active account's cookies must be restored rather than left
+    /// clobbered by the (possibly invalid) pasted credential.
+    /// </summary>
+    public void RestoreActiveCookies()
+    {
+        if (ActiveAccount is { } active)
+        {
+            ActivateCookies(active);
+        }
+        else
+        {
+            ClearClaudeCookies();
+        }
+    }
+
+    /// <summary>
     /// Replace any claude.ai cookies in the shared jar with the given account's captured set.
     /// Called at every account-becomes-active moment (load, switch, re-auth). Mirrors the Mac
     /// <c>ClaudeAPI.activateCookies</c>: clear first, then inject from <see cref="Account.AllCookieHeader"/>,

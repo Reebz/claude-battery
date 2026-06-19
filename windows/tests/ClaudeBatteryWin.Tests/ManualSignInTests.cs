@@ -56,6 +56,11 @@ public sealed class ManualSignInTests : IDisposable
         public int? AuthFailStatus; // when set, GetOrganizationsAsync throws ClaudeAuthException
         public bool Throw;          // when set, GetOrganizationsAsync throws a transport error
 
+        // When set, the sessionKey cookie present in this jar AT DISCOVERY TIME is recorded, so a
+        // test can assert which credential org discovery actually used (issue #13).
+        public CookieContainer? JarToObserve;
+        public string? SessionKeySeenAtDiscovery;
+
         public Task<UsageApiResponse> GetUsageAsync(string organizationId, CancellationToken cancellationToken)
             => Task.FromResult(new UsageApiResponse());
 
@@ -64,6 +69,11 @@ public sealed class ManualSignInTests : IDisposable
 
         public Task<IReadOnlyList<Organization>> GetOrganizationsAsync(CancellationToken cancellationToken)
         {
+            if (JarToObserve is not null)
+            {
+                SessionKeySeenAtDiscovery =
+                    JarToObserve.GetCookies(new Uri("https://claude.ai"))["sessionKey"]?.Value;
+            }
             if (AuthFailStatus is { } status)
             {
                 throw new ClaudeAuthException(status);
@@ -154,7 +164,7 @@ public sealed class ManualSignInTests : IDisposable
     [Fact]
     public void SelectOrg_SingleOrg_TakesIt()
     {
-        var selection = ManualSignIn.SelectOrg(new[] { Org("o1") }, Array.Empty<Account>());
+        var selection = AuthManager.SelectOrg(new[] { Org("o1") }, Array.Empty<Account>());
         Assert.Equal(OrgSelectionKind.Single, selection.Kind);
         Assert.Equal("o1", selection.Org!.Uuid);
     }
@@ -162,16 +172,16 @@ public sealed class ManualSignInTests : IDisposable
     [Fact]
     public void SelectOrg_MultiOrg_NoExistingMatch_NeedsChoice()
     {
-        var selection = ManualSignIn.SelectOrg(new[] { Org("o1"), Org("o2") }, Array.Empty<Account>());
+        var selection = AuthManager.SelectOrg(new[] { Org("o1"), Org("o2") }, Array.Empty<Account>());
         Assert.Equal(OrgSelectionKind.NeedsChoice, selection.Kind);
-        Assert.Equal(2, selection.Choices!.Count);
+        Assert.Equal(2, selection.Orgs!.Count);
     }
 
     [Fact]
     public void SelectOrg_MultiOrg_ExistingMatch_AutoMatches()
     {
         var existing = new Account { Email = "u@e.com", SessionKey = "sk", OrganizationId = "o2" };
-        var selection = ManualSignIn.SelectOrg(new[] { Org("o1"), Org("o2") }, new[] { existing });
+        var selection = AuthManager.SelectOrg(new[] { Org("o1"), Org("o2") }, new[] { existing });
         Assert.Equal(OrgSelectionKind.AutoMatched, selection.Kind);
         Assert.Equal("o2", selection.Org!.Uuid); // never blindly orgs[0]
     }
@@ -302,6 +312,58 @@ public sealed class ManualSignInTests : IDisposable
         Assert.Single(store.Accounts);
         Assert.Equal(originalId, store.Accounts[0].Id);     // same account, updated in place
         Assert.Equal("sk-new", store.Accounts[0].SessionKey);
+    }
+
+    // ---- issue #13: discovery uses the pasted credential, not the active account's jar ----
+
+    [Fact]
+    public async Task SignIn_DiscoversWithPastedCredential_NotActiveAccountJar()
+    {
+        // Seed + activate account A so the shared jar starts primed with A's session.
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "sk-A", OrganizationId = "org-A",
+            AllCookieHeader = "sessionKey=sk-A; __cf_bm=cfA",
+        });
+        Assert.Equal("sk-A", jar.GetCookies(new Uri("https://claude.ai"))["sessionKey"]!.Value);
+
+        // Paste a DIFFERENT identity (B). Discovery must run with B's credential, not A's.
+        var api = new FakeApi { Orgs = new[] { Org("org-B", email: "b@x.com") }, JarToObserve = jar };
+        var manual = new ManualSignIn(api, store);
+
+        var result = await manual.SignInAsync("sessionKey=sk-B; __cf_bm=cfB");
+
+        Assert.Equal(ManualSignInResult.ResultKind.Success, result.Kind);
+        Assert.Equal("sk-B", api.SessionKeySeenAtDiscovery);    // discovery used the PASTED credential
+        Assert.Equal("org-B", store.ActiveAccount!.OrganizationId);
+        Assert.Equal(2, store.Accounts.Count);                  // A retained, B onboarded
+    }
+
+    [Fact]
+    public async Task SignIn_Failed_RestoresActiveAccountJar_NotLeftClobbered()
+    {
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "sk-A", OrganizationId = "org-A",
+            AllCookieHeader = "sessionKey=sk-A; __cf_bm=cfA",
+        });
+
+        // The pasted credential is tried (so it DID prime), but discovery 401s.
+        var api = new FakeApi { AuthFailStatus = 401, JarToObserve = jar };
+        var manual = new ManualSignIn(api, store);
+
+        var result = await manual.SignInAsync("sessionKey=sk-BAD; __cf_bm=cfBAD");
+
+        Assert.Equal(ManualSignInResult.ResultKind.AuthFailed, result.Kind);
+        Assert.Equal("sk-BAD", api.SessionKeySeenAtDiscovery); // it primed + tried the pasted value
+        // ...but after the failure, account A's cookies are restored - not left as the bad paste.
+        Assert.Equal("sk-A", jar.GetCookies(new Uri("https://claude.ai"))["sessionKey"]!.Value);
+        Assert.Single(store.Accounts);
+        Assert.Equal("org-A", store.ActiveAccount!.OrganizationId);
     }
 
     [Fact]
