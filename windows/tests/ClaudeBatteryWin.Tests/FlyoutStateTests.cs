@@ -514,7 +514,7 @@ public class FlyoutStateTests
         var p = FlyoutPlacement.Compute(trayRect, cursor, workArea, size);
 
         AssertWithinWorkArea(p, size, workArea);
-        Assert.True(p.Top >= workArea.Top, "flyout top must not spill above the work area");
+        Assert.True(p.Y >= workArea.Top, "flyout top must not spill above the work area");
     }
 
     [Fact]
@@ -529,7 +529,7 @@ public class FlyoutStateTests
 
         var p = FlyoutPlacement.Compute(trayRect, cursor, workArea, size);
 
-        Assert.Equal(workArea.Top, p.Top);
+        Assert.Equal(workArea.Top, p.Y);
         Assert.True(p.X >= workArea.Left && p.X + size.Width <= workArea.Right + 0.001);
     }
 

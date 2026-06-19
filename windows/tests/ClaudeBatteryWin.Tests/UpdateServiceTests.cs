@@ -1,3 +1,4 @@
+using System.Net.Http;
 using ClaudeBatteryWin.Services;
 using Xunit;
 

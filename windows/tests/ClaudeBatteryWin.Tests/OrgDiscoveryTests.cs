@@ -1,5 +1,6 @@
 using System.IO;
 using System.Net;
+using System.Net.Http;
 using ClaudeBatteryWin.Models;
 using ClaudeBatteryWin.Services;
 using ClaudeBatteryWin.Views;

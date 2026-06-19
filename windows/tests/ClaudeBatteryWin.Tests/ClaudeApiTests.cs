@@ -458,7 +458,7 @@ public class ClaudeApiTests
     }
 
     /// <summary>Captures Trace/Debug output so the release-build secret-leak assertion can read it.</summary>
-    private sealed class CapturingTraceListener
+    private sealed class CapturingTraceListener : IDisposable
     {
         private readonly StringBuilder _sb = new();
         public TraceListener Listener { get; }
@@ -466,6 +466,8 @@ public class ClaudeApiTests
         public CapturingTraceListener() => Listener = new StringWriterTraceListener(_sb);
 
         public string Text => _sb.ToString();
+
+        public void Dispose() => Listener.Dispose();
 
         private sealed class StringWriterTraceListener : TraceListener
         {
