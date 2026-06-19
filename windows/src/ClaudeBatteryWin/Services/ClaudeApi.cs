@@ -92,7 +92,6 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
             // No credential path: a 401/403 must surface as data, never as a Windows credential
             // prompt (the .NET analog of the Mac ephemeral-session urlCredentialStorage = nil).
             Credentials = null,
-            UseDefaultCredentials = false,
             PreAuthenticate = false,
             AutomaticDecompression = DecompressionMethods.All,
         };
@@ -135,7 +134,6 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
             UseCookies = true,
             CookieContainer = cookieJar,
             Credentials = null,
-            UseDefaultCredentials = false,
             PreAuthenticate = false,
             AutomaticDecompression = DecompressionMethods.All,
         };

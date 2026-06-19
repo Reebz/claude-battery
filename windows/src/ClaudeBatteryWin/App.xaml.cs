@@ -117,7 +117,7 @@ public partial class App : Application
             _showFlyoutEvent,
             (_, _) => Dispatcher.BeginInvoke(new Action(ShowFlyout)),
             state: null,
-            timeout: Timeout.Infinite,
+            timeout: Timeout.InfiniteTimeSpan,
             executeOnlyOnce: false);
 
         base.OnStartup(e);
