@@ -8,7 +8,7 @@ namespace ClaudeBatteryWin.Tests;
 
 /// <summary>
 /// U5 account-store tests: the 5-account cap, org-uniqueness vs in-place re-auth update, switch
-/// concurrency (the load-bearing correctness model — a late prior-generation response can never
+/// concurrency (the load-bearing correctness model - a late prior-generation response can never
 /// flag the new account), corrupt-blob drop-and-reauth, and the last-account-removed cookie clear.
 ///
 /// Each test gets an isolated temp metadata path and secret directory plus a fresh

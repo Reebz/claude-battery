@@ -18,11 +18,11 @@ namespace ClaudeBatteryWin.Views;
 /// <item><b>Ephemeral profile.</b> A unique UDF under <c>%LOCALAPPDATA%\ClaudeBatteryWin\login-udf\</c>
 /// with <c>IsInPrivateModeEnabled = true</c>. Deleted in <see cref="Dispose"/> (the finally path that
 /// fires on exception too), and a startup sweep (<see cref="SweepStaleLoginProfiles"/>) deletes leftover
-/// UDFs from a crash mid-login before the tray icon shows — a crash otherwise leaves an unencrypted
+/// UDFs from a crash mid-login before the tray icon shows - a crash otherwise leaves an unencrypted
 /// session cookie on disk.</item>
 /// <item><b>Cookie capture.</b> <c>CookieManager.GetCookiesAsync(null)</c> polled on a 0.2s timer
 /// while the window is open, plus on <c>NavigationCompleted</c> and <c>HistoryChanged</c>. The
-/// HttpOnly <c>sessionKey</c> + <c>__cf_bm</c> are read directly (no JS <c>document.cookie</c> path —
+/// HttpOnly <c>sessionKey</c> + <c>__cf_bm</c> are read directly (no JS <c>document.cookie</c> path -
 /// it can never see HttpOnly cookies).</item>
 /// <item><b>Navigation gate.</b> <c>NavigationStarting</c> on the main WebView cancels anything the
 /// <see cref="AuthManager"/> rejects (exact-domain claude.ai + about: bootstrap).</item>
@@ -352,7 +352,7 @@ public partial class LoginWindow : Window, ILoginWebView
 
         // Route the popup into a separate hosted WebView2 in the SAME environment so window.opener
         // is preserved and the OAuth callback can postMessage back to the claude.ai page. Setting
-        // e.NewWindow IS the handling here — do NOT also set Handled = true (that would suppress the
+        // e.NewWindow IS the handling here - do NOT also set Handled = true (that would suppress the
         // window instead of hosting it). A deferral keeps the script blocked until NewWindow is set.
         _popupGate = decision.PopupNavigationGate;
         _ = HostPopupAsync(e);
@@ -429,7 +429,7 @@ public partial class LoginWindow : Window, ILoginWebView
     }
 
     /// <summary>
-    /// Read every cookie from the WebView2 profile via <c>GetCookiesAsync(null)</c> — returns HttpOnly
+    /// Read every cookie from the WebView2 profile via <c>GetCookiesAsync(null)</c> - returns HttpOnly
     /// cookies too (<c>sessionKey</c>, <c>__cf_bm</c>), unlike a JS <c>document.cookie</c> read. Maps
     /// each onto a <see cref="CapturedCookie"/> for the manager's funnel. Cookie VALUES are never
     /// logged.

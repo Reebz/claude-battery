@@ -158,7 +158,7 @@ public sealed class AccountStore
 
         if (_accounts.Count >= MaxAccounts)
         {
-            DebugLog($"Cannot add account — limit of {MaxAccounts} reached");
+            DebugLog($"Cannot add account - limit of {MaxAccounts} reached");
             return false;
         }
 
@@ -325,7 +325,7 @@ public sealed class AccountStore
     /// <c>ClaudeAPI.activateCookies(sessionKey:cookieHeader:)</c> the auth flow calls right after
     /// capture: clear every claude.ai cookie first, then inject from <paramref name="cookieHeader"/>,
     /// falling back to <c>sessionKey=&lt;value&gt;</c> when no header was captured. No account or
-    /// generation state is touched — only the jar.
+    /// generation state is touched - only the jar.
     /// </summary>
     public void PrimeCookies(string sessionKey, string? cookieHeader)
     {
@@ -400,7 +400,7 @@ public sealed class AccountStore
     /// <summary>
     /// Parse a <c>"name1=value1; name2=value2"</c> cookie header and add each pair to the shared jar
     /// scoped to <c>.claude.ai</c>. Ported verbatim from the Mac <c>injectCookies</c>:
-    /// split on <c>";"</c> (not <c>"; "</c> — a bare semicolon is valid per RFC 6265 and must not
+    /// split on <c>";"</c> (not <c>"; "</c> - a bare semicolon is valid per RFC 6265 and must not
     /// drop later cookies), trim, split on the first <c>"="</c> only, and skip a pair whose name or
     /// value is empty.
     /// </summary>
@@ -449,7 +449,7 @@ public sealed class AccountStore
     /// <summary>
     /// Load account metadata from disk and re-hydrate each account's secrets from the SecretStore.
     /// An account whose secret blob is missing or will not decrypt is DROPPED (its blob deleted) and
-    /// flagged for re-auth via <see cref="DroppedAccountIds"/> — never a crash. Then the active
+    /// flagged for re-auth via <see cref="DroppedAccountIds"/> - never a crash. Then the active
     /// account is resolved and its cookies primed, mirroring the Mac init.
     /// </summary>
     private void Load()
@@ -478,7 +478,7 @@ public sealed class AccountStore
                 {
                     droppedActive = true;
                 }
-                DebugLog($"Dropped account {meta.Id:N} — secret unavailable (re-auth required)");
+                DebugLog($"Dropped account {meta.Id:N} - secret unavailable (re-auth required)");
             }
         }
 

@@ -11,7 +11,7 @@ namespace ClaudeBatteryWin.Tests;
 /// <summary>
 /// U7 org-discovery tests: the pure <see cref="AuthManager.SelectOrg"/> rule (never <c>orgs[0]</c>),
 /// the multi-org picker that persists exactly the chosen org, the re-auth-updates-in-place path, and
-/// the failure-edge contract — EVERY discovery failure resets the capture guard so a retry can
+/// the failure-edge contract - EVERY discovery failure resets the capture guard so a retry can
 /// capture again, and the login window closes ONLY on success. Driven through the same injectable
 /// fakes as <see cref="AuthManagerTests"/> (defined there), so no real WebView2/HTTP is needed.
 /// </summary>
@@ -144,7 +144,7 @@ public sealed class OrgDiscoveryTests : IDisposable
         Assert.Empty(store.Accounts);
         Assert.Equal(LoginStateKind.Error, manager.LoginState.Kind);
         Assert.False(manager.HasCapturedSession); // guard reset
-        Assert.True(manager.HasActiveLoginWebView); // NOT torn down on failure — user recovers in place
+        Assert.True(manager.HasActiveLoginWebView); // NOT torn down on failure - user recovers in place
     }
 
     // ---- re-auth updates in place --------------------------------------------------------------

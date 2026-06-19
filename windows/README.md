@@ -55,11 +55,11 @@ publishes the self-contained single-file app, runs `vpk pack`, and signs via Sig
 Two spikes must run on a real Windows box before the corresponding assumptions can be trusted in
 production. Neither has run (they need a Windows box, a real claude.ai login, and SignPath):
 
-- **U2 — WebView2 auth + Cloudflare cookie-replay.** `spikes/U2-auth-cloudflare-spike-TODO.md`. The
+- **U2 - WebView2 auth + Cloudflare cookie-replay.** `spikes/U2-auth-cloudflare-spike-TODO.md`. The
   load-bearing test: fire a real `GET /api/organizations/{org}/usage` from a `SocketsHttpHandler`
   seeded with WebView2-captured cookies + the matched UA and assert **200, not 403**. A 403 means the
   TLS/JA3 fingerprint gates the separate-`HttpClient` poll and polling must move into WebView2.
-- **U13 — Velopack + SignPath + single-file packaging.** `spikes/U13-packaging-spike-TODO.md`. Prove
+- **U13 - Velopack + SignPath + single-file packaging.** `spikes/U13-packaging-spike-TODO.md`. Prove
   `vpk pack` + single-file reconciliation + one SignPath submit-and-poll round-trip compose, and that
   WebView2 initializes from the packaged single-file build.
 

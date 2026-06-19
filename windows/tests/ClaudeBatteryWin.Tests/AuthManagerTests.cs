@@ -137,14 +137,14 @@ public sealed class AuthManagerTests : IDisposable
     [Fact]
     public async Task ClosingDuringCapture_CancelsPendingTaskAndReturnsToIdle()
     {
-        // A discovery that never completes on its own — the close must cancel it.
+        // A discovery that never completes on its own - the close must cancel it.
         var api = new FakeClaudeApi { OrganizationsGate = new TaskCompletionSource<IReadOnlyList<Organization>>() };
         var (manager, web, _, _, store) = NewManager(api);
         manager.PresentLogin();
 
         web.RaiseCookiesObserved(new[] { Cookie("sessionKey", "sk"), Cookie("__cf_bm", "cf") });
         // Capture kicks off discovery synchronously up to the gated await, so the in-flight state
-        // is OrgDiscovery (the gate never completes on its own — the close below must cancel it).
+        // is OrgDiscovery (the gate never completes on its own - the close below must cancel it).
         Assert.Equal(LoginStateKind.OrgDiscovery, manager.LoginState.Kind);
 
         // User closes the window mid-discovery.
@@ -194,7 +194,7 @@ public sealed class AuthManagerTests : IDisposable
 
         await manager.LastTimeoutTask!;
 
-        // Terminal idle + window torn down — NOT a stuck signing-in spinner.
+        // Terminal idle + window torn down - NOT a stuck signing-in spinner.
         Assert.Equal(LoginStateKind.Idle, manager.LoginState.Kind);
         Assert.False(manager.HasActiveLoginWebView);
         Assert.True(web.Disposed);

@@ -92,7 +92,7 @@ public partial class OrgPickerView : Window
 /// The production <see cref="IOrgPicker"/>: hosts <see cref="OrgPickerView"/> as a modal dialog and
 /// awaits the user's choice. <see cref="CancelPending"/> honors the resume-once contract: a teardown
 /// (login window closed / timed out) closes the open dialog so the awaiting discovery task resumes
-/// with null instead of leaking — exactly as the Mac <c>resumeOrgPicker</c> did.
+/// with null instead of leaking - exactly as the Mac <c>resumeOrgPicker</c> did.
 /// </summary>
 public sealed class OrgPicker : IOrgPicker
 {

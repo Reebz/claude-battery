@@ -12,7 +12,7 @@ namespace ClaudeBatteryWin.Services;
 /// failure edge (timeout, cancel, org-discovery failure, picker-cancel) resets the guard so a retry
 /// can capture again. A guard left set once caused a permanent re-auth lockout on macOS.</item>
 /// <item><b>Exact-domain validation.</b> <see cref="ShouldAllow(string)"/> matches
-/// <c>claude.ai</c> / <c>.claude.ai</c> with <c>==</c> only — never <c>EndsWith</c>/<c>Contains</c>,
+/// <c>claude.ai</c> / <c>.claude.ai</c> with <c>==</c> only - never <c>EndsWith</c>/<c>Contains</c>,
 /// which would accept <c>evil-claude.ai</c> or <c>claude.ai.evil.com</c> (critical pattern #2).</item>
 /// <item><b>Scheme before host.</b> <see cref="AllowsOAuthPopup(string)"/> checks the <c>about:</c>
 /// scheme BEFORE the host so <c>about:blank</c>/<c>about:srcdoc</c> OAuth bootstrap frames (which
@@ -33,7 +33,7 @@ namespace ClaudeBatteryWin.Services;
 /// <see cref="ILoginWebView"/>, injected via <see cref="ILoginWebViewFactory"/>. The transport is
 /// the U3 <see cref="IClaudeApi"/>. Org-add goes through the U5 <see cref="AccountStore"/>. So the
 /// full state machine, capture funnel, timeout, popup gate, and org discovery are unit-testable on
-/// any platform with a fake webview that raises cookie sets and navigations — no WebView2 needed.
+/// any platform with a fake webview that raises cookie sets and navigations - no WebView2 needed.
 /// The pure predicates (<see cref="ShouldAllow"/>, <see cref="AllowsOAuthPopup"/>,
 /// <see cref="IsAllowedHost"/>, <see cref="SelectOrg"/>) are static and need no instance at all.
 /// </para>
@@ -136,7 +136,7 @@ public sealed class AuthManager
     internal Task? LastTimeoutTask { get; private set; }
 
     // ============================================================================================
-    // Pure predicates — static, no WebView2, directly unit-testable.
+    // Pure predicates - static, no WebView2, directly unit-testable.
     // ============================================================================================
 
     /// <summary>
@@ -146,8 +146,8 @@ public sealed class AuthManager
     ///
     /// Scheme is checked BEFORE host (critical pattern #7): <c>about:blank</c>/<c>about:srcdoc</c>
     /// have no host, so a host guard placed first would silently block them and break the OAuth
-    /// bootstrap. The host check is exact-label only (<c>==</c>) — never <c>EndsWith</c>/<c>Contains</c>
-    /// — so <c>evil-claude.ai</c> and <c>claude.ai.evil.com</c> are rejected (pattern #2).
+    /// bootstrap. The host check is exact-label only (<c>==</c>) - never <c>EndsWith</c>/<c>Contains</c>
+    /// - so <c>evil-claude.ai</c> and <c>claude.ai.evil.com</c> are rejected (pattern #2).
     /// </summary>
     public static bool ShouldAllow(string url)
     {
@@ -247,7 +247,7 @@ public sealed class AuthManager
     /// <summary>
     /// The full OAuth-provider navigation allowlist for popups, ported verbatim from the Mac
     /// <c>isAllowedDomain</c>. Exact apex match (<c>==</c>) plus leading-dot subdomain
-    /// (<c>.X</c> via <c>EndsWith(".X")</c>) for multi-label domains — rejecting attacker-injected
+    /// (<c>.X</c> via <c>EndsWith(".X")</c>) for multi-label domains - rejecting attacker-injected
     /// prefixes like <c>evil.googleapis.com.attacker.com</c> that a bare <c>EndsWith(".googleapis.com")</c>
     /// would accept. Localized Google ccTLD hosts are enumerated (issues #17/#25), never a structural
     /// <c>accounts.google.&lt;any-tld&gt;</c> wildcard.
@@ -284,7 +284,7 @@ public sealed class AuthManager
     /// Google serves "Continue with Google" on country-specific accounts hosts (e.g.
     /// <c>accounts.google.com.tr</c>) that 302 back to <c>accounts.google.com</c>. The allowlist
     /// evaluates the localized host BEFORE the redirect fires, so each is enumerated and matched with
-    /// <c>==</c> for the apex plus a leading-dot <c>EndsWith</c> for subdomains — never a structural
+    /// <c>==</c> for the apex plus a leading-dot <c>EndsWith</c> for subdomains - never a structural
     /// <c>accounts.google.&lt;tld&gt;</c> wildcard (issues #17/#25). Ported verbatim from the Mac set.
     /// </summary>
     public static bool IsLocalizedGoogleAccountsHost(string host)
@@ -414,7 +414,7 @@ public sealed class AuthManager
     /// <summary>
     /// Tear down the login window and all its timers/tasks. Single teardown path (Mac
     /// <c>stopLoginWindow</c>): cancels org discovery and the timeout, resumes any suspended picker
-    /// with null, detaches handlers, and disposes the webview. Does NOT reset the capture guard —
+    /// with null, detaches handlers, and disposes the webview. Does NOT reset the capture guard -
     /// the failure-edge handlers do that explicitly so a success teardown leaves it set.
     /// </summary>
     public void StopLoginWindow()
@@ -496,7 +496,7 @@ public sealed class AuthManager
     /// Arm (or re-arm) the inactivity timeout. Re-armed on every navigation so an actively
     /// signing-in user is never timed out mid-flow (Mac <c>armLoginTimeout</c>). On expiry, every
     /// pending bit of state is reset and the window torn down (a persistent Cloudflare challenge ends
-    /// as a terminal idle, not an infinite spinner — the error surface stays only if a discovery
+    /// as a terminal idle, not an infinite spinner - the error surface stays only if a discovery
     /// failure set it).
     /// </summary>
     private void ArmLoginTimeout()
@@ -817,7 +817,7 @@ public sealed class AuthManager
 
     /// <summary>
     /// Every org-discovery failure edge: clear pending credentials, RESET the capture guard (so the
-    /// still-live session cookie can be re-captured on retry — the lockout-prevention scar), and move
+    /// still-live session cookie can be re-captured on retry - the lockout-prevention scar), and move
     /// to the error state. The window stays open showing the error; it is NOT torn down here. Mirrors
     /// the Mac <c>handleOrgDiscoveryFailure</c>.
     /// </summary>
@@ -857,7 +857,7 @@ public sealed class AuthManager
 
 /// <summary>
 /// The outcome of <see cref="AuthManager.SelectOrg"/> (pattern #6). A discriminated value so the
-/// call site supplies its own imperative shell (a WPF picker vs a manual-paste result) — the rule
+/// call site supplies its own imperative shell (a WPF picker vs a manual-paste result) - the rule
 /// itself stays pure and unit-testable.
 /// </summary>
 public enum OrgSelectionKind
@@ -937,7 +937,7 @@ public sealed record NewWindowDecision
 /// <summary>
 /// The login-window abstraction over a real WebView2 + host window. Lets the
 /// <see cref="AuthManager"/> state machine, capture funnel, timeout, and org discovery be unit-tested
-/// with a fake that raises the events on demand — no WebView2 process required. The WPF
+/// with a fake that raises the events on demand - no WebView2 process required. The WPF
 /// <c>LoginWindow</c> (this folder's .xaml.cs) implements it: ephemeral InPrivate environment,
 /// isolated user-data folder, finally/Dispose deletion, <c>GetCookiesAsync(null)</c> on a 0.2s timer,
 /// and the navigation/popup gates.
@@ -998,7 +998,7 @@ public interface ILoginWebViewFactory
 /// <summary>
 /// Presents the multi-org picker and awaits the user's choice (U7). Returns null on cancel. The
 /// production implementation hosts <c>OrgPickerView</c>; a teardown calls <see cref="CancelPending"/>
-/// so a suspended pick is resumed (with null) instead of leaking the awaiting task — the
+/// so a suspended pick is resumed (with null) instead of leaking the awaiting task - the
 /// resume-once contract from the Mac <c>resumeOrgPicker</c>.
 /// </summary>
 public interface IOrgPicker

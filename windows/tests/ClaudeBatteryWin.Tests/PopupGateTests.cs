@@ -8,7 +8,7 @@ namespace ClaudeBatteryWin.Tests;
 /// auth scars (critical patterns #2 and #7). All assertions hit the static
 /// <see cref="AuthManager.ShouldAllow"/> / <see cref="AuthManager.AllowsOAuthPopup"/> /
 /// <see cref="AuthManager.IsAllowedHost"/> / <see cref="AuthManager.IsLocalizedGoogleAccountsHost"/>
-/// — no WebView2, no instance. These encode documented Mac regressions, so they are written
+/// - no WebView2, no instance. These encode documented Mac regressions, so they are written
 /// test-first per the unit's execution note.
 /// </summary>
 public sealed class PopupGateTests

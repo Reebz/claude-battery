@@ -428,9 +428,9 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     /// "last updated" text. Mirrors the Mac update-row branch.
     public bool HasUpdate => _availableUpdateVersion is not null;
 
-    /// "v1.51 available — Download" link text. Empty when no update. Mac parity (the link copy).
+    /// "v1.51 available - Download" link text. Empty when no update. Mac parity (the link copy).
     public string UpdateLinkText =>
-        _availableUpdateVersion is { } v ? $"v{v} available — Download" : string.Empty;
+        _availableUpdateVersion is { } v ? $"v{v} available - Download" : string.Empty;
 
     /// "Updated just now" / "Updated N minutes ago" / "Not yet updated". Verbatim Mac copy and
     /// thresholds (Views/UsagePopoverView.swift <c>lastUpdatedText</c>).

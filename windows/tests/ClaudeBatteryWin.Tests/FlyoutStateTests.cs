@@ -447,7 +447,7 @@ public class FlyoutStateTests
             AvailableUpdateVersion = "1.51",
         };
         Assert.True(vm.HasUpdate);
-        Assert.Equal("v1.51 available — Download", vm.UpdateLinkText);
+        Assert.Equal("v1.51 available - Download", vm.UpdateLinkText);
     }
 
     [Fact]

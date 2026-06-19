@@ -68,7 +68,7 @@ Build a throwaway WPF app under `windows/spikes/auth-spike/` (do NOT harden it; 
   production `LoginWindow.ReadCookiesAsync` (`GetCookiesAsync(null)`) sees what the funnel needs.
   Missing HttpOnly cookies -> capture is broken; fix before U6 ships.
 - **UDF residual (step 6):** if real session material lands on disk, the sweep/delete paths are
-  load-bearing security, not theatre — keep them. If nothing lands (fully in-memory), the sweep is
+  load-bearing security, not theatre - keep them. If nothing lands (fully in-memory), the sweep is
   cheap insurance; keep it anyway.
 
 ## What the result gates

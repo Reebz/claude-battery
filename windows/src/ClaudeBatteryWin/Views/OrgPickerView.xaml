@@ -11,7 +11,7 @@
     <!-- Multi-org picker (U7). Shown only when org discovery returns multiple orgs with no existing
          account to auto-match. Selecting persists exactly the chosen org; the WebWiew login window
          stays open behind it until a choice is made or the picker is cancelled (cancel resumes the
-         awaiting discovery task with null, which surfaces a recoverable error — never a leaked task). -->
+         awaiting discovery task with null, which surfaces a recoverable error - never a leaked task). -->
     <Window.Resources>
         <SolidColorBrush x:Key="OrgPickerBackgroundBrush" Color="#FF202020" />
         <SolidColorBrush x:Key="OrgPickerForegroundBrush" Color="#FFF3F3F3" />
