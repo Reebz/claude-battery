@@ -164,6 +164,13 @@
       transform: translateY(-1px);
     }
 
+    .btn-disabled {
+      background: var(--bg-alt);
+      color: var(--text-muted);
+      border: 1px dashed var(--border);
+      cursor: not-allowed;
+    }
+
     .btn svg {
       width: 20px;
       height: 20px;
@@ -353,9 +360,9 @@
 
     .install-options {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(3, 1fr);
       gap: 20px;
-      max-width: 680px;
+      max-width: 1020px;
       margin: 0 auto;
     }
 
@@ -440,6 +447,7 @@
       .screenshot { padding: 40px 0 48px; }
       .icon-styles { padding: 48px 0; }
       .install { padding: 48px 0; }
+      .install-options { grid-template-columns: 1fr; max-width: 420px; }
     }
 
     /* ---- Responsive: Phone ---- */
@@ -601,6 +609,14 @@
           <h3>Homebrew</h3>
           <p>If you prefer the command line.</p>
           <div class="code-block">brew install reebz/claude-battery/claude-battery</div>
+        </div>
+        <div class="install-card">
+          <h3>Windows</h3>
+          <p>A native Windows build is on the way.</p>
+          <span class="btn btn-disabled" role="button" aria-disabled="true" tabindex="-1" style="width: 100%; justify-content: center;">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style="width:18px;height:18px"><path d="M3 5.1 10.4 4v7.2H3V5.1Zm0 13.8 7.4 1.1v-7.1H3v6Zm8.2 1.2L21 21v-8.6h-9.8v7.7Zm0-16.2v7.7H21V3l-9.8 1.9Z"/></svg>
+            Install for Windows (coming soon)
+          </span>
         </div>
       </div>
     </div>
