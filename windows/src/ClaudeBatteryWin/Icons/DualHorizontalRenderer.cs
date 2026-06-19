@@ -100,6 +100,43 @@ public abstract record TrayRenderState
 
     /// <summary>Poll in flight, no prior snapshot: solid "...".</summary>
     public sealed record StatusLoading : TrayRenderState;
+
+    // Failure-count thresholds, mirroring UsageService.Constants (StaleFailureThreshold = 3,
+    // ErrorFailureThreshold = 10). Duplicated as literals because those constants are private to the
+    // poller; kept in sync by name.
+    private const int StaleFailureThreshold = 3;
+    private const int ErrorFailureThreshold = 10;
+
+    /// <summary>
+    /// Pure mapping from polling/auth state to the tray render branch, mirroring the Mac
+    /// <c>MenuBarController.renderState</c> selection. A PRESENT snapshot always renders the battery,
+    /// even when stale - the open flyout shows the same reading, so staleness alone must never hide a
+    /// known value behind "..." (issue #9). The stale glyph is reached ONLY with no snapshot, after a
+    /// sustained stale window (&gt;=3 hard failures and past the stale threshold), sitting between the
+    /// &gt;=10 error branch and the first-poll loading branch. Extracted from <c>App</c> so the branch
+    /// order is unit-testable.
+    /// </summary>
+    /// <param name="serviceReady">Whether the polling service exists yet (false very early in startup).</param>
+    public static TrayRenderState Resolve(
+        bool isAuthenticated,
+        bool serviceReady,
+        bool authFailed,
+        UsageSnapshot? latestUsage,
+        int consecutiveFailures,
+        bool isStale)
+    {
+        if (!isAuthenticated) return new Unauthenticated();
+        if (!serviceReady) return new StatusLoading();
+        if (authFailed) return new AuthFailed();
+
+        // A known reading always wins, stale or not (matches the flyout and the Mac).
+        if (latestUsage is { } usage) return new Battery(usage);
+
+        // No snapshot from here down.
+        if (consecutiveFailures >= ErrorFailureThreshold) return new StatusError();
+        if (consecutiveFailures >= StaleFailureThreshold && isStale) return new StatusStale();
+        return new StatusLoading();
+    }
 }
 
 /// <summary>

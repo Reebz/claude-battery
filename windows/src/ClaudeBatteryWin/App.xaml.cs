@@ -347,44 +347,24 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Map the polling/auth state to the tray render branch, mirroring the Mac MenuBarController
-    /// RenderState selection: auth-failed -> faded "!"; an account with a usable snapshot -> the
-    /// battery; no account -> the hollow outline; repeated hard failures with no snapshot -> "!";
-    /// a stale snapshot -> "..."; an in-flight first poll -> a solid "...".
+    /// Map the polling/auth state to the tray render branch. The branch logic lives in the pure,
+    /// unit-tested <see cref="TrayRenderState.Resolve"/>: auth-failed -> faded "!"; an account with a
+    /// usable snapshot -> the battery (even when stale, matching the flyout, issue #9); no account ->
+    /// the hollow outline; with no snapshot, repeated hard failures -> "!", a sustained stale window
+    /// -> "...", an in-flight first poll -> a solid "...".
     /// </summary>
     private TrayRenderState ResolveTrayState()
     {
         var store = _accountStore;
         var svc = _usageService;
 
-        if (store is null || !store.IsAuthenticated)
-        {
-            return new TrayRenderState.Unauthenticated();
-        }
-
-        if (svc is null)
-        {
-            return new TrayRenderState.StatusLoading();
-        }
-
-        if (svc.AuthFailed)
-        {
-            return new TrayRenderState.AuthFailed();
-        }
-
-        if (svc.LatestUsage is { } usage)
-        {
-            return svc.IsStale
-                ? new TrayRenderState.StatusStale()
-                : new TrayRenderState.Battery(usage);
-        }
-
-        if (svc.ConsecutiveFailures >= 10)
-        {
-            return new TrayRenderState.StatusError();
-        }
-
-        return new TrayRenderState.StatusLoading();
+        return TrayRenderState.Resolve(
+            isAuthenticated: store?.IsAuthenticated ?? false,
+            serviceReady: svc is not null,
+            authFailed: svc?.AuthFailed ?? false,
+            latestUsage: svc?.LatestUsage,
+            consecutiveFailures: svc?.ConsecutiveFailures ?? 0,
+            isStale: svc?.IsStale ?? true);
     }
 
     // ============================================================================================
