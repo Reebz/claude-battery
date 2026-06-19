@@ -236,10 +236,45 @@ public class ClaudeApiTests
     // --- Decode guard: snake_case + tolerant resets_at -----------------------------------------
 
     [Fact]
+    public async Task GetUsageAsync_DriftedFieldTypes_DegradePerField_NotThrowWholeBody()
+    {
+        // Strict STJ would throw on these (a bool given a string, scope given a scalar, percent
+        // given a non-numeric string). Routing /usage through the tolerant UsageResponseParser
+        // degrades each bad field to null and still returns a usable response (Mac KTD1). This is
+        // the #1 regression: the production /usage decode is now the per-field-tolerant path.
+        const string body = """
+        {
+          "five_hour": { "utilization": 30.0 },
+          "limits": [
+            {
+              "kind": "weekly_scoped",
+              "percent": "not-a-number",
+              "is_active": "yes",
+              "scope": "unexpected-scalar"
+            }
+          ]
+        }
+        """;
+        var handler = new CapturingHandler(_ => JsonResponse(HttpStatusCode.OK, body));
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        var r = await api.GetUsageAsync("org-1", CancellationToken.None);
+
+        Assert.Equal(30.0, r.FiveHour!.Utilization); // a well-formed field still decodes
+        Assert.NotNull(r.Limits);
+        Assert.Single(r.Limits!);
+        Assert.Equal("weekly_scoped", r.Limits![0].Kind);
+        Assert.Null(r.Limits[0].Percent);  // non-numeric string -> null, not a throw
+        Assert.Null(r.Limits[0].IsActive); // non-bool -> null
+        Assert.Null(r.Limits[0].Scope);    // scalar where an object is expected -> null
+    }
+
+    [Fact]
     public async Task GetUsageAsync_DecodesSnakeCaseAndTolerantResetsAt()
     {
         // Covers the snake_case mapping (five_hour, seven_day_opus, amount_minor, disabled_reason,
-        // display_name, is_active) and the multi-form resets_at the transport's converter handles.
+        // display_name, is_active) and the multi-form resets_at the tolerant parser handles.
         const string body = """
         {
           "five_hour": { "utilization": 42.0, "resets_at": "2026-07-01T12:00:00Z" },

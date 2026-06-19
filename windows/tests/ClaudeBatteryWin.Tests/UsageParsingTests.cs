@@ -42,6 +42,19 @@ public class UsageParsingTests
     }
 
     [Fact]
+    public void ResetsAt_OffsetNaiveIso_ResolvesAsUtc_NotLocalTime()
+    {
+        // An ISO value with no 'Z' and no offset must read as UTC (AssumeUniversal | AdjustToUniversal),
+        // not the host's local zone. The retired RoundtripKind converter read it as local, shifting the
+        // reset instant by the machine offset; this guards that regression now that /usage decodes
+        // through ResetDateParser.
+        var parsed = ResetDateParser.ParseString("2026-07-01T05:00:00");
+        Assert.NotNull(parsed);
+        Assert.Equal(new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero), parsed!.Value.ToUniversalTime());
+        Assert.Equal(TimeSpan.Zero, parsed.Value.Offset); // adjusted to universal, not left at local offset
+    }
+
+    [Fact]
     public void ResetsAt_ParsesIntegerEpoch_Seconds()
     {
         var doc = JsonDocument.Parse(EpochSeconds.ToString());

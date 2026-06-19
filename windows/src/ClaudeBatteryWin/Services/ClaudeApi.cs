@@ -56,12 +56,12 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
     private readonly string _origin;
 
     /// <summary>
-    /// JSON options matching the Mac decoder: <c>convertFromSnakeCase</c> (so <c>five_hour</c>,
-    /// <c>seven_day_opus</c>, <c>amount_minor</c>, <c>disabled_reason</c>, <c>display_name</c>,
-    /// <c>is_active</c>, <c>resets_at</c> map to the C# record properties) and a tolerant
-    /// <c>resets_at</c> converter spanning ISO8601 (with/without fractional seconds), UNIX epoch
-    /// as a number, and epoch as a numeric string (Mac <c>ResetDate.parse</c>, KTD2). Unknown keys
-    /// are ignored so a server-side shape drift degrades rather than throwing the whole decode.
+    /// JSON options for the stable-shape endpoints (credits, organizations): <c>convertFromSnakeCase</c>
+    /// (so <c>billing_type</c>, <c>amount_minor</c> map to the C# record properties), case-insensitive
+    /// names, and number-from-string tolerance. Unknown keys are ignored so a server-side shape drift
+    /// degrades rather than throwing the decode. The <c>/usage</c> body does not use these options - it
+    /// decodes via <see cref="UsageResponseParser"/>, whose <c>resets_at</c> handling lives in the one
+    /// shared <see cref="ResetDateParser"/> (KTD2).
     /// </summary>
     private static readonly JsonSerializerOptions JsonOptions = BuildJsonOptions();
 
@@ -149,8 +149,15 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
     {
         ArgumentException.ThrowIfNullOrEmpty(organizationId);
         var path = $"/api/organizations/{organizationId}/usage";
-        return await SendAndDecodeAsync<UsageApiResponse>(path, throwOnAuth: true, cancellationToken).ConfigureAwait(false)
-               ?? new UsageApiResponse();
+        var bytes = await SendRawAsync(path, throwOnAuth: true, cancellationToken).ConfigureAwait(false);
+
+        // Decode /usage through the tolerant per-field parser (Mac KTD1), NOT strict STJ: a drifted
+        // field type (is_active as a string, percent as a non-numeric string, scope as a scalar)
+        // degrades to null rather than throwing the whole body. UsageResponseParser delegates
+        // resets_at to ResetDateParser (AssumeUniversal | AdjustToUniversal), so an offset-naive ISO
+        // value resolves as UTC. The 25 UsageParsingTests exercise this exact parser, so the tested
+        // decode is the shipped decode.
+        return bytes is { Length: > 0 } ? UsageResponseParser.Parse(bytes) : new UsageApiResponse();
     }
 
     /// <inheritdoc />
@@ -185,11 +192,31 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
     }
 
     /// <summary>
-    /// Build, send, and decode a GET to <paramref name="path"/>. Maps 401/403 to
-    /// <see cref="ClaudeAuthException"/> when <paramref name="throwOnAuth"/> is set; for any other
-    /// non-2xx returns the default (null) so the caller can treat it as a soft failure.
+    /// Build, send, and STJ-decode a GET to <paramref name="path"/> for the small, stable-shape
+    /// endpoints (credits, organizations). The polymorphic, drift-prone <c>/usage</c> body does NOT
+    /// use this path - it decodes via <see cref="UsageResponseParser"/> for per-field tolerance.
+    /// Maps 401/403 to <see cref="ClaudeAuthException"/> when <paramref name="throwOnAuth"/> is set;
+    /// any other non-2xx returns the default (null) so the caller can treat it as a soft failure.
     /// </summary>
     private async Task<T?> SendAndDecodeAsync<T>(string path, bool throwOnAuth, CancellationToken cancellationToken)
+    {
+        var bytes = await SendRawAsync(path, throwOnAuth, cancellationToken).ConfigureAwait(false);
+        if (bytes is not { Length: > 0 })
+        {
+            return default;
+        }
+
+        return JsonSerializer.Deserialize<T>(bytes, JsonOptions);
+    }
+
+    /// <summary>
+    /// Build, send, and return the raw response body bytes for a GET to <paramref name="path"/>.
+    /// Maps 401/403 to <see cref="ClaudeAuthException"/> when <paramref name="throwOnAuth"/> is set;
+    /// any other non-2xx (or an auth status when <paramref name="throwOnAuth"/> is false) returns
+    /// null so the caller treats it as a soft failure. The body is read in full so the caller can
+    /// choose its own decoder (strict STJ for stable shapes, the tolerant parser for <c>/usage</c>).
+    /// </summary>
+    private async Task<byte[]?> SendRawAsync(string path, bool throwOnAuth, CancellationToken cancellationToken)
     {
         using var request = BuildRequest(path);
 
@@ -206,19 +233,16 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
                 throw new ClaudeAuthException(status);
             }
 
-            return default;
+            return null;
         }
 
         if (!response.IsSuccessStatusCode)
         {
             DebugLogUnexpectedStatus(status);
-            return default;
+            return null;
         }
 
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        return await JsonSerializer
-            .DeserializeAsync<T>(stream, JsonOptions, cancellationToken)
-            .ConfigureAwait(false);
+        return await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -250,15 +274,13 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
 
     private static JsonSerializerOptions BuildJsonOptions()
     {
-        var options = new JsonSerializerOptions
+        return new JsonSerializerOptions
         {
             // Mac decoder.keyDecodingStrategy = .convertFromSnakeCase.
             PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
             PropertyNameCaseInsensitive = true,
             NumberHandling = JsonNumberHandling.AllowReadingFromString,
         };
-        options.Converters.Add(new TolerantResetDateConverter());
-        return options;
     }
 
     public void Dispose()
@@ -279,99 +301,5 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
     {
         // Status code only - never the body, which may echo cookie/session material.
         Debug.WriteLine($"[ClaudeApi] Unexpected HTTP status: {status}");
-    }
-}
-
-/// <summary>
-/// Tolerant <c>resets_at</c> reader, the C# port of Mac <c>ResetDate.parse</c> (issue #23, KTD2).
-/// Accepts: a JSON number (UNIX epoch seconds or milliseconds), a numeric string (epoch as text),
-/// and an ISO8601 string with or without fractional seconds. Anything else - or an out-of-range
-/// epoch - decodes to null so a malformed value degrades to "reset time unavailable" rather than
-/// throwing the whole <c>/usage</c> decode or producing a date that traps the countdown math.
-/// Values at or above 1e11 are treated as milliseconds; the result is bounded to roughly the
-/// years 2001-2100, matching the Mac bounds verbatim.
-/// </summary>
-public sealed class TolerantResetDateConverter : JsonConverter<DateTimeOffset?>
-{
-    // Mac dateFromEpoch bounds: seconds > 978_307_200 (2001-01-01) and < 4_102_444_800 (2100-01-01).
-    private const double MinEpochSeconds = 978_307_200d;
-    private const double MaxEpochSeconds = 4_102_444_800d;
-    private const double MillisThreshold = 1e11;
-
-    public override DateTimeOffset? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-    {
-        switch (reader.TokenType)
-        {
-            case JsonTokenType.Null:
-                return null;
-
-            case JsonTokenType.Number:
-                if (reader.TryGetDouble(out var epoch))
-                {
-                    return DateFromEpoch(epoch);
-                }
-                return null;
-
-            case JsonTokenType.String:
-            {
-                var raw = reader.GetString();
-                if (string.IsNullOrEmpty(raw))
-                {
-                    return null;
-                }
-
-                var trimmed = raw.Trim();
-
-                // Epoch as a numeric string.
-                if (double.TryParse(trimmed, System.Globalization.NumberStyles.Float,
-                        System.Globalization.CultureInfo.InvariantCulture, out var epochFromString))
-                {
-                    return DateFromEpoch(epochFromString);
-                }
-
-                // ISO8601 with or without fractional seconds. DateTimeOffset.TryParse with
-                // RoundtripKind handles both the 'Z' and offset forms.
-                if (DateTimeOffset.TryParse(trimmed, System.Globalization.CultureInfo.InvariantCulture,
-                        System.Globalization.DateTimeStyles.RoundtripKind, out var iso))
-                {
-                    return iso;
-                }
-
-                return null;
-            }
-
-            default:
-                // Skip an unexpected object/array so the surrounding decode does not throw.
-                reader.Skip();
-                return null;
-        }
-    }
-
-    public override void Write(Utf8JsonWriter writer, DateTimeOffset? value, JsonSerializerOptions options)
-    {
-        if (value is null)
-        {
-            writer.WriteNullValue();
-        }
-        else
-        {
-            writer.WriteStringValue(value.Value);
-        }
-    }
-
-    private static DateTimeOffset? DateFromEpoch(double value)
-    {
-        if (double.IsNaN(value) || double.IsInfinity(value))
-        {
-            return null;
-        }
-
-        var seconds = value >= MillisThreshold ? value / 1000d : value;
-        if (seconds <= MinEpochSeconds || seconds >= MaxEpochSeconds)
-        {
-            return null;
-        }
-
-        return DateTimeOffset.FromUnixTimeMilliseconds((long)(seconds * 1000d));
     }
 }
