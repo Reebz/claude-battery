@@ -343,6 +343,89 @@ public class UsageServiceTests
         Assert.Null(service.LatestUsage);
     }
 
+    // MARK: - Generation guard (U2): a superseded poll never writes onto the new account
+
+    [Fact]
+    public async Task SupersededByGenerationBump_SuccessWrite_IsDiscarded_NotWrittenOntoNewAccount()
+    {
+        // A generation-N poll passes its cancellation check, then a switch to account B bumps the
+        // generation mid-flight; the success continuation must NOT publish A's snapshot onto B.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var generation = 5;
+        var api = new FakeApi
+        {
+            UsageBehavior = _ =>
+            {
+                generation = 6; // the switch to B lands while this poll is in flight
+                return new UsageApiResponse
+                {
+                    Limits = new[]
+                    {
+                        new UsageLimit { Kind = "session", Percent = 10 },
+                        new UsageLimit { Kind = "weekly_all", Percent = 20 },
+                    },
+                };
+            },
+        };
+
+        using var service = new UsageService(api, net, clock, () => generation);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.Null(service.LatestUsage);              // superseded success write discarded
+        Assert.Null(service.LastSuccessfulFetch);
+        Assert.Equal(0, service.ConsecutiveFailures);
+    }
+
+    [Fact]
+    public async Task SupersededByGenerationBump_AuthFailure_DoesNotSetAuthFailedOnNewAccount()
+    {
+        // The token is NOT cancelled here - only the AccountStore generation advanced. A token-only
+        // guard would miss this and flag the new account; the generation guard discards the 401.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var generation = 1;
+        var api = new FakeApi
+        {
+            UsageBehavior = _ =>
+            {
+                generation = 2;                      // switch to B supersedes this poll
+                throw new ClaudeAuthException(401);  // the late, now-irrelevant 401 from A
+            },
+        };
+
+        using var service = new UsageService(api, net, clock, () => generation);
+        service.StartPolling(Org);
+
+        var authFired = false;
+        service.AuthFailureDetected += (_, _) => authFired = true;
+
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.False(service.AuthFailed); // a superseded generation never flags the new account
+        Assert.False(authFired);
+    }
+
+    [Fact]
+    public async Task SameGeneration_SuccessWrite_StillPublishes()
+    {
+        // Sanity: with the generation source present but unchanged, the normal success write lands.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var generation = 3;
+        var api = new FakeApi();
+
+        using var service = new UsageService(api, net, clock, () => generation);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.NotNull(service.LatestUsage);
+        Assert.Equal(0, service.ConsecutiveFailures);
+    }
+
     // MARK: - Resume tolerance
 
     [Fact]

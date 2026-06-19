@@ -55,6 +55,15 @@ public sealed class UsageService : IDisposable
     private readonly INetworkAvailability _network;
     private readonly ISchedulerClock _clock;
 
+    /// Reads the AccountStore's current request-generation token (U2). Captured at poll dispatch and
+    /// re-checked INSIDE the state-write lock, so a poll superseded by an account switch/re-auth can
+    /// never write its result (usage OR authFailed) onto the now-active account - even in the window
+    /// after the AccountStore bumped its generation but before this poll's own CTS was cancelled
+    /// (OnActiveAccountChanged restarts the poller via Dispatcher.BeginInvoke, so that window is
+    /// real). Null in unit tests that do not exercise the guard; when null the guard is inert and
+    /// only the cancellation token gates writes.
+    private readonly Func<int>? _currentGeneration;
+
     private readonly object _gate = new();
     private bool _isPolling;
     private bool _disposed;
@@ -73,11 +82,17 @@ public sealed class UsageService : IDisposable
     /// polling starts; a null id means "no active account", and a poll is skipped.
     private string? _organizationId;
 
-    public UsageService(IClaudeApi api, INetworkAvailability network, ISchedulerClock clock)
+    /// <param name="currentGeneration">
+    /// Reads the AccountStore's current request-generation token. The integration root wires
+    /// <c>() =&gt; accountStore.CurrentGeneration</c>; tests omit it (the guard is then inert).
+    /// </param>
+    public UsageService(IClaudeApi api, INetworkAvailability network, ISchedulerClock clock,
+        Func<int>? currentGeneration = null)
     {
         _api = api ?? throw new ArgumentNullException(nameof(api));
         _network = network ?? throw new ArgumentNullException(nameof(network));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        _currentGeneration = currentGeneration;
         _network.AvailabilityChanged += OnNetworkAvailabilityChanged;
     }
 
@@ -261,7 +276,14 @@ public sealed class UsageService : IDisposable
         try
         {
             string? org;
-            lock (_gate) { org = _organizationId; }
+            int dispatchGeneration;
+            lock (_gate)
+            {
+                org = _organizationId;
+                // Stamp this poll with the generation current at dispatch; every state write below
+                // re-reads the live generation under the lock and discards if it has advanced (U2).
+                dispatchGeneration = _currentGeneration?.Invoke() ?? 0;
+            }
             if (org is null) return; // no active account; mirror the Mac "Poll skipped" guard
 
             // Connectivity gate: offline polls are DEFERRED, not failed. They do not advance
@@ -290,8 +312,10 @@ public sealed class UsageService : IDisposable
             {
                 // 401/403: hard auth failure. Mirror the Mac: increment, set authFailed, null
                 // usage, stop polling, notify. This is the one HTTP outcome that stops the loop.
+                // The generation guard inside MarkAuthFailed discards a 401 from a superseded
+                // generation so it can never flag the now-active account (U2).
                 if (cancellationToken.IsCancellationRequested) return;
-                MarkAuthFailed();
+                MarkAuthFailed(dispatchGeneration, cancellationToken);
                 return;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -307,7 +331,7 @@ public sealed class UsageService : IDisposable
                 // (only the 401/403 arm does). An offline poll never reaches here: it is gated out
                 // above before any request is issued.
                 if (cancellationToken.IsCancellationRequested) return;
-                if (!tolerateNoNetwork) RecordHardFailure();
+                if (!tolerateNoNetwork) RecordHardFailure(dispatchGeneration, cancellationToken);
                 return;
             }
 
@@ -341,24 +365,27 @@ public sealed class UsageService : IDisposable
                 // A decode/resolution failure on a real 2xx body is a HARD failure (the server
                 // answered but the shape was unusable): advance backoff like the Mac catch arm.
                 if (cancellationToken.IsCancellationRequested) return;
-                RecordHardFailure();
+                RecordHardFailure(dispatchGeneration, cancellationToken);
                 return;
             }
 
             if (cancellationToken.IsCancellationRequested) return;
 
             // Success: publish, reset failure count and authFailed. Mirror the Mac success arm.
-            bool changed;
+            // The generation re-check is INSIDE the lock so it is atomic with the write: a poll
+            // superseded by an account switch never lands its snapshot on the new account (U2).
             lock (_gate)
             {
+                if (cancellationToken.IsCancellationRequested || IsSupersededGeneration(dispatchGeneration))
+                {
+                    return;
+                }
                 LatestUsage = snapshot;
                 LastSuccessfulFetch = _clock.Now;
-                changed = ConsecutiveFailures != 0 || AuthFailed;
                 ConsecutiveFailures = 0;
                 AuthFailed = false;
             }
             RaiseStateChanged(); // snapshot itself changed; always notify
-            _ = changed;
         }
         finally
         {
@@ -366,10 +393,15 @@ public sealed class UsageService : IDisposable
         }
     }
 
-    private void MarkAuthFailed()
+    private void MarkAuthFailed(int dispatchGeneration, CancellationToken cancellationToken)
     {
         lock (_gate)
         {
+            // Discard a 401/403 from a superseded poll: it must never flag the now-active account.
+            if (cancellationToken.IsCancellationRequested || IsSupersededGeneration(dispatchGeneration))
+            {
+                return;
+            }
             ConsecutiveFailures++;
             AuthFailed = true;
             LatestUsage = null;
@@ -379,11 +411,26 @@ public sealed class UsageService : IDisposable
         AuthFailureDetected?.Invoke(this, EventArgs.Empty);
     }
 
-    private void RecordHardFailure()
+    private void RecordHardFailure(int dispatchGeneration, CancellationToken cancellationToken)
     {
-        lock (_gate) { ConsecutiveFailures++; }
+        lock (_gate)
+        {
+            if (cancellationToken.IsCancellationRequested || IsSupersededGeneration(dispatchGeneration))
+            {
+                return;
+            }
+            ConsecutiveFailures++;
+        }
         RaiseStateChanged();
     }
+
+    /// <summary>
+    /// True when the poll's dispatch-time generation is no longer the active one (an account switch
+    /// or re-auth landed). MUST be called inside the <c>_gate</c> lock so the check is atomic with
+    /// the state write it guards. Inert (always false) when no generation source was injected.
+    /// </summary>
+    private bool IsSupersededGeneration(int dispatchGeneration)
+        => _currentGeneration is not null && _currentGeneration() != dispatchGeneration;
 
     private void RaiseStateChanged() => StateChanged?.Invoke(this, EventArgs.Empty);
 

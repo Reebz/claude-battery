@@ -183,7 +183,9 @@ public partial class App : Application
 
         _network = new SystemNetworkAvailability();
         _clock = new SystemSchedulerClock();
-        _usageService = new UsageService(_api, _network, _clock);
+        // The poller reads the AccountStore's request generation live so a poll superseded by an
+        // account switch/re-auth discards its result instead of writing onto the new account (U2).
+        _usageService = new UsageService(_api, _network, _clock, () => _accountStore?.CurrentGeneration ?? 0);
         _usageService.StateChanged += OnUsageStateChanged;
         _usageService.AuthFailureDetected += OnAuthFailureDetected;
 
