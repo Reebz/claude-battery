@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Http;
 using System.Text;
 using ClaudeBatteryWin.Models;
 using ClaudeBatteryWin.Services;
