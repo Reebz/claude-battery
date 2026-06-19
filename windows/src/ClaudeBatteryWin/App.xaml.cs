@@ -286,6 +286,8 @@ public partial class App : Application
 
         // The flyout view-model is the single state machine the borderless window binds against.
         _flyoutViewModel = new FlyoutViewModel();
+        // Tapping a flyout account row switches to it (U15); the VM raises the id, the store switches.
+        _flyoutViewModel.SwitchAccountRequested += id => _accountStore?.SwitchTo(id);
     }
 
     /// <summary>
@@ -493,25 +495,29 @@ public partial class App : Application
         var store = _accountStore;
         var svc = _usageService;
 
-        _flyoutViewModel.IsAuthenticated = store?.IsAuthenticated ?? false;
-        _flyoutViewModel.Accounts = store?.Accounts ?? Array.Empty<Account>();
-        _flyoutViewModel.ActiveAccountId = store?.ActiveAccountId;
-        _flyoutViewModel.CanAddAccount = store?.CanAddAccount ?? true;
-
-        if (svc is not null)
+        // Batch all input setters so the view-model re-resolves ONCE, not once per property (U16/#26).
+        using (_flyoutViewModel.SuspendRefresh())
         {
-            _flyoutViewModel.LatestUsage = svc.LatestUsage;
-            _flyoutViewModel.AuthFailed = svc.AuthFailed;
-            _flyoutViewModel.ConsecutiveFailures = svc.ConsecutiveFailures;
-            _flyoutViewModel.LastSuccessfulFetch = svc.LastSuccessfulFetch;
-        }
+            _flyoutViewModel.IsAuthenticated = store?.IsAuthenticated ?? false;
+            _flyoutViewModel.Accounts = store?.Accounts ?? Array.Empty<Account>();
+            _flyoutViewModel.ActiveAccountId = store?.ActiveAccountId;
+            _flyoutViewModel.CanAddAccount = store?.CanAddAccount ?? true;
 
-        if (_authManager is not null)
-        {
-            _flyoutViewModel.LoginState = _authManager.LoginState;
-        }
+            if (svc is not null)
+            {
+                _flyoutViewModel.LatestUsage = svc.LatestUsage;
+                _flyoutViewModel.AuthFailed = svc.AuthFailed;
+                _flyoutViewModel.ConsecutiveFailures = svc.ConsecutiveFailures;
+                _flyoutViewModel.LastSuccessfulFetch = svc.LastSuccessfulFetch;
+            }
 
-        _flyoutViewModel.AvailableUpdateVersion = _updateService?.AvailableUpdate?.Version;
+            if (_authManager is not null)
+            {
+                _flyoutViewModel.LoginState = _authManager.LoginState;
+            }
+
+            _flyoutViewModel.AvailableUpdateVersion = _updateService?.AvailableUpdate?.Version;
+        }
     }
 
     // ============================================================================================

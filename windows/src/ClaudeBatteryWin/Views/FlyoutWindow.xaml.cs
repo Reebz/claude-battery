@@ -566,3 +566,48 @@ public sealed class GaugeArcConverter : IValueConverter
         return new Point(CenterX + Radius * Math.Cos(radians), CenterY + Radius * Math.Sin(radians));
     }
 }
+
+/// <summary>
+/// Produces the interior tick marks for a <see cref="GaugeCard"/> arc: <c>TickCount</c> short radial
+/// notches (5 for the session gauge, 7 for weekly) spaced evenly across the same 270-degree sweep as
+/// <see cref="GaugeArcConverter"/>. The Mac drew these subtle gauge ticks; they were computed in the
+/// view-model (<c>TickCount</c>) but never rendered (issue #25). Returns an empty geometry for a card
+/// with fewer than two ticks.
+/// </summary>
+public sealed class GaugeTicksConverter : IValueConverter
+{
+    // Same nominal geometry box as GaugeArcConverter so the ticks sit on the arc.
+    private const double BoxSize = 58;
+    private const double Radius = BoxSize / 2 - 3;
+    private const double CenterX = BoxSize / 2;
+    private const double CenterY = BoxSize / 2 + 6;
+    private const double StartAngleDeg = 135;
+    private const double SweepDeg = 270;
+    private const double TickHalfLength = 3.0; // notch length, centered on the track radius
+
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        if (value is not GaugeCard card || card.TickCount < 2)
+        {
+            return Geometry.Empty;
+        }
+
+        var group = new GeometryGroup();
+        for (var i = 0; i < card.TickCount; i++)
+        {
+            var angle = StartAngleDeg + SweepDeg * i / (card.TickCount - 1);
+            var radians = angle * Math.PI / 180.0;
+            var cos = Math.Cos(radians);
+            var sin = Math.Sin(radians);
+            var inner = new Point(CenterX + (Radius - TickHalfLength) * cos, CenterY + (Radius - TickHalfLength) * sin);
+            var outer = new Point(CenterX + (Radius + TickHalfLength) * cos, CenterY + (Radius + TickHalfLength) * sin);
+            group.Children.Add(new LineGeometry(inner, outer));
+        }
+
+        group.Freeze();
+        return group;
+    }
+
+    public object ConvertBack(object value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotSupportedException();
+}

@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Windows.Input;
 using ClaudeBatteryWin.Icons;
 using ClaudeBatteryWin.Models;
 
@@ -231,6 +232,11 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
 
     private readonly Func<DateTimeOffset> _now;
 
+    // When true, input setters skip their per-setter Refresh so a batch of inputs (App's
+    // SyncViewModelFromServices sets ~10 at once) collapses to ONE Refresh on EndUpdate, instead of
+    // N full PropertyChanged(null) re-evaluations (U16/#26).
+    private bool _refreshSuspended;
+
     // The current inputs, set by the integration layer through the setters / Refresh. Defaults
     // describe a freshly launched, signed-out, never-polled app.
     private LoginState _loginState = LoginState.Idle;
@@ -247,6 +253,68 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     public FlyoutViewModel(Func<DateTimeOffset>? now = null)
     {
         _now = now ?? (() => DateTimeOffset.UtcNow);
+        SwitchAccountCommand = new RelayCommand(p =>
+        {
+            if (p is Guid id)
+            {
+                SwitchAccountRequested?.Invoke(id);
+            }
+        });
+    }
+
+    // MARK: - Account switching (U15)
+
+    /// <summary>
+    /// Raised when an account row is activated from the flyout, carrying the row's account id. The
+    /// integration layer subscribes and calls <c>AccountStore.SwitchTo</c> (the flyout VM never owns
+    /// the store). Mirrors the Mac account list switching on tap (issue #15).
+    /// </summary>
+    public event Action<Guid>? SwitchAccountRequested;
+
+    /// <summary>The command an account row binds to; its parameter is the row's <c>Id</c> (a Guid).</summary>
+    public ICommand SwitchAccountCommand { get; }
+
+    /// <summary>
+    /// Run a batch of input mutations with per-setter Refresh suspended, then Refresh once. Returns an
+    /// IDisposable that resumes and refreshes on Dispose, so a using-block collapses ~10 setters to a
+    /// single re-evaluation (U16/#26).
+    /// </summary>
+    public IDisposable SuspendRefresh()
+    {
+        _refreshSuspended = true;
+        return new RefreshScope(this);
+    }
+
+    private void MaybeRefresh()
+    {
+        if (!_refreshSuspended)
+        {
+            Refresh();
+        }
+    }
+
+    private void EndSuspendAndRefresh()
+    {
+        _refreshSuspended = false;
+        Refresh();
+    }
+
+    private sealed class RefreshScope : IDisposable
+    {
+        private readonly FlyoutViewModel _vm;
+        private bool _done;
+
+        public RefreshScope(FlyoutViewModel vm) => _vm = vm;
+
+        public void Dispose()
+        {
+            if (_done)
+            {
+                return;
+            }
+            _done = true;
+            _vm.EndSuspendAndRefresh();
+        }
     }
 
     // MARK: - Inputs (set by the integration layer; each recomputes the derived state)
@@ -254,55 +322,55 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     public LoginState LoginState
     {
         get => _loginState;
-        set { if (!Equals(_loginState, value)) { _loginState = value; Refresh(); } }
+        set { if (!Equals(_loginState, value)) { _loginState = value; MaybeRefresh(); } }
     }
 
     public bool IsAuthenticated
     {
         get => _isAuthenticated;
-        set { if (_isAuthenticated != value) { _isAuthenticated = value; Refresh(); } }
+        set { if (_isAuthenticated != value) { _isAuthenticated = value; MaybeRefresh(); } }
     }
 
     public UsageSnapshot? LatestUsage
     {
         get => _latestUsage;
-        set { _latestUsage = value; Refresh(); }
+        set { _latestUsage = value; MaybeRefresh(); }
     }
 
     public bool AuthFailed
     {
         get => _authFailed;
-        set { if (_authFailed != value) { _authFailed = value; Refresh(); } }
+        set { if (_authFailed != value) { _authFailed = value; MaybeRefresh(); } }
     }
 
     public int ConsecutiveFailures
     {
         get => _consecutiveFailures;
-        set { if (_consecutiveFailures != value) { _consecutiveFailures = value; Refresh(); } }
+        set { if (_consecutiveFailures != value) { _consecutiveFailures = value; MaybeRefresh(); } }
     }
 
     public DateTimeOffset? LastSuccessfulFetch
     {
         get => _lastSuccessfulFetch;
-        set { _lastSuccessfulFetch = value; RaiseChanged(nameof(LastUpdatedText)); }
+        set { _lastSuccessfulFetch = value; if (!_refreshSuspended) { RaiseChanged(nameof(LastUpdatedText)); } }
     }
 
     public IReadOnlyList<Account> Accounts
     {
         get => _accounts;
-        set { _accounts = value ?? Array.Empty<Account>(); Refresh(); }
+        set { _accounts = value ?? Array.Empty<Account>(); MaybeRefresh(); }
     }
 
     public Guid? ActiveAccountId
     {
         get => _activeAccountId;
-        set { _activeAccountId = value; Refresh(); }
+        set { _activeAccountId = value; MaybeRefresh(); }
     }
 
     public bool CanAddAccount
     {
         get => _canAddAccount;
-        set { if (_canAddAccount != value) { _canAddAccount = value; Refresh(); } }
+        set { if (_canAddAccount != value) { _canAddAccount = value; MaybeRefresh(); } }
     }
 
     /// The available update version (from <see cref="UpdateService.AvailableUpdate"/>), or null when
@@ -310,7 +378,7 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     public string? AvailableUpdateVersion
     {
         get => _availableUpdateVersion;
-        set { if (_availableUpdateVersion != value) { _availableUpdateVersion = value; Refresh(); } }
+        set { if (_availableUpdateVersion != value) { _availableUpdateVersion = value; MaybeRefresh(); } }
     }
 
     // MARK: - Resolved state
@@ -835,4 +903,27 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
 
     private void RaiseChanged([CallerMemberName] string? propertyName = null)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+}
+
+/// <summary>
+/// Minimal always-executable <see cref="ICommand"/> for view-model commands (the flyout's only
+/// command surface so far is the account-row switch, U15). Kept here rather than a Commands/ folder
+/// until a second command needs it.
+/// </summary>
+public sealed class RelayCommand : ICommand
+{
+    private readonly Action<object?> _execute;
+
+    public RelayCommand(Action<object?> execute) => _execute = execute ?? throw new ArgumentNullException(nameof(execute));
+
+    public bool CanExecute(object? parameter) => true;
+
+    public void Execute(object? parameter) => _execute(parameter);
+
+    // No dynamic CanExecute, so the event is a no-op (satisfies the interface without WPF requery).
+    public event EventHandler? CanExecuteChanged
+    {
+        add { }
+        remove { }
+    }
 }

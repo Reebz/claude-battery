@@ -56,6 +56,7 @@
             <views:BoolToVisibilityConverter x:Key="BoolToVisibility" />
             <views:PercentToWidthConverter x:Key="PercentToWidth" />
             <views:GaugeArcConverter x:Key="GaugeArc" />
+            <views:GaugeTicksConverter x:Key="GaugeTicks" />
 
             <!-- Card surface style: rounded, themed background, the Mac corner radius 12. -->
             <Style x:Key="CardBorderStyle" TargetType="Border">
@@ -83,6 +84,12 @@
                                   StrokeStartLineCap="Round"
                                   StrokeEndLineCap="Round"
                                   Data="{Binding Converter={StaticResource GaugeArc}, ConverterParameter=track}" />
+                            <!-- Interior ticks (5 session / 7 weekly, from the bound TickCount). -->
+                            <Path Stroke="{DynamicResource ArcTickBrush}"
+                                  StrokeThickness="1.5"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  Data="{Binding Converter={StaticResource GaugeTicks}}" />
                             <!-- Fill arc (trimmed to remaining percent, in the remaining color). -->
                             <Path Stroke="{Binding Color, Converter={StaticResource UsageColorToBrush}}"
                                   StrokeThickness="5"
@@ -178,36 +185,52 @@
                 </StackPanel>
             </DataTemplate>
 
-            <!-- One account row: active dot + display name. -->
+            <!-- One account row: a flat clickable button (active dot + display name) that switches to
+                 that account on tap (U15). The command lives on the view-model; the parameter is the
+                 row Id. The flat ControlTemplate keeps the row chrome-free (no default Button hover)
+                 while making the whole row hit-testable via the Transparent background. -->
             <DataTemplate x:Key="AccountRowTemplate" DataType="{x:Type vm:AccountRow}">
-                <Grid Margin="10,5" AutomationProperties.Name="{Binding DisplayName}">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <Ellipse Grid.Column="0"
-                             Width="7"
-                             Height="7"
-                             Margin="0,0,8,0"
-                             VerticalAlignment="Center">
-                        <Ellipse.Style>
-                            <Style TargetType="Ellipse">
-                                <Setter Property="Fill" Value="{DynamicResource LabelSubtleBrush}" />
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding IsActive}" Value="True">
-                                        <Setter Property="Fill" Value="{DynamicResource AccentGreenBrush}" />
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </Ellipse.Style>
-                    </Ellipse>
-                    <TextBlock Grid.Column="1"
-                               Text="{Binding DisplayName}"
-                               FontSize="11"
-                               TextTrimming="CharacterEllipsis"
-                               VerticalAlignment="Center"
-                               Foreground="{DynamicResource ForegroundBrush}" />
-                </Grid>
+                <Button Cursor="Hand"
+                        HorizontalContentAlignment="Stretch"
+                        AutomationProperties.Name="{Binding DisplayName}"
+                        Command="{Binding DataContext.SwitchAccountCommand, RelativeSource={RelativeSource AncestorType={x:Type ItemsControl}}}"
+                        CommandParameter="{Binding Id}">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border Background="Transparent">
+                                <ContentPresenter />
+                            </Border>
+                        </ControlTemplate>
+                    </Button.Template>
+                    <Grid Margin="10,5">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Ellipse Grid.Column="0"
+                                 Width="7"
+                                 Height="7"
+                                 Margin="0,0,8,0"
+                                 VerticalAlignment="Center">
+                            <Ellipse.Style>
+                                <Style TargetType="Ellipse">
+                                    <Setter Property="Fill" Value="{DynamicResource LabelSubtleBrush}" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                            <Setter Property="Fill" Value="{DynamicResource AccentGreenBrush}" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Ellipse.Style>
+                        </Ellipse>
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding DisplayName}"
+                                   FontSize="11"
+                                   TextTrimming="CharacterEllipsis"
+                                   VerticalAlignment="Center"
+                                   Foreground="{DynamicResource ForegroundBrush}" />
+                    </Grid>
+                </Button>
             </DataTemplate>
         </ResourceDictionary>
     </Window.Resources>

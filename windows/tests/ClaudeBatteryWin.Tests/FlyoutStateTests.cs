@@ -542,33 +542,77 @@ public class FlyoutStateTests
         Assert.True(p.Y + size.Height <= workArea.Bottom + tol, $"bottom {p.Y + size.Height} > work-area bottom {workArea.Bottom}");
     }
 
-    // MARK: - Documented manual/visual contracts (no headless assertion possible)
+    // MARK: - Account-row switch command (U15 / issue #15)
 
-    /// <summary>
-    /// Live re-theme: <c>FlyoutWindow.ApplyTheme(bucket)</c> replaces the merged token dictionary so
-    /// every <c>DynamicResource</c> consumer re-resolves WITHOUT close/reopen. This is a visual,
-    /// UI-thread behavior (it requires a constructed Window with a Dispatcher and the token
-    /// dictionaries present), so it is verified by manual QA. The headless guarantee the view-model
-    /// gives is that semantic colors are theme-INVARIANT buckets (asserted by the color-scale tests
-    /// above): only the neutral surface tokens differ by theme, and those are swapped by ApplyTheme.
-    /// </summary>
     [Fact]
-    public void LiveRetheme_IsManualVisualCheck()
+    public void SwitchAccountCommand_RaisesSwitchRequest_WithTheRowId()
     {
-        // Intentionally a no-op assertion documenting the manual gate; the color-bucket tests prove
-        // the semantic colors do not depend on theme, which is the testable half of the contract.
-        Assert.True(true);
+        var vm = new FlyoutViewModel(() => Now);
+        Guid? requested = null;
+        vm.SwitchAccountRequested += id => requested = id;
+
+        var id = Guid.NewGuid();
+        vm.SwitchAccountCommand.Execute(id);
+
+        Assert.Equal(id, requested); // tapping a row raises a switch for that account id
     }
 
-    /// <summary>
-    /// Escape-to-close and Deactivated-dismissal live in the <c>FlyoutWindow</c> code-behind
-    /// (<c>OnKeyDown</c> / <c>OnDeactivated</c>), which require a real Window + input/focus events to
-    /// exercise. They are verified by manual QA. The testable half (the suppression predicate the
-    /// Deactivated handler reads) is covered by <see cref="SuppressDismiss_OnlyWhileLoginInProgress"/>.
-    /// </summary>
     [Fact]
-    public void EscapeAndDeactivatedDismissal_AreManualVisualChecks()
+    public void SwitchAccountCommand_NonGuidParameter_DoesNotRaise()
     {
-        Assert.True(true);
+        var vm = new FlyoutViewModel(() => Now);
+        var raised = false;
+        vm.SwitchAccountRequested += _ => raised = true;
+
+        vm.SwitchAccountCommand.Execute("not-a-guid");
+
+        Assert.False(raised);
     }
+
+    // MARK: - Refresh batching (U16 / issue #26)
+
+    [Fact]
+    public void SuspendRefresh_CollapsesABatchToOneReevaluation()
+    {
+        var vm = new FlyoutViewModel(() => Now);
+        var reevaluations = 0;
+        vm.PropertyChanged += (_, e) => { if (string.IsNullOrEmpty(e.PropertyName)) reevaluations++; };
+
+        using (vm.SuspendRefresh())
+        {
+            vm.IsAuthenticated = true;
+            vm.ConsecutiveFailures = 4;
+            vm.CanAddAccount = false;
+            vm.AvailableUpdateVersion = "1.51";
+        }
+
+        Assert.Equal(1, reevaluations); // one re-eval for the whole batch, not one per setter
+    }
+
+    [Fact]
+    public void WithoutSuspend_EachChangingSetterReevaluates()
+    {
+        var vm = new FlyoutViewModel(() => Now);
+        var reevaluations = 0;
+        vm.PropertyChanged += (_, e) => { if (string.IsNullOrEmpty(e.PropertyName)) reevaluations++; };
+
+        vm.IsAuthenticated = true;
+        vm.ConsecutiveFailures = 4;
+        vm.CanAddAccount = false;
+
+        Assert.Equal(3, reevaluations); // baseline contrast: three changing setters -> three re-evals
+    }
+
+    // MARK: - Manual/visual contracts (no headless assertion possible)
+    //
+    // Two behaviors are verified by manual QA, not unit tests, because they need a real Window with a
+    // Dispatcher and input/focus events:
+    //   - Live re-theme: FlyoutWindow.ApplyTheme(bucket) swaps the merged token dictionary so every
+    //     DynamicResource consumer re-resolves without close/reopen. The testable half (semantic colors
+    //     are theme-invariant buckets) is covered by the color-scale tests above.
+    //   - Escape-to-close and Deactivated-dismissal live in the code-behind (OnKeyDown / OnDeactivated);
+    //     the testable half (the suppression predicate) is covered by SuppressDismiss_OnlyWhileLoginInProgress.
+    // The previous Assert.True(true) placeholder tests were removed (issue #24) so they no longer
+    // inflate the test count with false coverage. The gauge interior ticks (issue #25) are likewise a
+    // visual check; the converter renders TickCount notches and is verified by manual QA.
 }
