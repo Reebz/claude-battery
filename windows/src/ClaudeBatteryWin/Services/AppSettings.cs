@@ -103,6 +103,7 @@ public sealed class AppSettings : IAppSettings
 
     private void Write(State state)
     {
+        var temp = _path + ".tmp";
         try
         {
             var dir = Path.GetDirectoryName(_path);
@@ -111,13 +112,23 @@ public sealed class AppSettings : IAppSettings
                 Directory.CreateDirectory(dir);
             }
             var json = JsonSerializer.SerializeToUtf8Bytes(state);
-            var temp = _path + ".tmp";
             File.WriteAllBytes(temp, json);
             File.Move(temp, _path, overwrite: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             DebugLog("Failed to persist settings (ignored)");
+            // A failed write (e.g. the rename step threw) must not leave an orphaned .tmp behind (U24).
+            try
+            {
+                if (File.Exists(temp))
+                {
+                    File.Delete(temp);
+                }
+            }
+            catch (Exception cleanupEx) when (cleanupEx is IOException or UnauthorizedAccessException)
+            {
+            }
         }
     }
 
