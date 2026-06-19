@@ -8,7 +8,7 @@ Your Claude usage at a glance. A macOS menu bar widget that shows your Claude se
 <div class="styles-grid">
         <div class="style-item">
           <div class="style-preview">
-            <img src="https://claudebattery.com/images/style-dual-horizontal.png" alt="Dual Horizontal icon style showing two side-by-side battery icons with percentages">
+            <img src="https://github.com/user-attachments/assets/2a9b06c6-b724-4ee1-83c7-12f5253cae39" alt="Dual Horizontal icon style showing two side-by-side battery icons with percentages">
       </div>
 
 ## Why a battery?
@@ -75,8 +75,8 @@ Right-click the menu bar icon for Settings, Notification customization, and to Q
 - Switch between accounts instantly from the popover
 - Custom nicknames per account
 
-<img src="https://claudebattery.com/images/popover-screenshot.png">
-
+<img src="https://github.com/user-attachments/assets/cd6b6446-320b-43ed-a77e-a9b3053d4d4f" />
+<br>
 <div class="styles-grid">
         <div class="style-item">
           <div class="style-preview">
