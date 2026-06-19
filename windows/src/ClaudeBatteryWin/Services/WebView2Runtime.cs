@@ -12,9 +12,9 @@ namespace ClaudeBatteryWin.Services;
 /// service is the uninstalled-later safety net.
 ///
 /// Before any login, the app asks <see cref="IsAvailable"/>. When the runtime is absent, login is
-/// blocked and a separate <c>RuntimeMissingWindow</c> (not a flyout state -- see
-/// <see cref="Models.RenderState"/>, which deliberately has no runtime-missing variant) intercepts
-/// the tray click and drives <see cref="EnsureRuntimeAsync"/>, which runs the Evergreen
+/// blocked and a separate <c>RuntimeMissingWindow</c> (a distinct window, not a flyout/tray render
+/// state, which has no runtime-missing variant) intercepts the tray click and drives
+/// <see cref="EnsureRuntimeAsync"/>, which runs the Evergreen
 /// bootstrapper silently. A failed or offline bootstrap surfaces a retry, never a blank window or
 /// a crash.
 ///

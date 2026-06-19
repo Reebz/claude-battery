@@ -59,6 +59,22 @@ public class ClaudeApiTests
     }
 
     [Fact]
+    public async Task GetUsageAsync_EscapesPathSpecialCharsInOrgId()
+    {
+        // A server-supplied org id with path-special chars must be percent-encoded so it cannot
+        // inject extra path segments or a query string into the request URL (U20/#23).
+        var handler = new CapturingHandler(_ => JsonResponse(HttpStatusCode.OK, "{}"));
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        await api.GetUsageAsync("org/../evil?x", CancellationToken.None);
+
+        var uri = handler.LastRequest!.Uri;
+        Assert.Empty(uri.Query);                      // the '?' was escaped, not left as a query
+        Assert.EndsWith("/usage", uri.AbsolutePath);  // no path-segment injection; shape preserved
+    }
+
+    [Fact]
     public async Task GetCreditsAsync_TargetsPrepaidCreditsEndpoint()
     {
         var handler = new CapturingHandler(_ => JsonResponse(HttpStatusCode.OK, "{\"amount\":500,\"currency\":\"USD\"}"));

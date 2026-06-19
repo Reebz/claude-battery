@@ -813,14 +813,12 @@ public partial class App : Application
 
     private void SubscribeSystemEvents()
     {
-        // NOTE: A windowless WPF app may not pump the hidden message loop these broadcasts need.
-        // If PowerModeChanged / UserPreferenceChanged are NOT observed to fire in this configuration
-        // (verify by toggling the system theme and suspending the machine), the fallback is to host
-        // a hidden message-only window and subscribe to WM_POWERBROADCAST / WM_SETTINGCHANGE on its
-        // WndProc. The U1 verification step covers this; the ThemeWatcher also self-subscribes to
-        // UserPreferenceChanged for the theme path.
+        // NOTE: A windowless WPF app may not pump the hidden message loop PowerModeChanged needs. If
+        // it is NOT observed to fire windowless (verify by suspending the machine), the fallback is a
+        // hidden message-only window handling WM_POWERBROADCAST on its WndProc (U10, field-gated). The
+        // theme path (UserPreferenceChanged) is owned entirely by the ThemeWatcher, which
+        // self-subscribes; App does not duplicate that subscription (U23/#21).
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
-        SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
     }
 
     private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
@@ -838,12 +836,6 @@ public partial class App : Application
                 RefreshIcon();
             }));
         }
-    }
-
-    private void OnUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
-    {
-        // The ThemeWatcher self-subscribes and owns the filter/debounce/dedup. This handler stays as
-        // the documented entry point + future hook; the theme path is fully handled in ThemeWatcher.
     }
 
     // ============================================================================================
@@ -865,7 +857,6 @@ public partial class App : Application
     private void ReleaseForShutdown()
     {
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
-        SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
 
         _countdownTimer?.Stop();
         _countdownTimer = null;

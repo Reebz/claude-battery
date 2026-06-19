@@ -5,6 +5,9 @@
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <RootNamespace>ClaudeBatteryWin</RootNamespace>
     <AssemblyName>ClaudeBatteryWin</AssemblyName>
+    <!-- Single source of truth for the release version (mirrors the Mac MARKETING_VERSION). pack.ps1
+         reads <Version> from here in its no-arg form (U17/#4); bump it per release. -->
+    <Version>1.50.0</Version>
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

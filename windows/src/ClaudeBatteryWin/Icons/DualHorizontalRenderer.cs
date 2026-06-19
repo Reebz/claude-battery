@@ -76,8 +76,8 @@ public static class CountdownFormat
 /// <summary>
 /// The resolved render branch for the tray icon, mirroring the Mac <c>RenderState</c> selection in
 /// MenuBarController. The renderer draws a battery glyph only for <see cref="Battery"/>; the other
-/// branches draw a status/auth glyph. Kept distinct from the flyout's <see cref="RenderState"/>
-/// enum because the tray needs the usage payload inline for the battery branch.
+/// branches draw a status/auth glyph. The tray branch carries the usage payload inline for the
+/// battery case, which is why it is a discriminated record rather than a bare enum.
 /// </summary>
 public abstract record TrayRenderState
 {

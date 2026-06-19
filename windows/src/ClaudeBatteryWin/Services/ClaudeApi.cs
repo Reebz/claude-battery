@@ -148,7 +148,10 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
     public async Task<UsageApiResponse> GetUsageAsync(string organizationId, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(organizationId);
-        var path = $"/api/organizations/{organizationId}/usage";
+        // Escape the server-supplied org id before interpolating it into the path (U20/#23): a
+        // path-special character would otherwise reach the URL unescaped. Same-origin GET, low risk,
+        // but a defensive default.
+        var path = $"/api/organizations/{Uri.EscapeDataString(organizationId)}/usage";
         var bytes = await SendRawAsync(path, throwOnAuth: true, cancellationToken).ConfigureAwait(false);
 
         // Decode /usage through the tolerant per-field parser (Mac KTD1), NOT strict STJ: a drifted
@@ -164,7 +167,7 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
     public async Task<Credits?> GetCreditsAsync(string organizationId, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrEmpty(organizationId);
-        var path = $"/api/organizations/{organizationId}/prepaid/credits";
+        var path = $"/api/organizations/{Uri.EscapeDataString(organizationId)}/prepaid/credits";
 
         // Credits degrade silently to null on ANY failure (non-2xx, decode error, transport throw)
         // so the caller renders no-credits rather than failing the whole poll (R13). The Mac uses

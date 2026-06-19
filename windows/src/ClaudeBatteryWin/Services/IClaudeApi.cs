@@ -44,8 +44,8 @@ public interface IClaudeApi
 
 /// <summary>
 /// Raised by <see cref="IClaudeApi"/> when claude.ai returns 401 or 403, so the polling layer
-/// (U4) maps it to <see cref="Models.RenderState.AuthFailed"/> (R10) instead of treating it as a
-/// transient transport failure. Carries the offending status code.
+/// (U4) maps it to the auth-failed tray state (R10) instead of treating it as a transient transport
+/// failure. Carries the offending status code.
 /// </summary>
 public sealed class ClaudeAuthException : Exception
 {
