@@ -275,6 +275,7 @@ public sealed class AuthManager
             || host == "appleid.apple.com"
             || host.EndsWith(".appleid.apple.com", StringComparison.Ordinal)
             || host.EndsWith(".icloud.com", StringComparison.Ordinal)
+            || host == "challenges.cloudflare.com"
             || host.EndsWith(".challenges.cloudflare.com", StringComparison.Ordinal)
             || host == "cf-chl-widget.cloudflare.com";
     }

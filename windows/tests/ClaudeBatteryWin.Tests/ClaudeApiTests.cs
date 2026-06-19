@@ -389,7 +389,11 @@ public class ClaudeApiTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             RequestCount++;
-            var headers = request.Headers.ToDictionary(h => h.Key, h => h.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
+            // Capture the RAW, unparsed header values. Enumerating request.Headers directly would
+            // tokenize known headers (notably User-Agent splits into product/comment and rejoins
+            // with a comma), which is a capture artifact, not what TryAddWithoutValidation sent.
+            var headers = request.Headers.NonValidated.ToDictionary(
+                h => h.Key, h => h.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
             LastRequest = new CapturedRequest(request.Method, request.RequestUri!, headers);
             return Task.FromResult(_responder(request));
         }

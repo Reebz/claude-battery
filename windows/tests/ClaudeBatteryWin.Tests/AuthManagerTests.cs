@@ -143,7 +143,9 @@ public sealed class AuthManagerTests : IDisposable
         manager.PresentLogin();
 
         web.RaiseCookiesObserved(new[] { Cookie("sessionKey", "sk"), Cookie("__cf_bm", "cf") });
-        Assert.Equal(LoginStateKind.SigningIn, manager.LoginState.Kind);
+        // Capture kicks off discovery synchronously up to the gated await, so the in-flight state
+        // is OrgDiscovery (the gate never completes on its own — the close below must cancel it).
+        Assert.Equal(LoginStateKind.OrgDiscovery, manager.LoginState.Kind);
 
         // User closes the window mid-discovery.
         web.RaiseClosed();
