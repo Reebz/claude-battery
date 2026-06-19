@@ -57,7 +57,12 @@ public partial class LoginWindow : Window, ILoginWebView
     public event Action<IReadOnlyList<CapturedCookie>>? HistoryChanged;
     public event Action<IReadOnlyList<CapturedCookie>>? CookiesObserved;
     public event Func<string, NewWindowDecision>? NewWindowRequested;
+    public event Action<string>? InitFailed;
     public new event Action? Closed;
+
+    /// Latches a single init failure so it is delivered exactly once even if it fires before the
+    /// AuthManager subscribes (the init kicks off from the ctor; see InitializeWebView2Async).
+    private bool _initFailureRaised;
 
     // Explicit interface event implementations: ILoginWebView declares non-nullable delegate events
     // (no remove ambiguity with the field-like events above; the +=/-= map straight through).
@@ -91,6 +96,12 @@ public partial class LoginWindow : Window, ILoginWebView
         remove => NewWindowRequested -= value;
     }
 
+    event Action<string> ILoginWebView.InitFailed
+    {
+        add => InitFailed += value;
+        remove => InitFailed -= value;
+    }
+
     event Action ILoginWebView.Closed
     {
         add => Closed += value;
@@ -108,7 +119,19 @@ public partial class LoginWindow : Window, ILoginWebView
             Guid.NewGuid().ToString("N"));
 
         _cookiePollTimer = new DispatcherTimer { Interval = CookiePollInterval };
-        _cookiePollTimer.Tick += async (_, _) => await PollCookiesAsync().ConfigureAwait(true);
+        // async-void event handler: a throw escaping here would crash the process mid-login, so the
+        // body is fully guarded (U7). PollCookiesAsync already swallows read failures internally.
+        _cookiePollTimer.Tick += async (_, _) =>
+        {
+            try
+            {
+                await PollCookiesAsync().ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"Cookie poll tick threw: {ex.GetType().Name}");
+            }
+        };
 
         // Escape closes the window (cancel). The base Window.Closed raises our ILoginWebView.Closed.
         PreviewKeyDown += (_, e) =>
@@ -167,6 +190,10 @@ public partial class LoginWindow : Window, ILoginWebView
 
     private async Task InitializeWebView2Async()
     {
+        // Yield first so the rest of this runs AFTER the ctor returns and the AuthManager has wired
+        // InitFailed in PresentLogin; otherwise an early synchronous failure (e.g. UDF creation) would
+        // raise InitFailed before anyone is listening (U6).
+        await Task.Yield();
         try
         {
             // The environment owns the isolated user-data folder; InPrivate mode is a CONTROLLER
@@ -193,9 +220,28 @@ public partial class LoginWindow : Window, ILoginWebView
         catch (Exception ex)
         {
             DebugLog($"WebView2 init failed: {ex.GetType().Name}");
+            // A dead WebView2 has nothing to poll; stop the cookie timer so it does not spin (U6).
+            _cookiePollTimer.Stop();
             // A failed init must not leave an orphaned UDF on disk.
             DeleteUserDataFolder();
+            // Surface the failure so the manager shows an error+retry instead of a silent blank window.
+            RaiseInitFailed("Could not start the sign-in browser. Please try again.");
         }
+    }
+
+    /// <summary>
+    /// Raise <see cref="InitFailed"/> at most once. Both the WebView2 environment init failure and an
+    /// OAuth popup-host init failure (U8) route here, so a second failure cannot stack a second error.
+    /// </summary>
+    private void RaiseInitFailed(string message)
+    {
+        if (_initFailureRaised)
+        {
+            return;
+        }
+
+        _initFailureRaised = true;
+        InitFailed?.Invoke(message);
     }
 
     public void StartCookiePolling() => _cookiePollTimer.Start();
@@ -258,24 +304,40 @@ public partial class LoginWindow : Window, ILoginWebView
 
     private async void OnCoreNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
     {
-        string? ua = null;
-        if (!_hasCapturedUserAgent && WebView.CoreWebView2 is { } core)
+        // async void: a COM throw escaping here would crash the process mid-login, so guard fully (U7).
+        try
         {
-            ua = core.Settings.UserAgent;
-            if (!string.IsNullOrEmpty(ua))
+            string? ua = null;
+            if (!_hasCapturedUserAgent && WebView.CoreWebView2 is { } core)
             {
-                _hasCapturedUserAgent = true;
+                ua = core.Settings.UserAgent;
+                if (!string.IsNullOrEmpty(ua))
+                {
+                    _hasCapturedUserAgent = true;
+                }
             }
-        }
 
-        var cookies = await ReadCookiesAsync().ConfigureAwait(true);
-        NavigationCompleted?.Invoke(new NavigationCompletedInfo { Cookies = cookies, UserAgent = ua });
+            var cookies = await ReadCookiesAsync().ConfigureAwait(true);
+            NavigationCompleted?.Invoke(new NavigationCompletedInfo { Cookies = cookies, UserAgent = ua });
+        }
+        catch (Exception ex)
+        {
+            DebugLog($"NavigationCompleted handler threw: {ex.GetType().Name}");
+        }
     }
 
     private async void OnCoreHistoryChanged(object? sender, object e)
     {
-        var cookies = await ReadCookiesAsync().ConfigureAwait(true);
-        HistoryChanged?.Invoke(cookies);
+        // async void: guard fully so a COM throw cannot crash the process mid-login (U7).
+        try
+        {
+            var cookies = await ReadCookiesAsync().ConfigureAwait(true);
+            HistoryChanged?.Invoke(cookies);
+        }
+        catch (Exception ex)
+        {
+            DebugLog($"HistoryChanged handler threw: {ex.GetType().Name}");
+        }
     }
 
     private void OnCoreNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
@@ -317,6 +379,17 @@ public partial class LoginWindow : Window, ILoginWebView
 
             e.NewWindow = popup.CoreWebView2;
             _popup = popup;
+        }
+        catch (Exception ex)
+        {
+            // EnsureCoreWebView2Async threw after the deferral was taken. Completing it with a null
+            // NewWindow and Handled==false would make WebView2 silently block the popup, so
+            // "Continue with Google" looks dead. Explicitly refuse (Handled = true) and surface a
+            // retry error instead of a silent no-op (U8).
+            DebugLog($"OAuth popup host init failed: {ex.GetType().Name}");
+            TeardownPopup();
+            e.Handled = true;
+            RaiseInitFailed("Could not open the sign-in popup. Please try again.");
         }
         finally
         {

@@ -249,6 +249,24 @@ public sealed class AuthManagerTests : IDisposable
         Assert.Equal("Mozilla/5.0 Edge/Test", manager.CapturedUserAgent);
     }
 
+    // ---- WebView2 init failure surface (U6 / issue #6) -----------------------------------------
+
+    [Fact]
+    public void WebView2InitFailure_ShowsErrorStateWithRetry_NotSilentBlankWindow()
+    {
+        var (manager, web, _, _, _) = NewManager();
+        manager.PresentLogin();
+
+        // The host could not start WebView2 (runtime/profile error). It must surface a visible error
+        // with retry, not leave a blank window with a spinning poll.
+        web.RaiseInitFailed("Could not start the sign-in browser. Please try again.");
+
+        Assert.Equal(LoginStateKind.Error, manager.LoginState.Kind);
+        Assert.Equal("Could not start the sign-in browser. Please try again.", manager.LoginState.Message);
+        Assert.False(manager.HasCapturedSession);     // capture guard reset so a retry can capture
+        Assert.True(manager.HasActiveLoginWebView);   // window stays open showing the error + retry
+    }
+
     // ---- re-auth generation bump (U5 / issue #18) ----------------------------------------------
 
     [Fact]
@@ -341,6 +359,7 @@ internal sealed class FakeLoginWebView : ILoginWebView
     public event Action<IReadOnlyList<CapturedCookie>>? HistoryChanged;
     public event Action<IReadOnlyList<CapturedCookie>>? CookiesObserved;
     public event Func<string, NewWindowDecision>? NewWindowRequested;
+    public event Action<string>? InitFailed;
     public event Action? Closed;
 
     event Func<string, bool> ILoginWebView.NavigationStarting
@@ -373,6 +392,12 @@ internal sealed class FakeLoginWebView : ILoginWebView
         remove => NewWindowRequested -= value;
     }
 
+    event Action<string> ILoginWebView.InitFailed
+    {
+        add => InitFailed += value;
+        remove => InitFailed -= value;
+    }
+
     event Action ILoginWebView.Closed
     {
         add => Closed += value;
@@ -401,6 +426,8 @@ internal sealed class FakeLoginWebView : ILoginWebView
     public void RaiseCookiesObserved(IReadOnlyList<CapturedCookie> cookies) => CookiesObserved?.Invoke(cookies);
 
     public NewWindowDecision RaiseNewWindowRequested(string url) => NewWindowRequested!.Invoke(url);
+
+    public void RaiseInitFailed(string message) => InitFailed?.Invoke(message);
 
     public void RaiseClosed() => Closed?.Invoke();
 }

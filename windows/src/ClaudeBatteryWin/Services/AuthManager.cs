@@ -399,6 +399,7 @@ public sealed class AuthManager
         webView.HistoryChanged += OnHistoryChanged;
         webView.CookiesObserved += OnCookiesObserved;
         webView.NewWindowRequested += OnNewWindowRequested;
+        webView.InitFailed += OnLoginInitFailed;
         webView.Closed += OnWindowClosed;
 
         // Arm the inactivity timeout BEFORE navigating so an un-loaded window cannot wedge open.
@@ -438,6 +439,7 @@ public sealed class AuthManager
             webView.HistoryChanged -= OnHistoryChanged;
             webView.CookiesObserved -= OnCookiesObserved;
             webView.NewWindowRequested -= OnNewWindowRequested;
+            webView.InitFailed -= OnLoginInitFailed;
             webView.Closed -= OnWindowClosed;
             webView.Dispose();
         }
@@ -582,6 +584,14 @@ public sealed class AuthManager
         // OAuth bootstrap. Hand the shell the per-navigation gate to wire onto the popup WebView.
         return NewWindowDecision.AllowWithGate(AllowsOAuthPopup);
     }
+
+    /// <summary>
+    /// The login WebView2 (or its OAuth popup) failed to initialize. Surface a visible error with a
+    /// retry instead of a silent blank window / dead button (U6/U8). Routes through the shared
+    /// failure handler so the capture guard is reset and the window stays open showing the error
+    /// (Try again / Sign in manually); it is not torn down here.
+    /// </summary>
+    private void OnLoginInitFailed(string message) => HandleOrgDiscoveryFailure(message);
 
     // ============================================================================================
     // Capture funnel (U6).
@@ -965,6 +975,13 @@ public interface ILoginWebView : IDisposable
 
     /// A <c>window.open()</c> request; the handler returns the allow/block decision + popup gate.
     event Func<string, NewWindowDecision> NewWindowRequested;
+
+    /// <summary>
+    /// The WebView2 (or its OAuth popup) failed to initialize (runtime/profile error). Carries a
+    /// user-facing message. Without this the window stayed blank with no error and no retry while the
+    /// cookie poll spun (U6/U8). The host raises it once; the manager surfaces an error+retry surface.
+    /// </summary>
+    event Action<string> InitFailed;
 
     /// The user closed the window (the cancel path).
     event Action Closed;
