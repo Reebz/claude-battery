@@ -78,6 +78,10 @@ public sealed class UsageService : IDisposable
     private Task _currentPoll = Task.CompletedTask;
     private CancellationTokenSource? _pollCts;
 
+    /// The task that decides whether to re-arm after a timer fire (U3). Held so a test can await the
+    /// re-arm decision deterministically; never read in production.
+    private Task _rearmAfterFire = Task.CompletedTask;
+
     /// The active organization id to poll. Set by the account-activation boundary (U5) before
     /// polling starts; a null id means "no active account", and a poll is skipped.
     private string? _organizationId;
@@ -162,12 +166,16 @@ public sealed class UsageService : IDisposable
         RestartPolling();
     }
 
-    /// Stop polling: cancel any in-flight poll and disarm the scheduler. Does not clear state.
+    /// Stop polling: cancel any in-flight poll, NULL the CTS so a stopped state is detectable, and
+    /// disarm the scheduler. Does not clear state. Nulling the CTS lets <see cref="ArmNext"/> tell a
+    /// genuinely-stopped poller from a live one (RestartPolling mints a fresh CTS), so the chained
+    /// re-arm cannot resurrect polling after a 401/403 (U3 zombie-timer fix).
     public void StopPolling()
     {
         lock (_gate)
         {
             _pollCts?.Cancel();
+            _pollCts = null;
             _clock.Disarm();
         }
     }
@@ -233,12 +241,15 @@ public sealed class UsageService : IDisposable
 
     /// Arm the scheduler to fire the next poll after <see cref="PollIntervalSeconds"/>. The
     /// callback chains a fresh poll onto the running one, then re-arms - the Mac
-    /// <c>scheduleNextPoll</c> recursion.
+    /// <c>scheduleNextPoll</c> recursion. Guards against re-arming a stopped poller: a 401/403 sets
+    /// <see cref="AuthFailed"/> and <see cref="StopPolling"/> nulls the CTS, so this is a no-op after
+    /// an auth failure (U3) - "stops polling" stays true instead of leaking a no-op timer cycle.
     private void ArmNext()
     {
         lock (_gate)
         {
-            if (_disposed) return;
+            if (_disposed || AuthFailed) return;
+            if (_pollCts is null || _pollCts.IsCancellationRequested) return;
             _clock.Arm(TimeSpan.FromSeconds(PollIntervalSeconds), OnTimerFired);
         }
     }
@@ -255,8 +266,23 @@ public sealed class UsageService : IDisposable
             _currentPoll = ChainAsync(previous, token);
         }
         // Re-arm after the chained poll completes, matching the Mac sequencing. Awaiting the
-        // previous task before the next poll prevents the dropped-poll race the Mac documents.
-        _ = _currentPoll.ContinueWith(_ => ArmNext(), TaskScheduler.Default);
+        // previous task before the next poll prevents the dropped-poll race the Mac documents. The
+        // re-arm is skipped when THIS generation's token was cancelled mid-poll (a 401/403 stop, an
+        // account switch, or shutdown) - otherwise the continuation would resurrect a stopped poller
+        // (U3). ArmNext re-checks AuthFailed/CTS under the lock as a second line of defense.
+        _rearmAfterFire = _currentPoll.ContinueWith(
+            _ => { if (!token.IsCancellationRequested) ArmNext(); },
+            TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Test-only: the re-arm decision task from the most recent timer fire. Awaiting it lets a test
+    /// assert deterministically whether polling re-armed after a 401/403 stop. Never used in
+    /// production (the scheduler drives the loop without this).
+    /// </summary>
+    internal Task WaitForRearmAfterFireAsync()
+    {
+        lock (_gate) { return _rearmAfterFire; }
     }
 
     // MARK: - The poll

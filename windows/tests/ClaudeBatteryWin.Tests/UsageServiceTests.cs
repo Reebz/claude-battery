@@ -262,6 +262,45 @@ public class UsageServiceTests
         Assert.False(clock.IsArmed);
     }
 
+    [Fact]
+    public async Task AfterAuthFailed_TimerFireChain_DoesNotReArm_PollingGenuinelyStops()
+    {
+        // The zombie-timer bug (U3): OnTimerFired's ContinueWith re-armed unconditionally, so a
+        // 401 -> MarkAuthFailed -> StopPolling was immediately undone by the re-arm. Drive a real
+        // timer fire and assert the re-arm is skipped because the generation's token was cancelled.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(401) };
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);   // arms the zero-delay first fire
+        Assert.True(clock.IsArmed);
+
+        clock.Fire();                                  // OnTimerFired -> poll -> 401 -> StopPolling
+        await service.WaitForRearmAfterFireAsync();    // let the re-arm decision run (it must skip)
+
+        Assert.True(service.AuthFailed);
+        Assert.False(clock.IsArmed); // the stopped poller was NOT resurrected by the continuation
+    }
+
+    [Fact]
+    public async Task TimerFireChain_OnSuccess_DoesReArm_ForNextPoll()
+    {
+        // The guard must not over-fire: a normal successful poll re-arms the next one as before.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi();
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+
+        clock.Fire();                               // OnTimerFired -> successful poll
+        await service.WaitForRearmAfterFireAsync(); // re-arm runs
+
+        Assert.NotNull(service.LatestUsage);
+        Assert.True(clock.IsArmed); // the next poll is scheduled
+    }
+
     // MARK: - Credits degradation
 
     [Fact]
@@ -568,4 +607,8 @@ internal sealed class FakeClock : ISchedulerClock
     public void Arm(TimeSpan delay, Action onFire) => _pending = onFire;
 
     public void Disarm() => _pending = null;
+
+    /// Invoke the pending scheduler callback (drives <c>OnTimerFired</c>) exactly as the real timer
+    /// would, so the timer-fire -> re-arm chain can be exercised deterministically.
+    public void Fire() => _pending?.Invoke();
 }
