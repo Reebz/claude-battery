@@ -80,6 +80,11 @@ public partial class App : Application
     // Guards against re-entrant tray clicks while the runtime-missing window is up.
     private bool _runtimeWindowOpen;
 
+    // The LastSuccessfulFetch timestamp the Notifier was last evaluated against, so the weekly-low
+    // toast is evaluated only on a genuine poll success (when the fetch advances), not on every
+    // StateChanged tick incl. hard-failure/auth-failure ticks (issue #19).
+    private DateTimeOffset? _lastNotifiedFetch;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         // --- Velopack MUST run first (U12) ----------------------------------------------------
@@ -635,10 +640,15 @@ public partial class App : Application
     {
         Dispatcher.BeginInvoke(new Action(() =>
         {
-            // Fire the weekly-low toast off the resolved snapshot (Notifier owns the dedup + the
-            // delivery-order fix). Then refresh the icon and the flyout.
-            if (_usageService?.LatestUsage is { } usage && _accountStore?.ActiveAccount is { } active)
+            // Evaluate the weekly-low toast ONLY on a genuine poll success - when LastSuccessfulFetch
+            // has advanced since the last evaluation. StateChanged also fires on hard-failure and
+            // auth-failure ticks (where LatestUsage is the unchanged prior snapshot); re-evaluating
+            // the Notifier there is spurious (issue #19). The Notifier still owns its own dedup latch.
+            var svc = _usageService;
+            if (svc?.LatestUsage is { } usage && _accountStore?.ActiveAccount is { } active
+                && svc.LastSuccessfulFetch is { } fetched && fetched != _lastNotifiedFetch)
             {
+                _lastNotifiedFetch = fetched;
                 _notifier?.Evaluate(active, usage.WeeklyRemaining);
             }
 

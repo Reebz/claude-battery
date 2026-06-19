@@ -249,6 +249,61 @@ public sealed class AuthManagerTests : IDisposable
         Assert.Equal("Mozilla/5.0 Edge/Test", manager.CapturedUserAgent);
     }
 
+    // ---- re-auth generation bump (U5 / issue #18) ----------------------------------------------
+
+    [Fact]
+    public async Task ReAuth_OfActiveAccount_BumpsGenerationExactlyOnce()
+    {
+        var api = new FakeClaudeApi { Orgs = new[] { Org("org-1") } };
+        var (manager, web, _, _, store) = NewManager(api);
+
+        // Seed an active account for org-1 (the first account auto-activates inside UpsertAccount).
+        store.UpsertAccount(new Account { Email = "a@x.com", SessionKey = "old", OrganizationId = "org-1" });
+        Assert.Equal("org-1", store.ActiveAccount!.OrganizationId);
+
+        var genBefore = store.CurrentGeneration;
+        var changes = 0;
+        store.ActiveAccountChanged += () => changes++;
+
+        // Log in again; discovery finds org-1 -> re-auth in place. UpsertAccount re-primes + bumps
+        // ONCE for the active account; the manager must not bump again via a redundant SwitchTo.
+        manager.PresentLogin();
+        web.RaiseCookiesObserved(new[] { Cookie("sessionKey", "sk-new"), Cookie("__cf_bm", "cf") });
+        await manager.LastDiscoveryTask!;
+
+        Assert.Equal(LoginStateKind.Active, manager.LoginState.Kind);
+        Assert.Single(store.Accounts);                           // re-auth in place, no new account
+        Assert.Equal("sk-new", store.ActiveAccount!.SessionKey); // credentials refreshed
+        Assert.Equal(1, changes);                                // exactly one bump, not two
+        Assert.Equal(genBefore + 1, store.CurrentGeneration);
+    }
+
+    [Fact]
+    public async Task ReAuth_OfNonActiveAccount_SwitchesToIt_WithOneBump()
+    {
+        // Mac parity: fetchOrganizationId switches to the logged-in account even when it was not
+        // active. The conditional SwitchTo keeps that, and it is a single bump (UpsertAccount does
+        // not bump a non-active in-place update).
+        var api = new FakeClaudeApi { Orgs = new[] { Org("org-2") } };
+        var (manager, web, _, _, store) = NewManager(api);
+
+        store.UpsertAccount(new Account { Email = "a@x.com", SessionKey = "a", OrganizationId = "org-1" }); // active
+        store.UpsertAccount(new Account { Email = "b@x.com", SessionKey = "b", OrganizationId = "org-2" }); // not active
+        var activeBefore = store.ActiveAccountId;
+
+        var changes = 0;
+        store.ActiveAccountChanged += () => changes++;
+
+        manager.PresentLogin();
+        web.RaiseCookiesObserved(new[] { Cookie("sessionKey", "b-new"), Cookie("__cf_bm", "cf") });
+        await manager.LastDiscoveryTask!;
+
+        Assert.Equal("org-2", store.ActiveAccount!.OrganizationId); // switched to the re-authed account
+        Assert.NotEqual(activeBefore, store.ActiveAccountId);
+        Assert.Equal("b-new", store.ActiveAccount.SessionKey);
+        Assert.Equal(1, changes);                                  // exactly one bump (the SwitchTo)
+    }
+
     // ---- helpers -------------------------------------------------------------------------------
 
     internal static CapturedCookie Cookie(

@@ -785,9 +785,14 @@ public sealed class AuthManager
             return;
         }
 
-        // Activate whichever account now owns this org (new id, or the pre-existing one on re-auth).
+        // Activate whichever account now owns this org (new id, or the pre-existing one on re-auth),
+        // but ONLY when it is not already active. UpsertAccount already activates+bumps the active
+        // account on an in-place re-auth, and auto-activates the very first account; calling SwitchTo
+        // again would double-bump the request generation and superfluously re-activate (issue #18).
+        // Mac parity: fetchOrganizationId switches to the logged-in account (incl. a re-auth of a
+        // non-active one); the only change here is dropping the redundant second bump.
         var owning = _accountStore.Accounts.FirstOrDefault(a => a.OrganizationId == chosenOrg.Uuid);
-        if (owning is not null)
+        if (owning is not null && owning.Id != _accountStore.ActiveAccountId)
         {
             _accountStore.SwitchTo(owning.Id);
         }
