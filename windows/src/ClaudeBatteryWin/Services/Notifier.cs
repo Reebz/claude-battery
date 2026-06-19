@@ -35,6 +35,15 @@ namespace ClaudeBatteryWin.Services;
 /// </para>
 ///
 /// <para>
+/// <b>The residual Focus-Assist gap and its backstop (U13/#14).</b> A toast the OS ACCEPTS
+/// (<c>Setting == Enabled</c>) can still go unshown: Focus Assist "priority only" queues it to the
+/// Action Center, and there is no reliable synchronous "was it shown" signal to gate on. So
+/// <see cref="Evaluate"/> also resets the dedup latch whenever the SESSION window rolls over (a new
+/// ~5h window), bounding worst-case suppression of an accepted-but-unshown toast to one session
+/// window rather than the full weekly window.
+/// </para>
+///
+/// <para>
 /// The decision logic (<see cref="Decide"/>) is a pure function over (enabled, remaining, threshold,
 /// already-notified) so it unit-tests without WinRT. The latch mutation is delegated to an
 /// <see cref="INotifyLatch"/> (the AccountStore in production) and toast delivery to an
@@ -49,6 +58,11 @@ public sealed class Notifier
     private readonly Func<bool> _notificationsEnabled;
     private readonly INotifyLatch _latch;
     private readonly IToastSink _toastSink;
+
+    /// The session-window reset instant last seen per account, so a rollover (a new ~5h window) can
+    /// reset the dedup latch (U13). Bounds worst-case suppression of an OS-accepted-but-unshown toast
+    /// to one session window instead of a full weekly window.
+    private readonly Dictionary<Guid, DateTimeOffset?> _lastSessionReset = new();
 
     public Notifier(Func<bool> notificationsEnabled, INotifyLatch latch, IToastSink toastSink)
     {
@@ -112,15 +126,35 @@ public sealed class Notifier
     /// calls <c>checkAndNotify(account:remaining:)</c> with <c>weeklyRemaining</c>, never the
     /// session value).
     /// </summary>
-    public bool Evaluate(Account account, double weeklyRemaining)
+    public bool Evaluate(Account account, double weeklyRemaining, DateTimeOffset? sessionResetDate = null)
     {
         ArgumentNullException.ThrowIfNull(account);
+
+        // A toast can be accepted by the OS (Setting==Enabled) yet never surfaced - Focus Assist
+        // "priority only" queues it to the Action Center, and there is no reliable synchronous "was
+        // shown" signal. If that toast latched the dedup flag, the user would be suppressed until the
+        // next WEEKLY reset. Bound it: when the session window rolls over (a new ~5h window), clear
+        // the latch so a still-below reading re-attempts delivery (U13/#14).
+        var alreadyNotified = account.DidNotifyBelowThreshold;
+        if (sessionResetDate is not null
+            && _lastSessionReset.TryGetValue(account.Id, out var prior)
+            && prior != sessionResetDate
+            && alreadyNotified)
+        {
+            _latch.SetDidNotify(account.Id, false);
+            alreadyNotified = false;
+            DebugLog("Session window rolled over; dedup latch reset (bounds Focus-Assist suppression)");
+        }
+        if (sessionResetDate is not null)
+        {
+            _lastSessionReset[account.Id] = sessionResetDate;
+        }
 
         var action = Decide(
             _notificationsEnabled(),
             weeklyRemaining,
             account.NotificationThreshold,
-            account.DidNotifyBelowThreshold);
+            alreadyNotified);
 
         switch (action)
         {

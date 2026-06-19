@@ -177,6 +177,54 @@ public sealed class NotifierTests
         Assert.True(latch.Get(account.Id)); // now latched, exactly once delivery succeeded
     }
 
+    // ---- session-window rollover bounds Focus-Assist suppression (U13/#14) ----
+
+    [Fact]
+    public void SessionWindowRollover_ResetsLatch_SoAnAcceptedButUnshownToastRetries()
+    {
+        var latch = new FakeLatch();
+        // The OS ACCEPTS the toast (Deliverable = true) but Focus Assist may have only queued it.
+        var sink = new FakeToastSink { Deliverable = true };
+        var notifier = new Notifier(() => true, latch, sink);
+        var account = NewAccount(threshold: 20);
+
+        var t1 = new DateTimeOffset(2026, 6, 19, 12, 0, 0, TimeSpan.Zero);
+        var t2 = t1.AddHours(5); // the session window rolls over
+
+        // First below-threshold reading: fires + latches against session window t1.
+        Assert.True(notifier.Evaluate(account, weeklyRemaining: 10, sessionResetDate: t1));
+        Assert.Equal(1, sink.Delivered);
+        Assert.True(latch.Get(account.Id));
+
+        // Same session window, still below, already latched: no re-fire (intra-session dedup holds).
+        var latched = account with { DidNotifyBelowThreshold = true };
+        Assert.False(notifier.Evaluate(latched, weeklyRemaining: 10, sessionResetDate: t1));
+        Assert.Equal(1, sink.Delivered);
+
+        // Session window rolled over (t2): the latch is reset, so a still-below reading re-attempts -
+        // the unshown toast is not suppressed for the full week.
+        Assert.True(notifier.Evaluate(latched, weeklyRemaining: 10, sessionResetDate: t2));
+        Assert.Equal(2, sink.Delivered);
+    }
+
+    [Fact]
+    public void SessionResetUnchanged_DoesNotResetLatch()
+    {
+        var latch = new FakeLatch();
+        var sink = new FakeToastSink { Deliverable = true };
+        var notifier = new Notifier(() => true, latch, sink);
+        var account = NewAccount(threshold: 20);
+        var t1 = new DateTimeOffset(2026, 6, 19, 12, 0, 0, TimeSpan.Zero);
+
+        notifier.Evaluate(account, 10, t1); // fire + latch
+        var latched = account with { DidNotifyBelowThreshold = true };
+
+        // Repeated polls inside the SAME window do not re-fire (no spurious latch reset).
+        Assert.False(notifier.Evaluate(latched, 9, t1));
+        Assert.False(notifier.Evaluate(latched, 8, t1));
+        Assert.Equal(1, sink.Delivered);
+    }
+
     // ---- notifications off by default ----
 
     [Fact]

@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -42,10 +43,14 @@ public partial class App : Application
 {
     // Per-user names: the suffix keeps two different Windows users from colliding on a machine
     // with fast-user-switching. The GUID-ish base keeps the names from clashing with other apps.
-    private const string SingleInstanceMutexName = @"Local\ClaudeBatteryWin.SingleInstance.7E2C1B44";
     private const string ShowFlyoutEventName = @"Local\ClaudeBatteryWin.ShowFlyout.7E2C1B44";
 
-    private Mutex? _singleInstanceMutex;
+    // Single-instance gate via an exclusive lock FILE rather than a Mutex. A Mutex is thread-affine
+    // (ReleaseMutex must run on the acquiring thread, else it throws ApplicationException and leaves
+    // the mutex HELD) - that is the update-relaunch double-instance bounce in #10. A FileStream held
+    // with FileShare.None is process-scoped: disposing it frees the lock from ANY thread, and the OS
+    // frees it on process exit even after a crash, so the relaunched instance always becomes primary.
+    private FileStream? _singleInstanceLock;
     private EventWaitHandle? _showFlyoutEvent;
     private RegisteredWaitHandle? _showFlyoutWaitRegistration;
     private TaskbarIcon? _trayIcon;
@@ -77,6 +82,10 @@ public partial class App : Application
     // Per-minute countdown re-render timer and the stale-check timer (mirror the Mac MenuBarController).
     private DispatcherTimer? _countdownTimer;
 
+    // The single reusable theme-debounce timer (U11) and the latest coalesced re-read action.
+    private DispatcherTimer? _themeDebounceTimer;
+    private Action? _themeReevaluate;
+
     // Guards against re-entrant tray clicks while the runtime-missing window is up.
     private bool _runtimeWindowOpen;
 
@@ -94,8 +103,8 @@ public partial class App : Application
         VelopackApp.Build().Run();
 
         // --- Single-instance gate -------------------------------------------------------------
-        // createdNew is false when another instance already holds the mutex.
-        _singleInstanceMutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out var createdNew);
+        // A null lock means another instance already holds the file lock.
+        _singleInstanceLock = TryAcquireSingleInstanceLock();
 
         // The named auto-reset event the running instance waits on; a second launch sets it.
         _showFlyoutEvent = new EventWaitHandle(
@@ -103,15 +112,14 @@ public partial class App : Application
             mode: EventResetMode.AutoReset,
             name: ShowFlyoutEventName);
 
-        if (!createdNew)
+        if (_singleInstanceLock is null)
         {
             // Another instance is already running. Signal it to surface the flyout, then exit
             // WITHOUT showing a tray icon (so a double-launch never yields two icons).
             _showFlyoutEvent.Set();
-            // Release our (non-owning) handles before bailing; we never acquired the mutex.
+            // Release our (non-owning) handles before bailing; we never acquired the lock.
             _showFlyoutEvent.Dispose();
-            _singleInstanceMutex.Dispose();
-            _singleInstanceMutex = null;
+            _showFlyoutEvent = null;
             Shutdown();
             return;
         }
@@ -161,6 +169,48 @@ public partial class App : Application
 
         // Fire the first update check in the background; the flyout/Settings rows read the result.
         _ = CheckForUpdatesAsync();
+    }
+
+    // ============================================================================================
+    // Single-instance lock (U12)
+    // ============================================================================================
+
+    /// <summary>
+    /// Acquire the process-scoped single-instance lock, or return null when another instance already
+    /// holds it. Uses an exclusive (<c>FileShare.None</c>) handle on a per-user lock file: unlike a
+    /// Mutex it is NOT thread-affine, so it can be released from any thread, and the OS frees it on
+    /// process exit even after a crash - eliminating the thread-affine-release double-instance bounce.
+    /// </summary>
+    private static FileStream? TryAcquireSingleInstanceLock()
+    {
+        try
+        {
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ClaudeBatteryWin");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "singleinstance.lock");
+            return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException)
+        {
+            return null; // already held by another running instance
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Free the single-instance lock immediately (from any thread). Idempotent. Called LAST in the
+    /// shutdown/relaunch teardown so a relaunch (incl. an update restart, U12) can acquire it without
+    /// bouncing off our predecessor; also the direct fallback when the dispatcher is unreachable.
+    /// </summary>
+    internal void ReleaseSingleInstanceLock()
+    {
+        _singleInstanceLock?.Dispose();
+        _singleInstanceLock = null;
     }
 
     // ============================================================================================
@@ -649,7 +699,8 @@ public partial class App : Application
                 && svc.LastSuccessfulFetch is { } fetched && fetched != _lastNotifiedFetch)
             {
                 _lastNotifiedFetch = fetched;
-                _notifier?.Evaluate(active, usage.WeeklyRemaining);
+                // Pass the session reset so the Notifier can clear its latch on a window rollover (U13).
+                _notifier?.Evaluate(active, usage.WeeklyRemaining, usage.SessionResetDate);
             }
 
             RefreshIcon();
@@ -702,22 +753,33 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// The debounce scheduler the <see cref="ThemeWatcher"/> uses: post the coalesced re-read onto
-    /// a one-shot WPF <see cref="DispatcherTimer"/> after a short window, so a burst of General
-    /// broadcasts during a theme swap collapses to one re-read on the UI thread.
+    /// The debounce scheduler the <see cref="ThemeWatcher"/> uses: coalesce a burst of General
+    /// broadcasts during a theme swap onto a SINGLE re-read after a short window. Uses ONE reusable
+    /// <see cref="DispatcherTimer"/> restarted on each broadcast, not a fresh timer per broadcast -
+    /// the latter was a fan-out (N broadcasts -> N timers -> N re-reads) that also leaked timers
+    /// because none was ever stopped on shutdown (U11/#16).
     /// </summary>
     private void ScheduleThemeDebounced(Action reevaluate)
     {
-        var timer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        _themeReevaluate = reevaluate;
+        if (_themeDebounceTimer is null)
         {
-            Interval = TimeSpan.FromMilliseconds(250),
-        };
-        timer.Tick += (_, _) =>
-        {
-            timer.Stop();
-            reevaluate();
-        };
-        timer.Start();
+            _themeDebounceTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+            {
+                Interval = TimeSpan.FromMilliseconds(250),
+            };
+            _themeDebounceTimer.Tick += OnThemeDebounceTick;
+        }
+
+        // Restart the single timer so a burst collapses to one fire (only the last broadcast wins).
+        _themeDebounceTimer.Stop();
+        _themeDebounceTimer.Start();
+    }
+
+    private void OnThemeDebounceTick(object? sender, EventArgs e)
+    {
+        _themeDebounceTimer?.Stop(); // one-shot: stop before re-evaluating so it does not repeat
+        _themeReevaluate?.Invoke();
     }
 
     // ============================================================================================
@@ -808,6 +870,11 @@ public partial class App : Application
         _countdownTimer?.Stop();
         _countdownTimer = null;
 
+        // Stop the single theme-debounce timer so no post-shutdown tick fires (U11).
+        _themeDebounceTimer?.Stop();
+        _themeDebounceTimer = null;
+        _themeReevaluate = null;
+
         // Stop polling and tear down any in-flight login (disposes its WebView2 environment + UDF).
         _usageService?.StopPolling();
         _authManager?.StopLoginWindow();
@@ -834,18 +901,10 @@ public partial class App : Application
         _showFlyoutEvent?.Dispose();
         _showFlyoutEvent = null;
 
-        // Release the single-instance mutex LAST so a relaunch (incl. an update restart, U12) can
-        // re-acquire it without bouncing off our predecessor.
-        try
-        {
-            _singleInstanceMutex?.ReleaseMutex();
-        }
-        catch (ApplicationException)
-        {
-            // Not the owning thread (already released by the update teardown); safe to ignore.
-        }
-        _singleInstanceMutex?.Dispose();
-        _singleInstanceMutex = null;
+        // Release the single-instance lock LAST so a relaunch (incl. an update restart, U12) can
+        // re-acquire it without bouncing off our predecessor. Disposing the FileStream frees the OS
+        // lock from ANY thread (no Mutex thread-affinity), so this cannot throw or leave it held.
+        ReleaseSingleInstanceLock();
     }
 
     /// <summary>
@@ -861,7 +920,19 @@ public partial class App : Application
         public AppUpdateTeardown(App app) => _app = app;
 
         public void PrepareForRelaunch()
-            => _app.Dispatcher.Invoke(_app.ReleaseForShutdown);
+        {
+            try
+            {
+                _app.Dispatcher.Invoke(_app.ReleaseForShutdown);
+            }
+            catch (Exception)
+            {
+                // The dispatcher is unreachable (already shutting down). Still free the single-instance
+                // lock directly so the relaunched instance becomes primary - the FileStream lock is not
+                // thread-affine, so releasing it off the UI thread is safe (unlike Mutex.ReleaseMutex).
+                _app.ReleaseSingleInstanceLock();
+            }
+        }
     }
 
     // ============================================================================================
