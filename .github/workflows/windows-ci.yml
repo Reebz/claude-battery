@@ -1,0 +1,33 @@
+name: Windows CI
+
+# Build + test the Windows port (windows/). The Mac app and the GitHub Pages deploy are untouched:
+# this workflow is scoped to the windows/ tree and runs only on the port branch and on PRs.
+on:
+  push:
+    branches: [feat/windows-port]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Test
+        run: dotnet test -c Release --no-build
