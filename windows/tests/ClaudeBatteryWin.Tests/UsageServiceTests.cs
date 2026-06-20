@@ -32,6 +32,13 @@ public class UsageServiceTests
         // 0 failures -> base 120.
         Assert.Equal(120, service.PollIntervalSeconds);
 
+        // Consume the first-post-construction no-network grace (U1) with one tolerated throw so the
+        // backoff progression below counts from a clean slate. The construction default of
+        // _firstPollAfterResume is true (honoring the field's own comment), so the very first poll
+        // after autostart is penalty-free.
+        await service.PollUsageAsync(CancellationToken.None);
+        Assert.Equal(0, service.ConsecutiveFailures);
+
         // Failures 1, 2 stay at 120 (threshold is "< 3").
         await service.PollUsageAsync(CancellationToken.None);
         Assert.Equal(1, service.ConsecutiveFailures);
@@ -91,6 +98,10 @@ public class UsageServiceTests
 
         using var service = new UsageService(api, net, clock);
         service.StartPolling(Org);
+
+        // Consume the first-post-construction grace (U1) before asserting escalation.
+        await service.PollUsageAsync(CancellationToken.None);
+        Assert.Equal(0, service.ConsecutiveFailures);
 
         await service.PollUsageAsync(CancellationToken.None);
         Assert.Equal(1, service.ConsecutiveFailures);
@@ -195,6 +206,10 @@ public class UsageServiceTests
 
         using var service = new UsageService(api, net, clock);
         service.StartPolling(Org);
+
+        // Consume the first-post-construction grace (U1) before asserting escalation.
+        await service.PollUsageAsync(CancellationToken.None);
+        Assert.Equal(0, service.ConsecutiveFailures);
 
         await service.PollUsageAsync(CancellationToken.None);
         Assert.Equal(1, service.ConsecutiveFailures);
@@ -468,6 +483,30 @@ public class UsageServiceTests
     // MARK: - Resume tolerance
 
     [Fact]
+    public async Task FirstPollAfterConstruction_ToleratesOnlineThrow_WithoutPenalty()
+    {
+        // U1 regression guard: the _firstPollAfterResume field initializer must be true at
+        // construction (matching its own comment), so the FIRST poll after autostart - with NO
+        // HandleResume call - tolerates a transient online throw without advancing backoff. A flip
+        // back to a false default would fail this, not just a review. Before the fix the first
+        // post-autostart poll lost its documented no-network grace.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new HttpRequestExceptionLike() };
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org); // autostart path: no HandleResume
+
+        await service.PollUsageAsync(CancellationToken.None);
+        Assert.Equal(0, service.ConsecutiveFailures); // first post-autostart poll is penalty-free
+        Assert.False(service.AuthFailed);
+
+        // The grace is one-shot: the second poll on the same online throw does escalate.
+        await service.PollUsageAsync(CancellationToken.None);
+        Assert.Equal(1, service.ConsecutiveFailures);
+    }
+
+    [Fact]
     public async Task FirstPollAfterResume_ToleratesOnlineThrow_WithoutPenalty()
     {
         // Right after resume the network may report up but still throw transiently; the first poll
@@ -506,6 +545,47 @@ public class UsageServiceTests
         Assert.Equal(0, service.ConsecutiveFailures);
         Assert.False(service.AuthFailed);
         Assert.Equal(0, api.UsageCallCount);
+    }
+
+    // MARK: - Dispose / reconnect (U12 coverage)
+
+    [Fact]
+    public void Dispose_DisarmsScheduler_AndAPostDisposeFireIsNoOp()
+    {
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi();
+
+        var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+        Assert.True(clock.IsArmed); // the immediate first fire is armed
+
+        service.Dispose();
+        Assert.False(clock.IsArmed); // Dispose disarms the scheduler
+
+        // A stray fire after dispose drives nothing (the pending callback was cleared; OnTimerFired
+        // also guards on _disposed): no poll runs, no state changes.
+        clock.Fire();
+        Assert.Equal(0, api.UsageCallCount);
+        Assert.Null(service.LatestUsage);
+    }
+
+    [Fact]
+    public void NetworkReconnect_ReArmsPolling_ForAnImmediatePoll()
+    {
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = false };
+        var api = new FakeApi();
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org); // arms a first fire even while offline
+
+        clock.Disarm(); // simulate that fire having run; nothing is scheduled now
+        Assert.False(clock.IsArmed);
+
+        // Coming back online re-arms an immediate poll rather than waiting out a long backoff window.
+        net.IsAvailable = true;
+        Assert.True(clock.IsArmed);
     }
 
     // MARK: - No active account

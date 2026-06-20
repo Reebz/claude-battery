@@ -38,4 +38,19 @@ public sealed record LoginState(LoginStateKind Kind, string? Message = null)
     /// True only in the error state. The capture funnel checks this so a cancelled or failed
     /// login cannot auto-recapture the still-present session cookie while an error card shows.
     public bool IsError => Kind == LoginStateKind.Error;
+
+    /// <summary>
+    /// True while a sign-in is mid-flight: signing-in, capturing, org-discovery, or org-picker. These
+    /// are the phases during which the flyout BOTH shows the "Finishing sign-in" panel
+    /// (<see cref="ClaudeBatteryWin.ViewModels.FlyoutViewModel.ResolveState"/>) AND suppresses its
+    /// deactivate-dismiss (<see cref="ClaudeBatteryWin.ViewModels.FlyoutViewModel.SuppressDismissOnDeactivate"/>).
+    /// Both members key on this ONE predicate so they cannot drift: previously ResolveState mapped only
+    /// SigningIn while suppress-dismiss covered all four, so during org-discovery/picker the flyout
+    /// stayed open but showed the wrong panel.
+    /// </summary>
+    public bool IsLoginInProgress =>
+        Kind is LoginStateKind.SigningIn
+            or LoginStateKind.Capturing
+            or LoginStateKind.OrgDiscovery
+            or LoginStateKind.Picker;
 }

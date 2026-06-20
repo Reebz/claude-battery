@@ -17,17 +17,19 @@ public class NoSecretsGateTests
     [Fact]
     public void NoLogSinkInterpolatesASecret_AcrossAllProductionSources()
     {
-        var srcDir = FindSourceDir();
         var offenders = new List<string>();
 
-        foreach (var file in Directory.EnumerateFiles(srcDir, "*.cs", SearchOption.AllDirectories))
+        foreach (var root in ScanRoots())
         {
-            var lines = File.ReadAllLines(file);
-            for (var i = 0; i < lines.Length; i++)
+            foreach (var file in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
             {
-                if (LineLogsSecret(lines[i]))
+                var lines = File.ReadAllLines(file);
+                for (var i = 0; i < lines.Length; i++)
                 {
-                    offenders.Add($"{Path.GetFileName(file)}:{i + 1}: {lines[i].Trim()}");
+                    if (LineLogsSecret(lines[i]))
+                    {
+                        offenders.Add($"{Path.GetFileName(file)}:{i + 1}: {lines[i].Trim()}");
+                    }
                 }
             }
         }
@@ -45,12 +47,36 @@ public class NoSecretsGateTests
         Assert.True(LineLogsSecret("Debug.WriteLine($\"cookie={cookie.Value}\");"));
         Assert.True(LineLogsSecret("DebugLog($\"sessionKey={key}\");"));
         Assert.True(LineLogsSecret("Debug.WriteLine($\"header={account.AllCookieHeader}\");"));
+        // Clipboard is a sink too (a diagnostics "copy" must never carry a secret) (U10).
+        Assert.True(LineLogsSecret("Clipboard.SetText($\"cookie={cookie.Value}\");"));
+        Assert.True(LineLogsSecret("Clipboard.SetDataObject($\"sessionKey={key}\");"));
 
         // Redacted status logs and non-sink lines MUST NOT be flagged.
         Assert.False(LineLogsSecret("DebugLog($\"Unexpected HTTP status: {status}\");"));
         Assert.False(LineLogsSecret("Debug.WriteLine(\"Session cookie captured\");"));
         Assert.False(LineLogsSecret("// the cookie.Value is never logged"));
         Assert.False(LineLogsSecret("_pendingSessionKey = sessionCookie.Value;")); // assignment, not a sink
+        // A Clipboard copy of an already-redacted log box is a sink with no secret token: not flagged.
+        Assert.False(LineLogsSecret("Clipboard.SetText(LogBox.Text);"));
+    }
+
+    [Fact]
+    public void ScanRoots_IncludesSpikesTree_SoHarnessLeaksAreCaught()
+    {
+        // U10 scope: the gate must walk the throwaway spikes/ tree, not just src/, so a secret leak in
+        // a spike harness (which replays real cookies) fails CI the same way a production leak does.
+        var hasSpikes = false;
+        foreach (var root in ScanRoots())
+        {
+            var normalized = root.Replace('\\', '/');
+            if (normalized.EndsWith("/spikes", StringComparison.Ordinal)
+                || normalized.Contains("/spikes/", StringComparison.Ordinal))
+            {
+                hasSpikes = true;
+            }
+        }
+
+        Assert.True(hasSpikes, "the redaction gate must scan the spikes/ tree (U10)");
     }
 
     /// <summary>
@@ -71,7 +97,10 @@ public class NoSecretsGateTests
             || line.Contains("DebugLog(", StringComparison.Ordinal)
             || line.Contains("Trace.Write", StringComparison.Ordinal)
             || line.Contains("Console.Write", StringComparison.Ordinal)
-            || line.Contains("logger.", StringComparison.OrdinalIgnoreCase);
+            || line.Contains("logger.", StringComparison.OrdinalIgnoreCase)
+            // The clipboard is an egress sink: a diagnostics "copy" must never carry a secret (U10).
+            || line.Contains("Clipboard.SetText", StringComparison.Ordinal)
+            || line.Contains("Clipboard.SetDataObject", StringComparison.Ordinal);
         if (!isSink)
         {
             return false;
@@ -82,6 +111,28 @@ public class NoSecretsGateTests
             || lower.Contains("cookieheader")
             || lower.Contains("capturedcookie")
             || (lower.Contains("cookie") && lower.Contains(".value"));
+    }
+
+    /// <summary>
+    /// The roots the gate scans: the production source tree AND the throwaway <c>spikes/</c> tree (a
+    /// spike harness project-references production code and replays real cookies, so it must honor the
+    /// same redaction discipline) (U10). The spikes root is a sibling of <c>src</c> under
+    /// <c>windows/</c>; it is included only when present (it is absent in some checkouts).
+    /// </summary>
+    private static IEnumerable<string> ScanRoots()
+    {
+        var srcDir = FindSourceDir();                 // .../windows/src/ClaudeBatteryWin
+        yield return srcDir;
+
+        var windowsRoot = new DirectoryInfo(srcDir).Parent?.Parent; // .../windows
+        if (windowsRoot is not null)
+        {
+            var spikes = Path.Combine(windowsRoot.FullName, "spikes");
+            if (Directory.Exists(spikes))
+            {
+                yield return spikes;
+            }
+        }
     }
 
     /// <summary>

@@ -342,27 +342,45 @@ public partial class LoginWindow : Window, ILoginWebView
 
     private void OnCoreNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
     {
-        var decision = NewWindowRequested?.Invoke(e.Uri) ?? NewWindowDecision.Block;
-        if (!decision.Allowed)
+        // Synchronous WebView2 COM callback: a throw escaping here propagates into the COM caller and
+        // can crash the host mid-login. Guard fully (U9, mirroring the async-void guards above). On an
+        // unexpected throw, refuse the popup deterministically (Handled = true) and surface the
+        // retry/init-fail path rather than leaving "Continue with Google" in an undefined state.
+        try
         {
-            // Handled = true with no NewWindow refuses the popup outright (a disallowed host).
-            e.Handled = true;
-            return;
-        }
+            var decision = NewWindowRequested?.Invoke(e.Uri) ?? NewWindowDecision.Block;
+            if (!decision.Allowed)
+            {
+                // Handled = true with no NewWindow refuses the popup outright (a disallowed host).
+                e.Handled = true;
+                return;
+            }
 
-        // Route the popup into a separate hosted WebView2 in the SAME environment so window.opener
-        // is preserved and the OAuth callback can postMessage back to the claude.ai page. Setting
-        // e.NewWindow IS the handling here - do NOT also set Handled = true (that would suppress the
-        // window instead of hosting it). A deferral keeps the script blocked until NewWindow is set.
-        _popupGate = decision.PopupNavigationGate;
-        _ = HostPopupAsync(e);
+            // Route the popup into a separate hosted WebView2 in the SAME environment so window.opener
+            // is preserved and the OAuth callback can postMessage back to the claude.ai page. Setting
+            // e.NewWindow IS the handling here - do NOT also set Handled = true (that would suppress the
+            // window instead of hosting it). A deferral keeps the script blocked until NewWindow is set.
+            _popupGate = decision.PopupNavigationGate;
+            _ = HostPopupAsync(e);
+        }
+        catch (Exception ex)
+        {
+            DebugLog($"NewWindowRequested handler threw: {ex.GetType().Name}");
+            e.Handled = true;
+            RaiseInitFailed("Could not open the sign-in popup. Please try again.");
+        }
     }
 
     private async Task HostPopupAsync(CoreWebView2NewWindowRequestedEventArgs e)
     {
-        var deferral = e.GetDeferral();
+        // Take the deferral INSIDE the try and complete it in finally so no path - including a throw
+        // from GetDeferral itself - can leave WebView2 awaiting an uncompleted deferral (U9). A null
+        // deferral (GetDeferral threw before assignment) makes the finally a no-op.
+        CoreWebView2Deferral? deferral = null;
         try
         {
+            deferral = e.GetDeferral();
+
             // Retire any prior popup before creating a new one.
             TeardownPopup();
 
@@ -393,7 +411,7 @@ public partial class LoginWindow : Window, ILoginWebView
         }
         finally
         {
-            deferral.Complete();
+            deferral?.Complete();
         }
     }
 

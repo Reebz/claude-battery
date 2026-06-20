@@ -232,6 +232,53 @@ public sealed class AuthManagerTests : IDisposable
         Assert.False(web.RaiseNavigationStarting("https://evil-claude.ai/"));
     }
 
+    [Fact]
+    public void AboutBootstrapVariants_AllowedConsistently_AfterDeadArmRemoval()
+    {
+        // R12: removing the dead `== "about:blank"` arm is behavior-preserving - StartsWith already
+        // subsumes it. All about: bootstrap forms stay allowed on both the main-frame and popup gates;
+        // a real foreign host is still blocked.
+        Assert.True(AuthManager.ShouldAllow("about:blank"));
+        Assert.True(AuthManager.ShouldAllow("about:blank?query=1"));
+        Assert.True(AuthManager.ShouldAllow("about:blank#frag"));
+        Assert.True(AuthManager.ShouldAllow("about:srcdoc"));
+        Assert.True(AuthManager.ShouldAllow("  about:blank")); // leading space trimmed before match
+        Assert.True(AuthManager.AllowsOAuthPopup("about:blank?x"));
+        Assert.True(AuthManager.AllowsOAuthPopup("about:srcdoc"));
+        Assert.False(AuthManager.ShouldAllow("https://evil-claude.ai/"));
+    }
+
+    [Fact]
+    public void ExtractEmail_PrefersFirstNonEmptyOrgEmail_SharedByBothPaths()
+    {
+        // R9: the WebView and manual-paste paths share AuthManager.ExtractEmail (no duplicate). It
+        // returns the first non-empty org email, or null when none carries one.
+        Assert.Equal("b@x.com", AuthManager.ExtractEmail(new[]
+        {
+            Org("org-1", email: null),
+            Org("org-2", email: "b@x.com"),
+            Org("org-3", email: "c@x.com"),
+        }));
+        Assert.Null(AuthManager.ExtractEmail(new[] { Org("o1", email: null), Org("o2", email: "") }));
+        Assert.Null(AuthManager.ExtractEmail(Array.Empty<Organization>()));
+    }
+
+    // ---- localized Google accounts host match parity (U7 / R13) --------------------------------
+
+    [Fact]
+    public void LocalizedGoogleAccountsHost_MatchesApexAndSubdomain_AfterSuffixPrebuild()
+    {
+        // R13: pre-building the leading-dot suffix set must be behavior-preserving. Apex localized
+        // hosts match exactly; their subdomains match via the leading-dot suffix; an attacker-injected
+        // prefix and a non-enumerated ccTLD do not.
+        Assert.True(AuthManager.IsLocalizedGoogleAccountsHost("accounts.google.com.tr"));    // apex
+        Assert.True(AuthManager.IsLocalizedGoogleAccountsHost("accounts.google.co.uk"));
+        Assert.True(AuthManager.IsLocalizedGoogleAccountsHost("ssl.accounts.google.co.jp")); // subdomain
+        Assert.False(AuthManager.IsLocalizedGoogleAccountsHost("accounts.google.com"));       // base, not localized
+        Assert.False(AuthManager.IsLocalizedGoogleAccountsHost("evil.accounts.google.co.uk.attacker.com"));
+        Assert.False(AuthManager.IsLocalizedGoogleAccountsHost("accounts.google.zz"));        // not enumerated
+    }
+
     // ---- UA capture ----------------------------------------------------------------------------
 
     [Fact]
@@ -265,6 +312,38 @@ public sealed class AuthManagerTests : IDisposable
         Assert.Equal("Could not start the sign-in browser. Please try again.", manager.LoginState.Message);
         Assert.False(manager.HasCapturedSession);     // capture guard reset so a retry can capture
         Assert.True(manager.HasActiveLoginWebView);   // window stays open showing the error + retry
+    }
+
+    // ---- PresentLogin re-entrancy keyed on IsLoginInProgress (U3 / R4) -------------------------
+
+    [Fact]
+    public async Task PresentLogin_WhileOrgDiscoveryInFlight_IsNoOp_RefocusesWindow_DoesNotResetCapture()
+    {
+        // U3/R4: PresentLogin must no-op while ANY in-progress login kind is active
+        // (LoginState.IsLoginInProgress), not just SigningIn. OrgDiscovery is an in-progress kind that
+        // is NOT SigningIn; a re-entrant PresentLogin here must re-focus the existing window, never
+        // create a second one or reset the capture guard mid-discovery. Locks the contract so a future
+        // removal of the belt-and-suspenders _loginWebView guard cannot reopen this hole.
+        var api = new FakeClaudeApi { OrganizationsGate = new TaskCompletionSource<IReadOnlyList<Organization>>() };
+        var (manager, web, _, _, store) = NewManager(api);
+
+        manager.PresentLogin();
+        web.RaiseCookiesObserved(new[] { Cookie("sessionKey", "sk"), Cookie("__cf_bm", "cf") });
+        Assert.Equal(LoginStateKind.OrgDiscovery, manager.LoginState.Kind); // in-progress, non-SigningIn
+        Assert.True(manager.HasCapturedSession);
+        Assert.Equal(0, web.FocusCount);
+
+        // Re-entrant present during discovery.
+        manager.PresentLogin();
+        Assert.True(manager.HasCapturedSession);                  // capture guard NOT reset (no fresh login)
+        Assert.Equal(LoginStateKind.OrgDiscovery, manager.LoginState.Kind);
+        Assert.Equal(1, web.FocusCount);                          // existing window re-focused
+
+        // The original discovery still completes intact.
+        api.OrganizationsGate.TrySetResult(new[] { Org("org-1") });
+        await manager.LastDiscoveryTask!;
+        Assert.Equal(LoginStateKind.Active, manager.LoginState.Kind);
+        Assert.Single(store.Accounts);
     }
 
     // ---- re-auth generation bump (U5 / issue #18) ----------------------------------------------
@@ -404,11 +483,11 @@ internal sealed class FakeLoginWebView : ILoginWebView
         remove => Closed -= value;
     }
 
+    public int FocusCount { get; private set; }
+
     public void Show() => Shown = true;
 
-    public void Focus()
-    {
-    }
+    public void Focus() => FocusCount++;
 
     public void Navigate(string url) => LastNavigatedUrl = url;
 

@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using ClaudeBatteryWin.Models;
 using ClaudeBatteryWin.Services;
 
@@ -40,6 +41,10 @@ public partial class SettingsWindow : Window
     /// The account whose nickname is being edited inline, or null. Drives the label/edit-field swap.
     private Guid? _editingNicknameId;
 
+    /// Set when the window is opened via the "Sign in manually" affordance: once loaded, scroll the
+    /// manual cookie-paste section into view and focus the paste box (U4). False for the normal open.
+    private bool _focusManualSignInPending;
+
     public SettingsWindow(
         AccountStore accountStore,
         ManualSignIn manualSignIn,
@@ -70,6 +75,36 @@ public partial class SettingsWindow : Window
 
         RebuildAccountList();
         RefreshUpdateRow();
+
+        if (_focusManualSignInPending)
+        {
+            _focusManualSignInPending = false;
+            // Defer to after layout so BringIntoView has a realized visual tree to scroll within.
+            Dispatcher.BeginInvoke(new Action(ApplyManualSignInFocus), DispatcherPriority.Loaded);
+        }
+    }
+
+    /// <summary>
+    /// Request that the manual cookie-paste section be scrolled into view and focused once the window
+    /// is shown. The login error surface's "Sign in manually" affordance routes here (U4) so a stuck
+    /// user lands directly on the paste box; the normal Settings open does not call this.
+    /// </summary>
+    public void FocusManualSignIn()
+    {
+        if (IsLoaded)
+        {
+            ApplyManualSignInFocus();
+        }
+        else
+        {
+            _focusManualSignInPending = true;
+        }
+    }
+
+    private void ApplyManualSignInFocus()
+    {
+        CookieHeaderBox.BringIntoView();
+        CookieHeaderBox.Focus();
     }
 
     // Guards the initial IsChecked assignment in OnLoaded so it does not re-enter the registry/disk.
@@ -396,9 +431,9 @@ public partial class SettingsWindow : Window
 
     // MARK: - Add account / manual sign-in
 
-    /// Raised when the user asks to add an account via the WebView2 login flow (U6/U7). The
-    /// integration layer wires this to AuthManager.PresentLogin; kept as an event so this window
-    /// does not depend on the not-yet-written auth manager.
+    /// Raised when the user asks to add an account via the WebView2 login flow (U6/U7). App.xaml.cs
+    /// wires this to AuthManager.PresentLogin; kept as an event so this window stays decoupled from
+    /// the auth manager.
     public event EventHandler? AddAccountRequested;
 
     private void OnAddAccountClicked(object sender, RoutedEventArgs e)
@@ -417,7 +452,9 @@ public partial class SettingsWindow : Window
         ManualSignInResult result;
         try
         {
-            result = await _manualSignIn.SignInAsync(pasted);
+            // ConfigureAwait(true): explicit UI-thread resume for this async-void handler (the U7
+            // convention), so SetManualBusy/ApplyManualResult below run on the UI thread.
+            result = await _manualSignIn.SignInAsync(pasted).ConfigureAwait(true);
         }
         catch (Exception)
         {
@@ -533,7 +570,9 @@ public partial class SettingsWindow : Window
         UpdateActionButton.IsEnabled = false;
         try
         {
-            await _updateService.ApplyUpdateAsync();
+            // ConfigureAwait(true): explicit UI-thread resume for this async-void handler (the U7
+            // convention from LoginWindow), so the finally re-enables the button on the UI thread.
+            await _updateService.ApplyUpdateAsync().ConfigureAwait(true);
             // On a real install ApplyUpdateAsync relaunches and never returns here; if it returns
             // false (dev/test/no-update) just leave the row as-is.
         }

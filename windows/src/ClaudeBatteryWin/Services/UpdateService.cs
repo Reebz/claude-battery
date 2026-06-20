@@ -16,8 +16,8 @@ namespace ClaudeBatteryWin.Services;
 /// IMPORTANT (integration): <c>VelopackApp.Build().Run()</c> MUST be the FIRST line of application
 /// startup -- before the tray icon, before any window, before this service is constructed. Velopack
 /// runs install/uninstall/update hooks synchronously at that point and exits the process for hook
-/// invocations. App.xaml.cs has a TODO(integration) marker for it; the integration agent wires it.
-/// If it is not first, a freshly applied update can re-run the old binary's UI on the hook launch.
+/// invocations. App.xaml.cs runs it as the first line of OnStartup, before the tray icon and any
+/// window. If it is not first, a freshly applied update can re-run the old binary's UI on the hook launch.
 ///
 /// The real Velopack calls live behind <see cref="IVelopackUpdater"/> so this service is unit-testable
 /// without the updater touching disk, GitHub, or the running process.
@@ -133,10 +133,10 @@ public sealed class UpdateService
 /// <summary>
 /// The clean-teardown contract the update apply runs immediately before relaunch (U12). Kept as an
 /// interface so <see cref="UpdateService.ApplyUpdateAsync"/> can assert the sequence runs without a
-/// real poller / WebView2 / mutex. The integration agent supplies the concrete implementation that
-/// (in order): stops <c>UsageService</c> polling, disposes every live WebView2
-/// <c>CoreWebView2Environment</c> (login + popup), then releases the single-instance
-/// <c>Mutex</c> from App.xaml.cs LAST so the relaunched instance can re-acquire it.
+/// real poller / WebView2 / mutex. App.xaml.cs supplies the concrete implementation
+/// (<c>AppUpdateTeardown</c>) that, in order: stops <c>UsageService</c> polling, disposes every live
+/// WebView2 <c>CoreWebView2Environment</c> (login + popup), then releases the single-instance
+/// lock from App.xaml.cs LAST so the relaunched instance can re-acquire it.
 /// </summary>
 public interface IUpdateTeardown
 {

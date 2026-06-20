@@ -4,6 +4,11 @@ Status: NOT RUN. This spike needs a real Windows box, a real claude.ai login, an
 It cannot run on macOS, so it was deferred. Everything below is the script to run and the exact
 pass/fail signals; until it runs, the units it gates are built on an assumption, not a result.
 
+> A runnable harness for this script now exists at `./auth-spike/` (see `./auth-spike/README.md`).
+> `cd windows/spikes/auth-spike && dotnet run` on a Windows box, log in, click "Run U2 gate test".
+> It fires the load-bearing poll through the PRODUCTION `ClaudeApi` + `AccountStore.PrimeCookies`
+> (via a project reference) and prints the 200-vs-403 verdict plus the step 3/4/6/7 observations.
+
 ## Why this gates the whole port
 
 Two auth unknowns sit under every service in Phase B-E. The plan calls this "the single most
@@ -30,6 +35,13 @@ Build a throwaway WPF app under `windows/spikes/auth-spike/` (do NOT harden it; 
    go/no-go):
    - Google "Continue with Google" (watch for `disallowed_useragent`; does the `NewWindowRequested`
      popup flow complete; does passkey/FedCM work).
+     - **Popup WebView2 rooting check (field-gated residual, U13):** the popup `HostPopupAsync`
+       creates is a `new WebView2()` that is NEVER added to a visual tree (it is handed straight to
+       `e.NewWindow`). Explicitly verify that this un-rooted control still completes
+       `EnsureCoreWebView2Async` and navigates the OAuth flow. If it HANGS (never completes init),
+       the production `HostPopupAsync` must parent the popup into an offscreen/hidden host window
+       before awaiting init. This is the only salvageable concern from the refuted `LoginWindow:370`
+       review finding; record a completes/hangs result per provider that opens a `window.open` popup.
    - Apple sign-in.
    - Email + email-code.
    - An Entra/SSO org if one is reachable.

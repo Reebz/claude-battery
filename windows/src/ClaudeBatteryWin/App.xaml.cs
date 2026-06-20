@@ -579,23 +579,23 @@ public partial class App : Application
     {
         Dispatcher.BeginInvoke(new Action(() =>
         {
-            // Reflect the state onto the live login window's overlays.
+            // Reflect the state onto the live login window's overlays. Key the signing-in overlay on
+            // the shared LoginState.IsLoginInProgress predicate (signing-in / capturing / org-discovery
+            // / picker) so the four in-progress kinds cannot drift from the flyout's panel + dismiss
+            // logic, which key on the same predicate (U3).
             if (_loginWebViewFactory?.CurrentWindow is { } window)
             {
-                switch (state.Kind)
+                if (state.IsLoginInProgress)
                 {
-                    case LoginStateKind.SigningIn:
-                    case LoginStateKind.Capturing:
-                    case LoginStateKind.OrgDiscovery:
-                    case LoginStateKind.Picker:
-                        window.ShowSigningInOverlay();
-                        break;
-                    case LoginStateKind.Error:
-                        window.ShowError(state.Message ?? "Sign-in failed. Please try again.");
-                        break;
-                    default:
-                        window.HideOverlays();
-                        break;
+                    window.ShowSigningInOverlay();
+                }
+                else if (state.Kind == LoginStateKind.Error)
+                {
+                    window.ShowError(state.Message ?? "Sign-in failed. Please try again.");
+                }
+                else
+                {
+                    window.HideOverlays();
                 }
             }
 
@@ -650,6 +650,13 @@ public partial class App : Application
 
         _settingsWindow.Show();
         _settingsWindow.Activate();
+
+        // When invoked from the login error surface's "Sign in manually" affordance, land the user
+        // directly on the manual cookie-paste box rather than just opening Settings (U4).
+        if (focusManualSignIn)
+        {
+            _settingsWindow.FocusManualSignIn();
+        }
     }
 
     // ============================================================================================
@@ -683,9 +690,22 @@ public partial class App : Application
             return;
         }
 
-        // ApplyUpdateAsync runs the clean teardown (AppUpdateTeardown below) then relaunches and
-        // never returns on a real install; a false return (dev/test/no update) leaves us running.
-        await _updateService.ApplyUpdateAsync().ConfigureAwait(true);
+        // The flyout "Update" link wires this as a fire-and-forget discard (() => _ = ApplyUpdateAsync()),
+        // so a throw here would otherwise become an unobserved faulted task. Guard the boundary,
+        // matching SettingsWindow.OnUpdateActionClicked (which catches + surfaces a failure message).
+        // ApplyUpdateAsync runs the clean teardown (AppUpdateTeardown below) then relaunches and never
+        // returns on a real install; a false return (dev/test/no update) leaves us running, and the
+        // catch covers a transient download/disk failure.
+        try
+        {
+            await _updateService.ApplyUpdateAsync().ConfigureAwait(true);
+        }
+        catch (Exception)
+        {
+            // A failed apply must not crash the tray; refresh the flyout so its update row reflects
+            // that the update did not complete (parity with the SettingsWindow update path).
+            SyncViewModelFromServices();
+        }
     }
 
     // ============================================================================================

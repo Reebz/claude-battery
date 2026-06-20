@@ -68,8 +68,10 @@ public sealed class AuthManager
     private LoginState _loginState = LoginState.Idle;
 
     /// <summary>
-    /// The current login state. Setting it raises <see cref="LoginStateChanged"/>. The window
-    /// suppress-dismiss flag in U10 keys on <see cref="LoginStateKind.SigningIn"/>.
+    /// The current login state. Setting it raises <see cref="LoginStateChanged"/>. The flyout's
+    /// suppress-dismiss flag and signing-in panel both key on
+    /// <see cref="LoginState.IsLoginInProgress"/> (signing-in / capturing / org-discovery / picker),
+    /// not on <see cref="LoginStateKind.SigningIn"/> alone.
     /// </summary>
     public LoginState LoginState
     {
@@ -149,7 +151,16 @@ public sealed class AuthManager
     /// bootstrap. The host check is exact-label only (<c>==</c>) - never <c>EndsWith</c>/<c>Contains</c>
     /// - so <c>evil-claude.ai</c> and <c>claude.ai.evil.com</c> are rejected (pattern #2).
     /// </summary>
-    public static bool ShouldAllow(string url)
+    public static bool ShouldAllow(string url) => AllowsUrl(url, IsExactClaudeHost);
+
+    /// <summary>
+    /// The shared validate-then-dispatch skeleton behind <see cref="ShouldAllow"/> and
+    /// <see cref="AllowsOAuthPopup"/>: reject blank, allow the <c>about:</c> bootstrap frames (scheme
+    /// BEFORE host, pattern #7), reject anything not an absolute URI, then gate the real host through
+    /// <paramref name="hostPredicate"/> (exact-claude for the main frame, the broad OAuth allowlist for
+    /// popups). One skeleton so the two callers cannot drift apart.
+    /// </summary>
+    private static bool AllowsUrl(string url, Func<string, bool> hostPredicate)
     {
         if (string.IsNullOrWhiteSpace(url))
         {
@@ -173,7 +184,7 @@ public sealed class AuthManager
             return IsAboutBootstrap(url);
         }
 
-        return IsExactClaudeHost(uri.Host);
+        return hostPredicate(uri.Host);
     }
 
     /// <summary>
@@ -184,30 +195,7 @@ public sealed class AuthManager
     /// <c>NavigationStarting</c> handler enforcing this same allowlist so it cannot wander after the
     /// bootstrap.
     /// </summary>
-    public static bool AllowsOAuthPopup(string url)
-    {
-        if (string.IsNullOrWhiteSpace(url))
-        {
-            return false;
-        }
-
-        if (IsAboutBootstrap(url))
-        {
-            return true;
-        }
-
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
-        {
-            return false;
-        }
-
-        if (string.Equals(uri.Scheme, "about", StringComparison.OrdinalIgnoreCase))
-        {
-            return IsAboutBootstrap(url);
-        }
-
-        return IsAllowedHost(uri.Host);
-    }
+    public static bool AllowsOAuthPopup(string url) => AllowsUrl(url, IsAllowedHost);
 
     /// <summary>
     /// True for the <c>about:</c> OAuth bootstrap frames Google's flow uses: <c>about:blank</c>
@@ -217,8 +205,9 @@ public sealed class AuthManager
     private static bool IsAboutBootstrap(string url)
     {
         var s = url.TrimStart();
-        return s == "about:blank"
-            || s.StartsWith("about:blank", StringComparison.OrdinalIgnoreCase)
+        // StartsWith("about:blank") already subsumes the exact "about:blank" match, so the prior
+        // explicit `s == "about:blank"` arm was dead and was removed (R12); behavior is unchanged.
+        return s.StartsWith("about:blank", StringComparison.OrdinalIgnoreCase)
             || s.StartsWith("about:srcdoc", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -294,9 +283,12 @@ public sealed class AuthManager
             return true;
         }
 
-        foreach (var allowed in GoogleAccountsLocalizedHosts)
+        // Match against the leading-dot suffixes built ONCE at class init, instead of concatenating
+        // "." + allowed on every non-matching call (~60 string allocations per login NavigationStarting
+        // tick) (R13). Behavior is identical: a leading-dot EndsWith for each enumerated host.
+        foreach (var suffix in GoogleAccountsLocalizedHostSuffixes)
         {
-            if (host.EndsWith("." + allowed, StringComparison.Ordinal))
+            if (host.EndsWith(suffix, StringComparison.Ordinal))
             {
                 return true;
             }
@@ -336,6 +328,12 @@ public sealed class AuthManager
         "accounts.google.com.au", "accounts.google.co.nz",
     };
 
+    /// The leading-dot suffix forms (<c>"." + host</c>) of every localized Google accounts host,
+    /// built ONCE so the subdomain <c>EndsWith</c> check in <see cref="IsLocalizedGoogleAccountsHost"/>
+    /// does not allocate a fresh concatenation per host on every navigation (R13).
+    private static readonly string[] GoogleAccountsLocalizedHostSuffixes =
+        GoogleAccountsLocalizedHosts.Select(h => "." + h).ToArray();
+
     /// <summary>
     /// Pure org-selection rule (pattern #6: never blindly take <c>orgs[0]</c>) shared by the WebView
     /// and manual-paste paths. Single org → take it; else if an existing account's org is in the list
@@ -373,11 +371,17 @@ public sealed class AuthManager
     /// </summary>
     public void PresentLogin()
     {
-        if (LoginState.Kind == LoginStateKind.SigningIn)
+        // No-op while a sign-in is already mid-flight - keyed on LoginState.IsLoginInProgress
+        // (signing-in / capturing / org-discovery / picker), NOT SigningIn alone, so the four
+        // in-progress kinds match the doc ("no-ops if a sign-in is already in progress") and cannot
+        // drift. Re-focus the existing window instead of opening a second (U3).
+        if (LoginState.IsLoginInProgress)
         {
+            _loginWebView?.Focus();
             return;
         }
 
+        // Belt-and-suspenders: an open login window in any other state is just re-focused.
         if (_loginWebView is not null)
         {
             _loginWebView.Focus();
@@ -832,9 +836,10 @@ public sealed class AuthManager
     /// <summary>
     /// Prefer the enriched org's <c>email_address</c>; fall back to the first non-empty one. Mirrors
     /// the Mac <c>extractEmail</c> first pass (the raw-JSON fallback is unnecessary here since the
-    /// decoder already surfaces <c>EmailAddress</c>).
+    /// decoder already surfaces <c>EmailAddress</c>). Shared by the WebView (here) and manual-paste
+    /// (<see cref="ManualSignIn"/>) paths so the two cannot diverge again (they did once, issue #16).
     /// </summary>
-    private static string? ExtractEmail(IReadOnlyList<Organization> orgs)
+    internal static string? ExtractEmail(IReadOnlyList<Organization> orgs)
     {
         foreach (var org in orgs)
         {

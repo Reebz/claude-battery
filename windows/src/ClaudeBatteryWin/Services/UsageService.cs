@@ -70,8 +70,10 @@ public sealed class UsageService : IDisposable
 
     /// Set true at construction and again after each resume, so the next poll tolerates a missing
     /// network without counting it as a deferral cancelling escalation. Mirrors "first post-resume
-    /// /autostart poll tolerates no-network without penalty".
-    private bool _firstPollAfterResume = false;
+    /// /autostart poll tolerates no-network without penalty". The construction default is true so the
+    /// first poll after autostart (a restored account that polls before any resume event) gets the
+    /// same one-shot grace the comment promises - the network stack may not be up yet at launch.
+    private bool _firstPollAfterResume = true;
 
     /// Drives the chained restart: the in-flight poll task whose completion the next poll awaits,
     /// preventing the race where a new poll is silently dropped (Mac <c>restartPolling</c>).

@@ -4,17 +4,12 @@ using Xunit;
 namespace ClaudeBatteryWin.Tests;
 
 /// <summary>
-/// Scaffold smoke test (U1). Proves the test project compiles, references the app project, and
-/// can see the shared Models contract. Downstream units add real per-unit test files.
+/// Anchors the shared Models contract the test project depends on. The standalone
+/// <c>Scaffold_Compiles</c> no-op was removed - the real assertion below proves the test project
+/// compiles and sees the app project just as well, without inflating the count with empty coverage.
 /// </summary>
 public class ScaffoldSmokeTests
 {
-    [Fact]
-    public void Scaffold_Compiles()
-    {
-        Assert.True(true);
-    }
-
     [Fact]
     public void Account_DisplayName_PrefersNicknameOverEmail()
     {

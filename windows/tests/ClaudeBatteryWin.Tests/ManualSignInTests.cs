@@ -367,6 +367,32 @@ public sealed class ManualSignInTests : IDisposable
     }
 
     [Fact]
+    public async Task SignIn_AfterNeedsOrgChoice_FreshSignIn_DiscardsPendingContext_AndSucceeds()
+    {
+        // After a multi-org paste parks a pending pick, a brand-new SignInAsync must discard that
+        // stale context (_pending is cleared at the top of SignInAsync) and resolve on its own merits -
+        // here a single-org paste that succeeds, NOT an InvalidInput from a leftover pending pick (U12).
+        var api = new FakeApi { Orgs = new[] { Org("o1", "First"), Org("o2", "Second") } };
+        var store = NewStore(new CookieContainer());
+        var manual = new ManualSignIn(api, store);
+
+        var first = await manual.SignInAsync("sessionKey=sk-1; __cf_bm=cf");
+        Assert.Equal(ManualSignInResult.ResultKind.NeedsOrgChoice, first.Kind);
+        Assert.Empty(store.Accounts);
+
+        // A fresh sign-in for a single-org identity succeeds; the prior pending pick is not consulted.
+        api.Orgs = new[] { Org("solo", email: "u@solo.com") };
+        var second = await manual.SignInAsync("sessionKey=sk-2; __cf_bm=cf2");
+        Assert.Equal(ManualSignInResult.ResultKind.Success, second.Kind);
+        Assert.Single(store.Accounts);
+        Assert.Equal("solo", store.ActiveAccount!.OrganizationId);
+
+        // The stale pending pick is gone: completing the OLD choice now is InvalidInput (no context).
+        var staleComplete = manual.CompleteWithChosenOrg(Org("o2"));
+        Assert.Equal(ManualSignInResult.ResultKind.InvalidInput, staleComplete.Kind);
+    }
+
+    [Fact]
     public async Task CompleteWithChosenOrg_WithNoPendingContext_IsInvalidInput()
     {
         var api = new FakeApi();

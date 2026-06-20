@@ -42,8 +42,6 @@ public sealed class AccountStore
 {
     public const int MaxAccounts = 5;
 
-    private const string ClaudeBaseUrl = "https://claude.ai";
-
     private readonly CookieContainer _cookieJar;
     private readonly SecretStore _secretStore;
     private readonly string _metadataPath;
@@ -386,7 +384,7 @@ public sealed class AccountStore
     /// </summary>
     private void ClearClaudeCookies()
     {
-        var baseUri = new Uri(ClaudeBaseUrl);
+        var baseUri = new Uri(ClaudeApi.BaseUrl);
         foreach (Cookie cookie in _cookieJar.GetCookies(baseUri))
         {
             var domain = cookie.Domain;

@@ -395,11 +395,7 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     /// focus moves to the login window. Mirrors the Mac flag set before opening the login window and
     /// cleared on capture/cancel.
     /// </summary>
-    public bool SuppressDismissOnDeactivate =>
-        _loginState.Kind is LoginStateKind.SigningIn
-            or LoginStateKind.Capturing
-            or LoginStateKind.OrgDiscovery
-            or LoginStateKind.Picker;
+    public bool SuppressDismissOnDeactivate => _loginState.IsLoginInProgress;
 
     // MARK: - Authenticated-section models (null/empty outside the authenticated state)
 
@@ -565,8 +561,10 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         bool authFailed,
         int consecutiveFailures)
     {
-        // 1. signing-in (login state wins over everything, like the Mac).
-        if (loginState.Kind == LoginStateKind.SigningIn)
+        // 1. login in progress (signing-in / capturing / org-discovery / picker) wins over everything,
+        // like the Mac. Keys on the SAME predicate as SuppressDismissOnDeactivate so the flyout cannot
+        // suppress its dismissal while showing a non-signing-in panel during org-discovery/picker.
+        if (loginState.IsLoginInProgress)
         {
             return FlyoutContentState.SigningIn;
         }

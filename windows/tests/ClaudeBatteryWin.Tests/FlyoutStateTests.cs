@@ -33,11 +33,20 @@ public class FlyoutStateTests
 
     // MARK: - The eight content states resolve in the Mac cascade order
 
-    [Fact]
-    public void State_SigningIn_WhenLoginStateIsSigningIn()
+    [Theory]
+    [InlineData(LoginStateKind.SigningIn)]
+    [InlineData(LoginStateKind.Capturing)]
+    [InlineData(LoginStateKind.OrgDiscovery)]
+    [InlineData(LoginStateKind.Picker)]
+    public void State_SigningIn_ForEveryLoginInProgressKind(LoginStateKind kind)
     {
+        // ResolveState must show the signing-in panel for ALL four login-in-progress kinds, matching
+        // SuppressDismissOnDeactivate - otherwise the flyout suppresses its deactivate-dismissal during
+        // org-discovery/picker while rendering a non-signing-in panel (the review-caught drift fix).
+        // Inputs are deliberately authenticated-with-snapshot + authFailed so a regression to the old
+        // SigningIn-only mapping falls through to Authenticated and fails this for the other three kinds.
         Assert.Equal(FlyoutContentState.SigningIn,
-            FlyoutViewModel.ResolveState(LoginState.SigningIn, isAuthenticated: true, latestUsage: UsageWithModels(), authFailed: true, consecutiveFailures: 99));
+            FlyoutViewModel.ResolveState(new LoginState(kind), isAuthenticated: true, latestUsage: UsageWithModels(), authFailed: true, consecutiveFailures: 99));
     }
 
     [Fact]
@@ -280,6 +289,43 @@ public class FlyoutStateTests
         Assert.Null(row.BarPercent); // empty track in the disabled state
         Assert.Equal("Paused - monthly limit reached", row.StatusText);
         Assert.NotNull(row.BalanceText);
+    }
+
+    [Fact]
+    public void CreditsRow_DisabledByAdmin_ShowsPlainPaused_WithResetDate_NotMonthlyLimitCopy()
+    {
+        // A disabled reason OTHER than org_level_disabled_until (here paused_by_admin) renders the
+        // plain "Paused" copy, never the "monthly limit reached" wording; a non-null StateResetDate
+        // appends ", resets ...". Covers the non-org-level disabled branch + the reset-date append
+        // that the existing org_level test does not exercise (U12).
+        var credits = new UsageCredits
+        {
+            StateKind = CreditsStateKind.Disabled,
+            DisabledReason = "paused_by_admin",
+            StateResetDate = Now.AddDays(3),
+        };
+
+        var row = FlyoutViewModel.MakeCreditsRow(credits, Now);
+
+        Assert.True(row.HasCredits);
+        Assert.Null(row.BarPercent);                              // disabled -> empty track
+        Assert.StartsWith("Paused", row.StatusText);
+        Assert.DoesNotContain("monthly limit reached", row.StatusText); // the org_level copy is NOT used
+        Assert.Contains(", resets ", row.StatusText);             // a non-null reset date is appended
+    }
+
+    [Fact]
+    public void CreditsRow_DisabledByAdmin_NoResetDate_IsBarePaused()
+    {
+        var credits = new UsageCredits
+        {
+            StateKind = CreditsStateKind.Disabled,
+            DisabledReason = "paused_by_admin",
+            StateResetDate = null,
+        };
+
+        var row = FlyoutViewModel.MakeCreditsRow(credits, Now);
+        Assert.Equal("Paused", row.StatusText); // no reset date -> no ", resets ..." suffix
     }
 
     [Fact]

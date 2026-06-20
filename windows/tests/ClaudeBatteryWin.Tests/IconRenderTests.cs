@@ -170,17 +170,48 @@ public class IconRenderTests
     }
 
     [Fact]
-    public void Render_CountdownRidesBatteryOnly_NotStatusGlyphs()
+    public void Render_NonBatteryStatesIgnoreCountdown_SuppressAcrossCountdownChange()
     {
-        // A non-empty countdown on a non-battery branch must not throw and is folded into the
-        // signature (so the same status+countdown tuple still suppresses).
+        // R6 (U5): the countdown cell only rides the battery branch, so it must NOT be part of a
+        // non-battery signature. A per-minute countdown tick on a status/auth glyph would otherwise
+        // force a needless repaint every minute even though the drawn output is identical. Two
+        // DIFFERENT countdown strings on the same non-battery state therefore produce equal
+        // signatures -> the second render is suppressed (no repaint across the minute tick).
+        TrayRenderState[] states =
+        {
+            new TrayRenderState.Unauthenticated(),
+            new TrayRenderState.AuthFailed(),
+            new TrayRenderState.StatusError(),
+            new TrayRenderState.StatusStale(),
+            new TrayRenderState.StatusLoading(),
+        };
+
+        foreach (var state in states)
+        {
+            using var renderer = new DualHorizontalRenderer();
+            using Bitmap? first = renderer.Render(state, ThemeBucket.Dark, "5h+");
+            Assert.NotNull(first);
+
+            Bitmap? second = renderer.Render(state, ThemeBucket.Dark, "3h+");
+            Assert.Null(second); // countdown ignored for non-battery -> identical signature -> suppressed
+            Assert.Equal(1, renderer.SuppressedCount);
+        }
+    }
+
+    [Fact]
+    public void Render_BatteryCountdownChange_StillReRenders_ContrastToNonBattery()
+    {
+        // R6 contrast: the battery branch DOES re-render when the countdown changes (the cell rides
+        // the battery), so the non-battery short-circuit above must not over-suppress the battery.
         using var renderer = new DualHorizontalRenderer();
-        using Bitmap? first = renderer.Render(new TrayRenderState.StatusLoading(), ThemeBucket.Dark, "5m");
+        var state = new TrayRenderState.Battery(Snapshot(session: 75, weekly: 43));
+
+        using Bitmap? first = renderer.Render(state, ThemeBucket.Dark, "5h+");
         Assert.NotNull(first);
 
-        Bitmap? second = renderer.Render(new TrayRenderState.StatusLoading(), ThemeBucket.Dark, "5m");
-        Assert.Null(second);
-        Assert.Equal(1, renderer.SuppressedCount);
+        using Bitmap? second = renderer.Render(state, ThemeBucket.Dark, "3h+");
+        Assert.NotNull(second); // a changed countdown on the battery branch repaints
+        Assert.Equal(0, renderer.SuppressedCount);
     }
 
     // --- Compact countdown saturation / floor ---

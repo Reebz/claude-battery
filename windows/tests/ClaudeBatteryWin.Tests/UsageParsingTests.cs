@@ -290,6 +290,44 @@ public class UsageParsingTests
     }
 
     [Fact]
+    public void ExtraUsage_ParsesAllFields_FromCanonicalShape()
+    {
+        // The extra_usage tier (the prepaid-overage block) decodes its four fields. Covers the
+        // ParseExtraUsage path the resolver/credits derivation does not otherwise exercise (U12).
+        const string json = """
+        {
+          "extra_usage": {
+            "is_enabled": true,
+            "monthly_limit": 5000,
+            "used_credits": 1234.5,
+            "utilization": 24.69
+          }
+        }
+        """;
+        var response = UsageResponseParser.Parse(json);
+        Assert.NotNull(response.ExtraUsage);
+        var e = response.ExtraUsage!;
+        Assert.True(e.IsEnabled);
+        Assert.Equal(5000d, e.MonthlyLimit!.Value, 3);
+        Assert.Equal(1234.5, e.UsedCredits!.Value, 3);
+        Assert.Equal(24.69, e.Utilization!.Value, 3);
+    }
+
+    [Fact]
+    public void ExtraUsage_StringTypedIsEnabled_DegradesToNull_NotThrow()
+    {
+        // A string-typed is_enabled is not a real bool, so the tolerant reader yields null rather than
+        // throwing the decode (KTD1). The block still parses; only the bad field degrades.
+        const string json = """
+        { "extra_usage": { "is_enabled": "yes", "monthly_limit": 100 } }
+        """;
+        var response = UsageResponseParser.Parse(json);
+        Assert.NotNull(response.ExtraUsage);
+        Assert.Null(response.ExtraUsage!.IsEnabled); // "yes" is not a bool -> null, not a throw
+        Assert.Equal(100d, response.ExtraUsage.MonthlyLimit!.Value, 3);
+    }
+
+    [Fact]
     public void NumericString_Utilization_IsParsed()
     {
         // The Mac uses try? decode(Double) which does not coerce strings, but the brainstorm shows

@@ -196,6 +196,22 @@ public sealed class DualHorizontalRenderer : IDisposable
     private readonly Font _cellFont = new(MonospaceFamily, CellFontSize, FontStyle.Regular, GraphicsUnit.Pixel);
     private readonly Font _statusFont = new(MonospaceFamily, StatusFontSize, FontStyle.Regular, GraphicsUnit.Pixel);
 
+    // One persistent measure surface reused for every MeasureString, instead of allocating a fresh
+    // 1x1 Bitmap+Graphics per measure (R7). Configured identically to NewGraphics so MeasureString
+    // results are byte-identical to the prior per-call surface. Disposed in Dispose.
+    private readonly Bitmap _measureBitmap;
+    private readonly Graphics _measureGraphics;
+
+    // The tight string-measure/draw format, held as an instance field disposed in Dispose rather than
+    // a never-disposed static (R8). Symmetric with the per-instance fonts above.
+    private readonly StringFormat _tightFormat = CreateTightFormat();
+
+    public DualHorizontalRenderer()
+    {
+        _measureBitmap = NewCanvas(1, 1);
+        _measureGraphics = NewGraphics(_measureBitmap);
+    }
+
     /// <summary>
     /// Cache key for the last successful render. When two signatures compare equal the produced
     /// bitmap would be identical, so a re-render is wasted work. Private struct: equality covers
@@ -224,13 +240,17 @@ public sealed class DualHorizontalRenderer : IDisposable
 
         public static RenderSignature For(TrayRenderState state, ThemeBucket theme, string countdown)
         {
+            // The countdown cell ONLY rides the battery branch (see Render), so it must not be part
+            // of a non-battery signature - otherwise a per-minute countdown tick would force a needless
+            // repaint of a status/auth glyph whose drawn output never changes. Non-battery branches
+            // therefore key on string.Empty, not the live countdown (R6).
             return state switch
             {
-                TrayRenderState.Unauthenticated => new RenderSignature(0, 0, 0, theme, countdown),
-                TrayRenderState.AuthFailed => new RenderSignature(1, 0, 0, theme, countdown),
-                TrayRenderState.StatusError => new RenderSignature(2, 0, 0, theme, countdown),
-                TrayRenderState.StatusStale => new RenderSignature(3, 0, 0, theme, countdown),
-                TrayRenderState.StatusLoading => new RenderSignature(4, 0, 0, theme, countdown),
+                TrayRenderState.Unauthenticated => new RenderSignature(0, 0, 0, theme, string.Empty),
+                TrayRenderState.AuthFailed => new RenderSignature(1, 0, 0, theme, string.Empty),
+                TrayRenderState.StatusError => new RenderSignature(2, 0, 0, theme, string.Empty),
+                TrayRenderState.StatusStale => new RenderSignature(3, 0, 0, theme, string.Empty),
+                TrayRenderState.StatusLoading => new RenderSignature(4, 0, 0, theme, string.Empty),
                 TrayRenderState.Battery battery => new RenderSignature(
                     5,
                     (int)battery.Usage.SessionRemaining,
@@ -447,7 +467,7 @@ public sealed class DualHorizontalRenderer : IDisposable
         g.SetClip(clip);
         using (var brush = new SolidBrush(color))
         {
-            g.DrawString(numberStr, font, brush, x, y, TightFormat);
+            g.DrawString(numberStr, font, brush, x, y, _tightFormat);
         }
         g.Restore(saved);
     }
@@ -495,7 +515,7 @@ public sealed class DualHorizontalRenderer : IDisposable
             g.DrawString(text, _statusFont, brush,
                 (StatusOutlineWidth - size.Width) / 2f,
                 (IconHeight - size.Height) / 2f,
-                TightFormat);
+                _tightFormat);
         }
 
         return bitmap;
@@ -514,9 +534,7 @@ public sealed class DualHorizontalRenderer : IDisposable
         {
             float iconHeight = Math.Max(IconHeight, batteryBitmap.Height);
 
-            using var measureBitmap = NewCanvas(1, 1);
-            using var measureG = NewGraphics(measureBitmap);
-            SizeF textSize = MeasureTight(measureG, countdown, _cellFont);
+            SizeF textSize = MeasureTight(_measureGraphics, countdown, _cellFont);
             float cellWidth = (float)Math.Ceiling(textSize.Width) + CellHPadding * 2f;
 
             float totalWidth = cellWidth + CellGap + batteryBitmap.Width;
@@ -535,7 +553,7 @@ public sealed class DualHorizontalRenderer : IDisposable
                 g.DrawString(countdown, _cellFont, brush,
                     (cellWidth - textSize.Width) / 2f,
                     (iconHeight - textSize.Height) / 2f,
-                    TightFormat);
+                    _tightFormat);
             }
 
             g.DrawImage(batteryBitmap,
@@ -571,8 +589,6 @@ public sealed class DualHorizontalRenderer : IDisposable
     /// <c>size(withAttributes:)</c>. <c>GenericTypographic</c> drops the default GDI+ glyph
     /// overhang.
     /// </summary>
-    private static readonly StringFormat TightFormat = CreateTightFormat();
-
     private static StringFormat CreateTightFormat()
     {
         var fmt = (StringFormat)StringFormat.GenericTypographic.Clone();
@@ -580,8 +596,8 @@ public sealed class DualHorizontalRenderer : IDisposable
         return fmt;
     }
 
-    private static SizeF MeasureTight(Graphics g, string text, Font font) =>
-        g.MeasureString(text, font, int.MaxValue, TightFormat);
+    private SizeF MeasureTight(Graphics g, string text, Font font) =>
+        g.MeasureString(text, font, int.MaxValue, _tightFormat);
 
     private static Color WithAlpha(Color color, double alpha)
     {
@@ -619,5 +635,8 @@ public sealed class DualHorizontalRenderer : IDisposable
         _smallNumberFont.Dispose();
         _cellFont.Dispose();
         _statusFont.Dispose();
+        _tightFormat.Dispose();
+        _measureGraphics.Dispose();
+        _measureBitmap.Dispose();
     }
 }

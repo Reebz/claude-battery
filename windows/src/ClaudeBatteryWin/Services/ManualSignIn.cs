@@ -10,8 +10,8 @@ namespace ClaudeBatteryWin.Services;
 /// WebView2 login window, so it covers accounts the embedded flow cannot complete (Google-federated,
 /// passkey-only) - the same role it plays on the Mac.
 ///
-/// The actual WebView2 login lives in the (not-yet-written) U6/U7 AuthManager. This unit owns ONLY
-/// the manual path, built on the same primitives the AuthManager will reuse: the shared
+/// The embedded WebView2 login flow lives in <see cref="AuthManager"/> (U6/U7); this unit owns ONLY
+/// the manual cookie-paste path, built on the same primitives the AuthManager reuses: the shared
 /// <see cref="IClaudeApi"/> for org discovery and the <see cref="AccountStore"/> for add/re-auth
 /// and cookie priming. The pure validation (<see cref="ParsePastedCredentials"/>,
 /// <see cref="Sanitize"/>) is static so it unit-tests without any network or registry, and the async
@@ -184,7 +184,7 @@ public sealed class ManualSignIn
             return ManualSignInResult.NoOrganizations;
         }
 
-        var email = ExtractEmail(orgs) ?? $"Account {_accountStore.Accounts.Count + 1}";
+        var email = AuthManager.ExtractEmail(orgs) ?? $"Account {_accountStore.Accounts.Count + 1}";
 
         // ONE org-selection rule, shared with the WebView path (AuthManager.SelectOrg); never blindly
         // orgs[0]. The manual path ignores the carried account id and resolves the account by org id.
@@ -252,14 +252,8 @@ public sealed class ManualSignIn
         return ManualSignInResult.Success(resolved.DisplayName);
     }
 
-    /// <summary>
-    /// Best-effort email pull from the org list for the account display name, mirroring the Mac
-    /// <c>extractEmail</c> preference for the enriched <c>email_address</c> field. The deeper raw-JSON
-    /// fallback keys the Mac also probes are not modeled here; an absent email falls back to
-    /// "Account N" at the call site.
-    /// </summary>
-    private static string? ExtractEmail(IReadOnlyList<Organization> orgs)
-        => orgs.Select(o => o.EmailAddress).FirstOrDefault(e => !string.IsNullOrEmpty(e));
+    // Email extraction is the shared AuthManager.ExtractEmail (called above); the previously
+    // duplicated copy here was removed (R9) so the WebView and manual-paste paths cannot diverge.
 
     [Conditional("DEBUG")]
     private static void DebugLog(string message) => Debug.WriteLine($"[ManualSignIn] {message}");
