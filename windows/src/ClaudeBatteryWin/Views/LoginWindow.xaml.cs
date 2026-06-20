@@ -46,6 +46,11 @@ public partial class LoginWindow : Window, ILoginWebView
     private readonly string _userDataFolder;
     private readonly DispatcherTimer _cookiePollTimer;
 
+    // Bridges a Navigate() call issued before CoreWebView2 exists (PresentLogin navigates synchronously
+    // right after Create(), while init is still async) to the init success path that replays it. Without
+    // it the first navigation is silently dropped and the window stays blank at about:blank.
+    private readonly PendingNavigation _pendingNavigation = new();
+
     private CoreWebView2Environment? _environment;
     private Microsoft.Web.WebView2.Wpf.WebView2? _popup;
     private Func<string, bool>? _popupGate;
@@ -216,6 +221,15 @@ public partial class LoginWindow : Window, ILoginWebView
             core.NavigationCompleted += OnCoreNavigationCompleted;
             core.HistoryChanged += OnCoreHistoryChanged;
             core.NewWindowRequested += OnCoreNewWindowRequested;
+
+            // Replay any navigation requested before the core was ready - the PresentLogin initial load
+            // (and any Retry issued during init). Routed through core.Navigate so it still passes the
+            // NavigationStarting gate. Without this the first navigation is lost and the window stays
+            // blank at about:blank (the field bug: blank "Sign in to Claude" window, zero network).
+            if (_pendingNavigation.TryConsume(out var pendingUrl))
+            {
+                core.Navigate(pendingUrl);
+            }
         }
         catch (Exception ex)
         {
@@ -246,7 +260,21 @@ public partial class LoginWindow : Window, ILoginWebView
 
     public void StartCookiePolling() => _cookiePollTimer.Start();
 
-    public void Navigate(string url) => WebView.CoreWebView2?.Navigate(url);
+    public void Navigate(string url)
+    {
+        // The core initializes asynchronously (InitializeWebView2Async), and AuthManager.PresentLogin
+        // calls Navigate synchronously right after Create() - so on the first call CoreWebView2 is null
+        // and a direct Navigate would be silently dropped, leaving the window blank at about:blank.
+        // Latch the URL when the core is not ready; the init success path replays it. When the core is
+        // already up (e.g. the Retry path after a completed init), navigate immediately.
+        if (WebView.CoreWebView2 is { } core)
+        {
+            core.Navigate(url);
+            return;
+        }
+
+        _pendingNavigation.Set(url);
+    }
 
     void ILoginWebView.Show() => Show();
 
