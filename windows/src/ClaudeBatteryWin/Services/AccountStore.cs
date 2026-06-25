@@ -137,6 +137,12 @@ public sealed class AccountStore
                 Email = account.Email,
                 SessionKey = account.SessionKey,
                 AllCookieHeader = account.AllCookieHeader,
+                // Refresh the captured UA in place too: re-auth captures a fresh session UA, and
+                // omitting it here would leave the re-authed account carrying the STALE UA - the
+                // exact wrong-UA-then-403 failure this fix targets (U1). Coalesce to the existing UA
+                // if a re-auth somehow carried none, so a known-good UA is never clobbered to null
+                // (mirrors UpdateSession, which preserves it).
+                UserAgent = account.UserAgent ?? existing.UserAgent,
             };
             _accounts[existingIndex] = updated;
             SaveSecret(updated);
@@ -377,6 +383,28 @@ public sealed class AccountStore
     }
 
     /// <summary>
+    /// Restore-only variant of <see cref="ActivateCookies"/>, called SOLELY by <see cref="Load"/>: it
+    /// primes the active account's captured set but DROPS a stored <c>__cf_bm</c> at injection time so
+    /// Cloudflare re-issues a fresh one on the first cold-start exchange (the persisted token is
+    /// commonly past its ~30-min TTL). A sibling method - not a shared flag threaded through the five
+    /// full-set <see cref="ActivateCookies"/> callers - so a future edit cannot silently start
+    /// dropping <c>__cf_bm</c> on a switch/re-auth (KTD5). <see cref="Account.AllCookieHeader"/> stays
+    /// stored verbatim; the drop happens only here, at injection.
+    /// </summary>
+    private void ActivateCookiesForRestore(Account account)
+    {
+        ClearClaudeCookies();
+        if (!string.IsNullOrEmpty(account.AllCookieHeader))
+        {
+            InjectCookies(account.AllCookieHeader!, skipCfBm: true);
+        }
+        else
+        {
+            InjectCookies($"sessionKey={account.SessionKey}");
+        }
+    }
+
+    /// <summary>
     /// Remove every claude.ai-scoped cookie from the shared jar. <see cref="CookieContainer"/> has no
     /// delete, so expire each matching cookie (set <c>Expired = true</c>); the container then drops
     /// it. Matches both <c>claude.ai</c> and <c>.claude.ai</c> domains, exactly as the Mac did
@@ -402,7 +430,7 @@ public sealed class AccountStore
     /// drop later cookies), trim, split on the first <c>"="</c> only, and skip a pair whose name or
     /// value is empty.
     /// </summary>
-    private void InjectCookies(string headerString)
+    private void InjectCookies(string headerString, bool skipCfBm = false)
     {
         foreach (var rawPair in headerString.Split(';'))
         {
@@ -422,6 +450,15 @@ public sealed class AccountStore
             var name = trimmed[..eq].Trim();
             var value = trimmed[(eq + 1)..];
             if (name.Length == 0 || value.Length == 0)
+            {
+                continue;
+            }
+
+            // Cold-start restore drops a stored __cf_bm so Cloudflare issues a FRESH one on the first
+            // exchange (the persisted token is commonly past its ~30-min TTL). Exact-match only, never
+            // a suffix/contains (mirrors the ClearClaudeCookies discipline at :391). Restore-only:
+            // every other caller leaves skipCfBm=false and keeps injecting the full set (KTD5/U5).
+            if (skipCfBm && name == "__cf_bm")
             {
                 continue;
             }
@@ -496,10 +533,13 @@ public sealed class AccountStore
             PersistMetadata();
         }
 
-        // Prime the jar from the active account so the first poll after boot carries the full set.
+        // Prime the jar from the active account so the first poll after boot carries the captured set
+        // MINUS a stale __cf_bm (U5): the restore-only variant drops it so Cloudflare issues a fresh
+        // one on the first exchange. sessionKey + the persisted UA (U2) are the only load-bearing
+        // carry-overs across a restart.
         if (ActiveAccount is { } active)
         {
-            ActivateCookies(active);
+            ActivateCookiesForRestore(active);
         }
     }
 

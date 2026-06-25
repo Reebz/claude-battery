@@ -336,13 +336,27 @@ public sealed class UsageService : IDisposable
             {
                 response = await _api.GetUsageAsync(org, cancellationToken).ConfigureAwait(false);
             }
-            catch (ClaudeAuthException)
+            catch (ClaudeAuthException ex)
             {
-                // 401/403: hard auth failure. Mirror the Mac: increment, set authFailed, null
-                // usage, stop polling, notify. This is the one HTTP outcome that stops the loop.
-                // The generation guard inside MarkAuthFailed discards a 401 from a superseded
-                // generation so it can never flag the now-active account (U2).
                 if (cancellationToken.IsCancellationRequested) return;
+
+                // A Cloudflare bot-block 403 is NOT a genuine auth failure: re-login cannot clear it,
+                // and the first restored poll commonly hits one with a stale/absent __cf_bm. Treat it
+                // exactly like the network catch-all arm below - the FIRST poll after resume/autostart
+                // gets one penalty-free retry (the shared jar absorbs a fresh __cf_bm via Set-Cookie,
+                // U3/U5), a later block backs off (network-like), and NEITHER sets authFailed nor fires
+                // AuthFailureDetected (prompting re-login on a CF block would be wrong - KTD4). A
+                // genuine 401, or a 403 WITHOUT the Cloudflare tell, still hard-stops as before.
+                var cfBlock = ex.StatusCode == 403 && ex.LooksLikeCloudflareBlock;
+                if (cfBlock)
+                {
+                    if (!tolerateNoNetwork) RecordHardFailure(dispatchGeneration, cancellationToken);
+                    return;
+                }
+
+                // 401/403: hard auth failure. Mirror the Mac: increment, set authFailed, null usage,
+                // stop polling, notify. The generation guard inside MarkAuthFailed discards a 401 from
+                // a superseded generation so it can never flag the now-active account (U2).
                 MarkAuthFailed(dispatchGeneration, cancellationToken);
                 return;
             }

@@ -28,6 +28,17 @@ public sealed record Account
     /// Optional user-chosen nickname (trimmed, max 30 chars). Null falls back to <see cref="Email"/>.
     public string? Nickname { get; init; }
 
+    /// <summary>
+    /// The WebView2 session User-Agent captured at login (<c>AuthManager.CapturedUserAgent</c>),
+    /// seeded into the cold-start polling transport on restore so the poll's UA matches the login
+    /// session's verbatim (a Cloudflare necessity). NON-SECRET: a User-Agent is a public request
+    /// header every browser echoes, so it rides in plaintext <c>accounts.json</c> metadata, NOT the
+    /// DPAPI blob (it is not added to <see cref="SessionKey"/>/<see cref="AllCookieHeader"/>). Null
+    /// for accounts persisted before this field existed; those fall back to the app's
+    /// <c>DefaultUserAgent</c> until the next login captures and persists a real UA.
+    /// </summary>
+    public string? UserAgent { get; init; }
+
     public DateTimeOffset AddedDate { get; init; } = DateTimeOffset.UtcNow;
 
     /// Weekly-remaining percentage below which a low-usage toast fires (R19). Default 20.

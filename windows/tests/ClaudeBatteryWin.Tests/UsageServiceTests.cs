@@ -245,6 +245,138 @@ public class UsageServiceTests
         Assert.False(clock.IsArmed);
     }
 
+    // MARK: - Cloudflare-block 403 soft-handling (U4)
+
+    [Fact]
+    public async Task FirstRestoredPoll_CloudflareBlock403_IsPenaltyFree_NoAuthFailed()
+    {
+        // The first poll after autostart hits a Cloudflare block (stale/absent __cf_bm). It must be
+        // penalty-free: no backoff bump, no authFailed, no re-login prompt - the jar self-heals on
+        // the next exchange (U3/U5).
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.Equal(0, service.ConsecutiveFailures); // penalty-free first poll
+        Assert.False(service.AuthFailed);             // a CF block never prompts re-login
+    }
+
+    [Fact]
+    public async Task FirstRestoredPoll_CloudflareBlock403_KeepsPollingArmed()
+    {
+        // "Polling continues" is the load-bearing property of the soft path: a CF block must NOT call
+        // StopPolling. Drive the scheduler (not PollUsageAsync directly) so a stray StopPolling on the
+        // CF path - which would null the CTS and leave the poller disarmed - is caught. Mirror of
+        // AfterAuthFailed_TimerFireChain_DoesNotReArm with the OPPOSITE expectation.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);   // arms the zero-delay first fire
+        Assert.True(clock.IsArmed);
+
+        clock.Fire();                                // OnTimerFired -> first poll -> CF block (grace)
+        await service.WaitForRearmAfterFireAsync();  // let the re-arm decision run
+
+        Assert.False(service.AuthFailed);
+        Assert.True(clock.IsArmed); // a CF block re-arms the next poll - polling genuinely continues
+    }
+
+    [Fact]
+    public async Task SecondCloudflareBlock403_BacksOff_ButNeverAuthFailed()
+    {
+        // After the one-shot grace, a persistent Cloudflare block backs off (network-like) rather
+        // than prompting re-auth - it advances the failure count but NEVER sets authFailed.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None); // first: penalty-free grace
+        Assert.Equal(0, service.ConsecutiveFailures);
+
+        await service.PollUsageAsync(CancellationToken.None); // second: hard failure (backoff), not auth
+        Assert.Equal(1, service.ConsecutiveFailures);
+        Assert.False(service.AuthFailed);
+    }
+
+    [Fact]
+    public async Task FirstRestoredPoll_Genuine401_HardStopsImmediately_DespiteResumeGrace()
+    {
+        // The resume/autostart grace covers a Cloudflare block ONLY. A genuine 401 hard-stops on the
+        // very first poll (the safety residual: a real expired session still surfaces re-auth).
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(401) };
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.True(service.AuthFailed);
+    }
+
+    [Fact]
+    public async Task FirstRestoredPoll_403WithoutCloudflareTell_HardStops()
+    {
+        // The key safety test: status 403 ALONE is not grace-eligible. A 403 lacking the Cloudflare
+        // tell is a genuine auth 403 and hard-stops even on the first poll.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: false) };
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.True(service.AuthFailed);
+    }
+
+    [Fact]
+    public async Task SupersededGeneration_CloudflareBlock403_IsDiscarded_NeverFlagsNewAccount()
+    {
+        // A CF block whose generation is superseded mid-flight (an account switch to B). The CF path
+        // never sets authFailed, and the generation guard on RecordHardFailure discards even the
+        // backoff bump, so B is untouched.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var generation = 1;
+        var api = new FakeApi();
+
+        using var service = new UsageService(api, net, clock, () => generation);
+        service.StartPolling(Org);
+
+        var authFired = false;
+        service.AuthFailureDetected += (_, _) => authFired = true;
+
+        // Poll 1: a normal success consumes the first-poll grace so poll 2 reaches RecordHardFailure
+        // (where the generation guard lives).
+        await service.PollUsageAsync(CancellationToken.None);
+        Assert.Equal(0, service.ConsecutiveFailures);
+
+        // Poll 2: the CF block, with a switch to B landing mid-flight.
+        api.UsageBehavior = _ =>
+        {
+            generation = 2; // the switch supersedes this poll's dispatch generation (1)
+            throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true);
+        };
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.False(service.AuthFailed);
+        Assert.False(authFired);
+        Assert.Equal(0, service.ConsecutiveFailures); // superseded backoff bump discarded
+    }
+
     [Fact]
     public async Task AuthFailure_On403_SameAs401()
     {

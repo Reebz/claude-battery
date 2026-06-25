@@ -63,6 +63,51 @@ public class FlyoutStateTests
             FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: false, latestUsage: null, authFailed: false, consecutiveFailures: 0));
     }
 
+    // MARK: - ReauthRequired (DPAPI drop) is distinct from a plain signed-out user (U6/R4)
+
+    [Fact]
+    public void State_ReauthRequired_WhenSecurityDataUnreadableAndNoActiveAccount()
+    {
+        Assert.Equal(FlyoutContentState.ReauthRequired,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: false, latestUsage: null,
+                authFailed: false, consecutiveFailures: 0, securityDataUnreadable: true));
+    }
+
+    [Fact]
+    public void State_Unauthenticated_NotReauthRequired_WhenSecurityDataReadable()
+    {
+        // The plain signed-out surface and the DPAPI-drop surface are provably distinct: same inputs,
+        // only the securityDataUnreadable flag differs.
+        Assert.Equal(FlyoutContentState.Unauthenticated,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: false, latestUsage: null,
+                authFailed: false, consecutiveFailures: 0, securityDataUnreadable: false));
+    }
+
+    [Fact]
+    public void State_NotReauthRequired_WhenAnAccountSurvived()
+    {
+        // One blob dropped but another account loaded fine -> isAuthenticated true -> the user is
+        // signed in normally; the ReauthRequired surface must NOT show (the guard is !isAuthenticated).
+        Assert.Equal(FlyoutContentState.Authenticated,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: true, latestUsage: UsageWithModels(),
+                authFailed: false, consecutiveFailures: 0, securityDataUnreadable: true));
+    }
+
+    [Fact]
+    public void ViewModel_SecurityDataUnreadable_NoActiveAccount_ResolvesReauthRequired_WithCopy()
+    {
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = false,
+            SecurityDataUnreadable = true,
+        };
+        Assert.Equal(FlyoutContentState.ReauthRequired, vm.State);
+        // The rendered re-auth copy (the flyout panel binds this const via x:Static) names the
+        // security-data cause, so a DPAPI drop is not mistaken for the session-restore bug (R4).
+        Assert.Contains("security data could not be read", FlyoutViewModel.ReauthRequiredHint,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void State_Authenticated_WhenSnapshotPresent()
     {

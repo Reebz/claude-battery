@@ -296,6 +296,26 @@ public sealed class AuthManagerTests : IDisposable
         Assert.Equal("Mozilla/5.0 Edge/Test", manager.CapturedUserAgent);
     }
 
+    [Fact]
+    public async Task UserAgent_CapturedAtLogin_IsPersistedOnTheAccount()
+    {
+        // R1 capture->persist: the session UA captured at NavigationCompleted must ride through
+        // UpsertAccount onto the stored account, so a later cold start can seed the poll transport
+        // with it (U1/U2). CapturedUserAgent is set ONLY by NavigationCompleted - a cookies-only
+        // capture never sets a UA - so seed it via a navigation first, THEN drive discovery via the
+        // SPA history-changed sessionKey (the nav-then-history idiom).
+        var api = new FakeClaudeApi { Orgs = new[] { Org("org-1") } };
+        var (manager, web, _, _, store) = NewManager(api);
+        manager.PresentLogin();
+
+        web.RaiseNavigationCompleted(new[] { Cookie("__cf_bm", "cf") }, ua: "UA/Test");
+        web.RaiseHistoryChanged(new[] { Cookie("sessionKey", "sk-live"), Cookie("__cf_bm", "cf") });
+        await manager.LastDiscoveryTask!;
+
+        Assert.Single(store.Accounts);
+        Assert.Equal("UA/Test", store.Accounts[0].UserAgent); // captured UA rode through UpsertAccount
+    }
+
     // ---- WebView2 init failure surface (U6 / issue #6) -----------------------------------------
 
     [Fact]

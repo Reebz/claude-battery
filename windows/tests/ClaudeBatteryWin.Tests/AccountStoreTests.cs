@@ -157,6 +157,69 @@ public sealed class AccountStoreTests : IDisposable
         Assert.Contains("org-A", rawMetadata); // org id is non-secret metadata
     }
 
+    // ---- U1: the captured session UA persists as non-secret metadata (R1) ----
+
+    [Fact]
+    public void Reload_RehydratesUserAgent_AsPlaintextMetadata_NotInDpapiBlob()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(new Account
+        {
+            Email = "u@x.com",
+            SessionKey = "sk-A",
+            OrganizationId = "org-A",
+            AllCookieHeader = "sessionKey=sk-A",
+            UserAgent = "UA/Reload-Test",
+        });
+
+        // The UA is non-secret, so it lives in plaintext accounts.json - never the DPAPI blob.
+        var rawMetadata = File.ReadAllText(_metadataPath);
+        Assert.Contains("UA/Reload-Test", rawMetadata);
+
+        var blobBytes = File.ReadAllBytes(new SecretStore(_secretsDir).BlobPath(store.Accounts[0].Id));
+        Assert.DoesNotContain("UA/Reload-Test", System.Text.Encoding.Latin1.GetString(blobBytes));
+
+        // A second store over the same paths exposes the persisted UA on the active account.
+        var reloaded = NewStore(new CookieContainer());
+        Assert.Equal("UA/Reload-Test", reloaded.ActiveAccount!.UserAgent);
+    }
+
+    [Fact]
+    public void Reload_AccountWithNoUserAgent_LoadsAsNull_NoError()
+    {
+        // A legacy accounts.json (pre-U1, no userAgent key) loads as UserAgent == null without error;
+        // persisting an account whose UA is null produces the same on-disk shape.
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A")); // NewAccount sets no UserAgent
+        Assert.Null(store.Accounts[0].UserAgent);
+
+        var reloaded = NewStore(new CookieContainer());
+        Assert.Single(reloaded.Accounts);
+        Assert.Null(reloaded.Accounts[0].UserAgent);
+    }
+
+    [Fact]
+    public void DuplicateOrg_Reauth_RefreshesUserAgentInPlace()
+    {
+        // A re-auth to an org we already track must refresh the captured UA in place; leaving the
+        // stale UA is the wrong-UA-then-403 failure mode U1/U2 fix.
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "old", OrganizationId = "org-A", UserAgent = "UA/Old",
+        });
+        var originalId = store.Accounts[0].Id;
+
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "new", OrganizationId = "org-A", UserAgent = "UA/New",
+        });
+
+        Assert.Single(store.Accounts);
+        Assert.Equal(originalId, store.Accounts[0].Id); // updated in place, not a new account
+        Assert.Equal("UA/New", store.Accounts[0].UserAgent);
+    }
+
     // ---- corrupt blob drops the account + deletes the file + flags re-auth ----
 
     [Fact]
@@ -199,6 +262,44 @@ public sealed class AccountStoreTests : IDisposable
         Assert.Single(reloaded.Accounts);
         Assert.Equal("org-B", reloaded.ActiveAccount!.OrganizationId);
         Assert.Contains(activeId, reloaded.DroppedAccountIds);
+    }
+
+    // ---- U6: App startup latch predicate (producer -> latch chain, R4) ----
+
+    [Fact]
+    public void App_ShouldFlagSecurityDataUnreadable_TrueOnDpapiDropWithNoSurvivor()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-A"));
+        var id = store.Accounts[0].Id;
+
+        // Healthy reload: no drop -> not flagged.
+        Assert.False(ClaudeBatteryWin.App.ShouldFlagSecurityDataUnreadable(NewStore(new CookieContainer())));
+
+        // Corrupt the only account's blob, reload: dropped, no survivor, signed out -> flagged.
+        File.WriteAllBytes(new SecretStore(_secretsDir).BlobPath(id), new byte[] { 9, 8, 7 });
+        var dropped = NewStore(new CookieContainer());
+        Assert.NotEmpty(dropped.DroppedAccountIds);
+        Assert.False(dropped.IsAuthenticated);
+        Assert.True(ClaudeBatteryWin.App.ShouldFlagSecurityDataUnreadable(dropped));
+    }
+
+    [Fact]
+    public void App_ShouldFlagSecurityDataUnreadable_FalseWhenASurvivorIsAuthenticated()
+    {
+        // A drop alongside a surviving account: the user is signed in via the survivor, so the DPAPI
+        // nudge must NOT show (it would be misleading) - the predicate gates on !IsAuthenticated.
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-A")); // active
+        store.UpsertAccount(NewAccount("org-B", sessionKey: "sk-B"));
+        var aId = store.Accounts.First(a => a.OrganizationId == "org-A").Id;
+
+        File.WriteAllBytes(new SecretStore(_secretsDir).BlobPath(aId), new byte[] { 1, 2, 3 });
+        var reloaded = NewStore(new CookieContainer());
+
+        Assert.NotEmpty(reloaded.DroppedAccountIds); // A dropped
+        Assert.True(reloaded.IsAuthenticated);       // B survived and is active
+        Assert.False(ClaudeBatteryWin.App.ShouldFlagSecurityDataUnreadable(reloaded));
     }
 
     // ---- switch concurrency: a late prior-generation response cannot flag the new account ----
@@ -294,6 +395,56 @@ public sealed class AccountStoreTests : IDisposable
         var cookies = jar.GetCookies(ClaudeUri);
         Assert.Equal(1, cookies.Count);
         Assert.Equal("sk-fallback", cookies["sessionKey"]!.Value);
+    }
+
+    // ---- U5: cold-start restore drops the stale __cf_bm (restore-only) ----
+
+    [Fact]
+    public void Load_DropsStaleCfBm_KeepsSessionKeyAndOtherCookies()
+    {
+        // Persist an account whose captured header carries a __cf_bm (the in-session add primes the
+        // full set into the seed jar).
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-A",
+            cookieHeader: "sessionKey=sk-A; __cf_bm=stale; lastActiveOrg=org-A"));
+
+        // A cold start (a fresh store over the same paths) primes via the restore path: the stale
+        // __cf_bm is dropped so Cloudflare issues a fresh one; sessionKey + other cookies stay.
+        var restoreJar = new CookieContainer();
+        _ = NewStore(restoreJar);
+
+        var cookies = restoreJar.GetCookies(ClaudeUri);
+        Assert.Equal("sk-A", cookies["sessionKey"]!.Value);
+        Assert.Equal("org-A", cookies["lastActiveOrg"]!.Value);
+        Assert.Null(cookies["__cf_bm"]); // stale __cf_bm dropped on restore
+    }
+
+    [Fact]
+    public void AddAndSwitch_StillInjectFullSet_InclCfBm_SkipIsRestoreOnly()
+    {
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+
+        // Add (auto-activate) injects the full set incl __cf_bm in-session - NOT the restore path.
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-A", cookieHeader: "sessionKey=sk-A; __cf_bm=cf-A"));
+        Assert.Equal("cf-A", jar.GetCookies(ClaudeUri)["__cf_bm"]!.Value);
+
+        // Switch also keeps __cf_bm (the drop is restore-only).
+        store.UpsertAccount(NewAccount("org-B", sessionKey: "sk-B", cookieHeader: "sessionKey=sk-B; __cf_bm=cf-B"));
+        store.SwitchTo(store.Accounts.First(a => a.OrganizationId == "org-B").Id);
+        Assert.Equal("cf-B", jar.GetCookies(ClaudeUri)["__cf_bm"]!.Value);
+    }
+
+    [Fact]
+    public void Load_LeavesStoredCookieHeaderVerbatim_DropIsInjectionTimeOnly()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-A",
+            cookieHeader: "sessionKey=sk-A; __cf_bm=stale"));
+
+        var reloaded = NewStore(new CookieContainer());
+        // The persisted header is stored verbatim - the __cf_bm drop happens at injection, not on disk.
+        Assert.Equal("sessionKey=sk-A; __cf_bm=stale", reloaded.Accounts[0].AllCookieHeader);
     }
 
     // ---- removing the only account clears the jar and stops polling ----

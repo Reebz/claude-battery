@@ -297,6 +297,32 @@
                         AutomationProperties.Name="Sign in to Claude" />
             </StackPanel>
 
+            <!-- 3b. Re-auth required (saved security data unreadable: a DPAPI drop, U6/R4) -->
+            <StackPanel Margin="16"
+                        VerticalAlignment="Center"
+                        Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=ReauthRequired}">
+                <TextBlock Text="🔒"
+                           FontSize="32"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+                <TextBlock Text="Re-sign-in required"
+                           Margin="0,8,0,0"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}" />
+                <TextBlock Text="{x:Static vm:FlyoutViewModel.ReauthRequiredHint}"
+                           Margin="0,2,0,0"
+                           FontSize="11"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+                <Button x:Name="ReauthSecurityButton"
+                        Content="Sign In Again"
+                        Margin="0,12,0,0"
+                        HorizontalAlignment="Center"
+                        Padding="16,6"
+                        AutomationProperties.Name="Sign in again" />
+            </StackPanel>
+
             <!-- 4. Authenticated -->
             <StackPanel Margin="12"
                         Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=Authenticated}">

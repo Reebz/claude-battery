@@ -789,6 +789,9 @@ public sealed class AuthManager
             SessionKey = sessionKey,
             OrganizationId = chosenOrg.Uuid,
             AllCookieHeader = _pendingCookieHeader,
+            // Persist the session UA so a cold-start restore seeds the poll transport with the same
+            // UA the login captured (U1/U2). Null until the first NavigationCompleted captures it.
+            UserAgent = CapturedUserAgent,
         };
 
         // UpsertAccount returns false ONLY when a genuinely new account would exceed the 5-account

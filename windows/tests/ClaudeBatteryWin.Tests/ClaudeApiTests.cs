@@ -169,6 +169,139 @@ public class ClaudeApiTests
         Assert.Null(result.FiveHour);
     }
 
+    // --- (2b) Cloudflare-block discrimination on the auth exception (U3) ------------------------
+
+    [Fact]
+    public async Task AuthException_403WithCfMitigatedChallenge_FlagsCloudflareBlock()
+    {
+        var handler = new CapturingHandler(_ => AuthResponse(HttpStatusCode.Forbidden, cfMitigated: "challenge", contentType: "text/html"));
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
+        Assert.Equal(403, ex.StatusCode);
+        Assert.True(ex.LooksLikeCloudflareBlock); // the documented cf-mitigated: challenge tell
+    }
+
+    [Fact]
+    public async Task AuthException_403WithHtmlNoCfMitigated_FlagsCloudflareBlock()
+    {
+        // Belt for edge configs that omit cf-mitigated: a 403 with text/html still reads as a block.
+        var handler = new CapturingHandler(_ => AuthResponse(HttpStatusCode.Forbidden, contentType: "text/html"));
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
+        Assert.True(ex.LooksLikeCloudflareBlock);
+    }
+
+    [Fact]
+    public async Task AuthException_403JsonNoCfMitigated_IsGenuineAuth_NotCloudflare()
+    {
+        // The key safety residual: a genuine auth 403 (application/json, no cf-mitigated) must NOT be
+        // flagged a Cloudflare block, so U4 still hard-stops and prompts re-auth.
+        var handler = new CapturingHandler(_ => AuthResponse(HttpStatusCode.Forbidden, contentType: "application/json"));
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
+        Assert.Equal(403, ex.StatusCode);
+        Assert.False(ex.LooksLikeCloudflareBlock);
+    }
+
+    [Fact]
+    public async Task AuthException_403WithBareCfRay_DoesNotFlagCloudflareBlock()
+    {
+        // Bare cf-ray / Server: cloudflare are on EVERY claude.ai response (it all sits behind
+        // Cloudflare), so they must not flip the bool - only the documented block tell does.
+        var handler = new CapturingHandler(_ =>
+        {
+            var resp = AuthResponse(HttpStatusCode.Forbidden, contentType: "application/json");
+            resp.Headers.TryAddWithoutValidation("cf-ray", "8abc-SEA");
+            resp.Headers.TryAddWithoutValidation("Server", "cloudflare");
+            return resp;
+        });
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
+        Assert.False(ex.LooksLikeCloudflareBlock);
+    }
+
+    [Fact]
+    public async Task AuthException_401_IsNeverCloudflareBlock()
+    {
+        var handler = new CapturingHandler(_ => AuthResponse(HttpStatusCode.Unauthorized, contentType: "application/json"));
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
+        Assert.Equal(401, ex.StatusCode);
+        Assert.False(ex.LooksLikeCloudflareBlock); // a 401 is a genuine auth failure, never a CF block
+    }
+
+    [Fact]
+    public void ClaudeAuthException_SingleArgCtor_DefaultsCloudflareBlockFalse()
+    {
+        // The kept single-arg ctor (the production throw + ~10 test call sites) must default the flag
+        // false so existing 401/403 throws and FakeApi-thrown auth errors stay behaviorally unchanged.
+        Assert.False(new ClaudeAuthException(403).LooksLikeCloudflareBlock);
+        Assert.Equal(403, new ClaudeAuthException(403).StatusCode);
+    }
+
+    [Fact]
+    public async Task AuthException_CarriesOnlyStatusAndFlag_NoBodyOrHeaderMaterial()
+    {
+        // The exception must carry ONLY the status int + the derived bool - never body or raw header
+        // material (KTD3 redaction). Feed a secret-bearing body and assert none of it reaches Message.
+        const string secretBody = "{\"sessionKey\":\"sk-ant-LEAK\"}";
+        var handler = new CapturingHandler(_ =>
+            AuthResponse(HttpStatusCode.Forbidden, cfMitigated: "challenge", contentType: "text/html", body: secretBody));
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
+        Assert.DoesNotContain("sk-ant-", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sessionKey", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("challenge", ex.Message, StringComparison.OrdinalIgnoreCase); // header value not echoed
+
+        // The exception's OWN public surface is EXACTLY status + the flag (no body/header field). This
+        // catches a future field that carried body/header material, where the Message asserts above (a
+        // constant format string interpolating only the status) cannot.
+        var declaredProps = typeof(ClaudeAuthException)
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly)
+            .Select(p => p.Name)
+            .OrderBy(n => n, StringComparer.Ordinal)
+            .ToArray();
+        Assert.Equal(new[] { "LooksLikeCloudflareBlock", "StatusCode" }, declaredProps);
+    }
+
+    [Fact]
+    public async Task SetCookie_OnA403_IsAbsorbedBySharedJar_EnablingTheU4SelfHeal()
+    {
+        // The CI-checkable proof of the KTD5/U4 assumption: the SocketsHttpHandler absorbs Set-Cookie
+        // STATUS-INDEPENDENTLY, even on a 403, so the first restored poll's retry carries a FRESH
+        // __cf_bm the server just issued. Reuse the real SocketsHttpHandler + shared CookieContainer.
+        var jar = new CookieContainer();
+        using var server = new LoopbackServer(ctx =>
+        {
+            ctx.Response.StatusCode = 403;
+            ctx.Response.Headers["Set-Cookie"] = "__cf_bm=fresh; Path=/";
+            ctx.Response.ContentType = "text/html";
+            ctx.Response.OutputStream.Close();
+        });
+        var origin = server.Origin;
+
+        using (var api = ClaudeApi.CreateForLoopbackTest(jar, TestUserAgent, origin))
+        {
+            // The 403 throws (throwOnAuth) - expected; the assertion is on the jar absorbing Set-Cookie
+            // regardless of the status, which is exactly what U4's penalty-free retry relies on.
+            await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
+        }
+
+        Assert.Contains("__cf_bm=fresh", jar.GetCookieHeader(new Uri(origin)));
+    }
+
     // --- (3) Cookie rotation via the shared CookieContainer ------------------------------------
 
     [Fact]
@@ -393,6 +526,34 @@ public class ClaudeApiTests
         Assert.Throws<ArgumentException>(() => new ClaudeApi(new CookieContainer(), ""));
     }
 
+    // --- U2: cold-start transport UA seed resolver ---------------------------------------------
+
+    [Fact]
+    public void ResolveSeedUserAgent_StoredUa_IsUsed()
+    {
+        var account = new Account { Email = "a@x.com", SessionKey = "sk", OrganizationId = "o", UserAgent = "UA/Stored" };
+        Assert.Equal("UA/Stored", ClaudeBatteryWin.App.ResolveSeedUserAgent(account));
+    }
+
+    [Fact]
+    public void ResolveSeedUserAgent_NullAccountOrEmptyUa_FallsBackToANonEmptyDefault()
+    {
+        // A null account (nothing restored) and a pre-fix account with a null/empty UA both fall back
+        // to the same frozen default - and it must be non-empty so the ClaudeApi ctor cannot throw.
+        var fallback = ClaudeBatteryWin.App.ResolveSeedUserAgent(null);
+        Assert.False(string.IsNullOrEmpty(fallback));
+
+        var emptyUa = new Account { Email = "a@x.com", SessionKey = "sk", OrganizationId = "o", UserAgent = "" };
+        Assert.Equal(fallback, ClaudeBatteryWin.App.ResolveSeedUserAgent(emptyUa));
+
+        var nullUa = new Account { Email = "a@x.com", SessionKey = "sk", OrganizationId = "o", UserAgent = null };
+        Assert.Equal(fallback, ClaudeBatteryWin.App.ResolveSeedUserAgent(nullUa));
+
+        // The fallback is a valid ClaudeApi UA (the ctor accepts it - proves the coalesce is load-bearing).
+        using var api = new ClaudeApi(new CookieContainer(), fallback);
+        Assert.NotNull(api);
+    }
+
     [Fact]
     public void Ctor_RejectsNullCookieJar()
     {
@@ -412,6 +573,23 @@ public class ClaudeApiTests
         {
             Content = new StringContent(body, Encoding.UTF8, "application/json"),
         };
+    }
+
+    /// <summary>
+    /// Build an auth-status response with a controllable <c>cf-mitigated</c> header and content type,
+    /// so the U3 Cloudflare-block discriminator can be asserted across crafted responses (header-only).
+    /// </summary>
+    private static HttpResponseMessage AuthResponse(
+        HttpStatusCode status, string? cfMitigated = null, string contentType = "application/json", string body = "")
+    {
+        var resp = new HttpResponseMessage(status);
+        if (cfMitigated is not null)
+        {
+            resp.Headers.TryAddWithoutValidation("cf-mitigated", cfMitigated);
+        }
+        resp.Content = new StringContent(body, Encoding.UTF8);
+        resp.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+        return resp;
     }
 
     private static void WriteJson(HttpListenerResponse response, string body)

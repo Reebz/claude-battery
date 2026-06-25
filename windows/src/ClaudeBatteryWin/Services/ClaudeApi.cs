@@ -233,7 +233,11 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
         {
             if (throwOnAuth)
             {
-                throw new ClaudeAuthException(status);
+                // Read the Cloudflare-block tell from response HEADERS before disposal (never the
+                // body - this throw precedes the only body read at ReadAsByteArrayAsync below, and
+                // pulling body material into scope would defeat the redaction gate). U4 decides what
+                // to do with the flag.
+                throw new ClaudeAuthException(status, LooksLikeCloudflareBlock(status, response));
             }
 
             return null;
@@ -246,6 +250,35 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
         }
 
         return await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Discriminate a Cloudflare bot-block 403 from a genuine auth 401/403 using RESPONSE HEADERS
+    /// ONLY (never the body - the redaction gate cannot sanitize uncontrolled body content, and a
+    /// body read is not even reachable on the auth path). True when Cloudflare's documented
+    /// challenge-mitigation header <c>cf-mitigated: challenge</c> is present (its only valid value),
+    /// or the status is 403 with an HTML content type (a belt for edge configs that omit the header).
+    /// Bare <c>cf-ray</c>/<c>Server: cloudflare</c> are deliberately NOT used: claude.ai sits entirely
+    /// behind Cloudflare, so those are on every response (a 200, a genuine 401, a real auth 403 alike)
+    /// and add no discrimination. Mirrors the validated spike signal
+    /// (<c>windows/spikes/auth-spike/SpikeRunner.cs</c>) - keep the two definitions in sync (KTD3).
+    /// </summary>
+    private static bool LooksLikeCloudflareBlock(int status, HttpResponseMessage response)
+    {
+        if (response.Headers.TryGetValues("cf-mitigated", out var values))
+        {
+            foreach (var value in values)
+            {
+                if (string.Equals(value?.Trim(), "challenge", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // ContentType reads the response HEADER, not the body (no ReadAsStringAsync/ByteArrayAsync).
+        return status == 403
+            && string.Equals(response.Content.Headers.ContentType?.MediaType, "text/html", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

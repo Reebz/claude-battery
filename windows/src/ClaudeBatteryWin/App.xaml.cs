@@ -94,6 +94,11 @@ public partial class App : Application
     // StateChanged tick incl. hard-failure/auth-failure ticks (issue #19).
     private DateTimeOffset? _lastNotifiedFetch;
 
+    // Latched once at startup: at least one account was dropped at load because its DPAPI blob would
+    // not decrypt (profile copy / SID change). AccountStore.DroppedAccountIds is cleared on each Load,
+    // so the fact is captured here and fed into the flyout's distinct re-auth surface (U6/R4).
+    private bool _securityDataUnreadable;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         // --- Velopack MUST run first (U12) ----------------------------------------------------
@@ -163,8 +168,14 @@ public partial class App : Application
             _usageService!.StartPolling(active.OrganizationId);
         }
 
-        // Surface any accounts dropped at load (corrupt DPAPI blob) as a one-time re-auth nudge by
-        // refreshing the flyout view-model; the flyout shows the unauthenticated/auth surfaces.
+        // Latch whether the startup signed-out state is due to a DPAPI drop (a saved account's blob
+        // would not decrypt: profile copy / SID change) rather than a plain sign-out. DroppedAccountIds
+        // is cleared on each Load, so capture it now; SyncViewModelFromServices feeds it into the
+        // flyout's distinct re-auth surface (U6/R4) and retires it once an authenticated state appears.
+        _securityDataUnreadable = ShouldFlagSecurityDataUnreadable(_accountStore);
+
+        // Surface a DPAPI-drop as the distinct re-auth surface, or an ordinary signed-out/auth state,
+        // by refreshing the flyout view-model.
         SyncViewModelFromServices();
 
         // Fire the first update check in the background; the flyout/Settings rows read the result.
@@ -234,7 +245,11 @@ public partial class App : Application
         // ClaudeApi seeded with a plausible fallback Chromium-Edge UA so a restored-account first
         // poll works (the U2 spike resolves whether this clears Cloudflare; if not, an in-WebView2
         // IClaudeApi is substituted via Swap).
-        _api = new SwappableClaudeApi(new ClaudeApi(_cookieJar, DefaultUserAgent));
+        // Seed the inner transport with the RESTORED account's captured UA (U2) so a cold-start poll
+        // carries the same UA the login session used (a Cloudflare necessity), not the frozen
+        // DefaultUserAgent. The SwappableClaudeApi wrapper is unchanged - a live login still swaps the
+        // freshest UA in via OnAuthSuccess; this only fixes the no-login-this-session restore path.
+        _api = new SwappableClaudeApi(new ClaudeApi(_cookieJar, ResolveSeedUserAgent(_accountStore.ActiveAccount)));
 
         _network = new SystemNetworkAvailability();
         _clock = new SystemSchedulerClock();
@@ -306,6 +321,28 @@ public partial class App : Application
 
         _api.Swap(new ClaudeApi(_cookieJar, userAgent));
     }
+
+    /// <summary>
+    /// The User-Agent to seed the cold-start polling transport with: the restored account's captured
+    /// session UA when present (U1/U2), else the frozen <see cref="DefaultUserAgent"/>. Coalesces a
+    /// null/empty stored UA to the default because the <see cref="ClaudeApi"/> ctor rejects an empty
+    /// UA; a pre-fix account (no persisted UA) therefore behaves exactly as today until its next login
+    /// captures a real one (KTD2 - no live-UA harvest at startup). Pure + internal so it is unit-tested
+    /// directly.
+    /// </summary>
+    internal static string ResolveSeedUserAgent(Account? account)
+        => account?.UserAgent is { Length: > 0 } ua ? ua : DefaultUserAgent;
+
+    /// <summary>
+    /// Whether the startup "re-sign-in required (security data could not be read)" surface should be
+    /// flagged: at least one account was dropped at load because its DPAPI blob would not decrypt AND
+    /// there is no active account (a surviving account that loaded fine means the user is signed in,
+    /// so the nudge would be misleading). Pure + internal so the producer -> latch chain is unit-tested
+    /// directly (U6/R4). The latch is additionally retired once any authenticated state is observed
+    /// (see <see cref="SyncViewModelFromServices"/>), so a later deliberate sign-out cannot resurface it.
+    /// </summary>
+    internal static bool ShouldFlagSecurityDataUnreadable(AccountStore? store)
+        => store is not null && store.DroppedAccountIds.Count > 0 && !store.IsAuthenticated;
 
     private IToastSink CreateToastSink()
     {
@@ -463,6 +500,7 @@ public partial class App : Application
     {
         HookButton(flyout, "SignInButton", BeginLogin);
         HookButton(flyout, "ReauthButton", BeginLogin);
+        HookButton(flyout, "ReauthSecurityButton", BeginLogin);
         HookButton(flyout, "AddAccountLinkButton", BeginLogin);
         HookButton(flyout, "LoginErrorTryAgainButton", () => _authManager?.RetryLogin());
         HookButton(flyout, "UpdateLinkButton", () => _ = ApplyUpdateAsync());
@@ -502,6 +540,16 @@ public partial class App : Application
             _flyoutViewModel.Accounts = store?.Accounts ?? Array.Empty<Account>();
             _flyoutViewModel.ActiveAccountId = store?.ActiveAccountId;
             _flyoutViewModel.CanAddAccount = store?.CanAddAccount ?? true;
+
+            // Retire the startup DPAPI-drop nudge once any authenticated state is observed: a later
+            // sign-out is then the user's own action, not the unreadable-security-data cause, so it
+            // must not resurface the re-auth copy (review: avoid a stale re-auth surface after a
+            // sign-in / account-removal sequence).
+            if (store?.IsAuthenticated == true)
+            {
+                _securityDataUnreadable = false;
+            }
+            _flyoutViewModel.SecurityDataUnreadable = _securityDataUnreadable;
 
             if (svc is not null)
             {

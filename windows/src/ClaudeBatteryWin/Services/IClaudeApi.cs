@@ -51,9 +51,29 @@ public sealed class ClaudeAuthException : Exception
 {
     public int StatusCode { get; }
 
+    /// <summary>
+    /// True when the response carried a Cloudflare bot-block tell (a <c>cf-mitigated: challenge</c>
+    /// header, or a 403 with an HTML content type) rather than a genuine auth rejection. The poller
+    /// (U4) gives the FIRST restored poll one penalty-free retry on a Cloudflare block - the shared
+    /// jar re-earns a fresh <c>__cf_bm</c> via <c>Set-Cookie</c> - while a genuine 401/403 still
+    /// hard-stops. Derived from response HEADERS only, never the body (redaction gate). Defaults
+    /// <c>false</c> on the single-arg ctor so a Cloudflare block is never assumed.
+    /// </summary>
+    public bool LooksLikeCloudflareBlock { get; }
+
+    /// <summary>
+    /// Back-compat ctor for every existing 401/403 throw + test call site: defaults the Cloudflare
+    /// signal to <c>false</c> so behavior is unchanged where the tell is not computed.
+    /// </summary>
     public ClaudeAuthException(int statusCode)
+        : this(statusCode, looksLikeCloudflareBlock: false)
+    {
+    }
+
+    public ClaudeAuthException(int statusCode, bool looksLikeCloudflareBlock)
         : base($"claude.ai returned HTTP {statusCode} (authentication failure)")
     {
         StatusCode = statusCode;
+        LooksLikeCloudflareBlock = looksLikeCloudflareBlock;
     }
 }

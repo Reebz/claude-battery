@@ -19,21 +19,26 @@ namespace ClaudeBatteryWin.ViewModels;
 ///   <item><see cref="SigningIn"/> -- login state is signing-in.</item>
 ///   <item><see cref="LoginError"/> -- login state is an error (carries <see cref="FlyoutViewModel.LoginErrorMessage"/>).</item>
 ///   <item><see cref="Unauthenticated"/> -- no active account.</item>
+///   <item><see cref="ReauthRequired"/> -- no active account AND a saved account's security data
+///   (DPAPI blob) could not be read (profile copy / SID change); distinct from a plain signed-out
+///   user so the flyout can say WHY (U6/R4). A Windows-only addition with no Mac analog.</item>
 ///   <item><see cref="Authenticated"/> -- a usable usage snapshot exists.</item>
 ///   <item><see cref="AuthFailed"/> -- 401/403 surfaced (session expired).</item>
 ///   <item><see cref="Error"/> -- >= 10 consecutive hard failures with no snapshot.</item>
 ///   <item><see cref="Loading"/> -- a poll is in flight, no prior snapshot.</item>
 /// </list>
 /// The Mac also distinguishes the login-error card from the failure-error card; that is the
-/// <see cref="LoginError"/> vs <see cref="Error"/> split here, so the cascade names eight branches
-/// across seven enum members (signing-in, login-error, unauthenticated, authenticated, auth-failed,
-/// failure-error, loading -- the "error" the plan lists twice is login-error and failure-error).
+/// <see cref="LoginError"/> vs <see cref="Error"/> split here. The cascade names the seven Mac
+/// branches (signing-in, login-error, unauthenticated, authenticated, auth-failed, failure-error,
+/// loading -- the "error" the plan lists twice is login-error and failure-error) plus the
+/// Windows-only <see cref="ReauthRequired"/> DPAPI-drop branch.
 /// </summary>
 public enum FlyoutContentState
 {
     SigningIn,
     LoginError,
     Unauthenticated,
+    ReauthRequired,
     Authenticated,
     AuthFailed,
     Error,
@@ -241,6 +246,7 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     // describe a freshly launched, signed-out, never-polled app.
     private LoginState _loginState = LoginState.Idle;
     private bool _isAuthenticated;
+    private bool _securityDataUnreadable;
     private UsageSnapshot? _latestUsage;
     private bool _authFailed;
     private int _consecutiveFailures;
@@ -329,6 +335,19 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     {
         get => _isAuthenticated;
         set { if (_isAuthenticated != value) { _isAuthenticated = value; MaybeRefresh(); } }
+    }
+
+    /// <summary>
+    /// True when at least one account was dropped at load because its DPAPI blob would not decrypt
+    /// (profile copy, SID change). Latched once at startup by the integration layer, since
+    /// <c>AccountStore.DroppedAccountIds</c> is cleared on each load. When set and there is no active
+    /// account, the flyout shows the distinct <see cref="FlyoutContentState.ReauthRequired"/> surface
+    /// instead of the plain <see cref="FlyoutContentState.Unauthenticated"/> one (U6/R4).
+    /// </summary>
+    public bool SecurityDataUnreadable
+    {
+        get => _securityDataUnreadable;
+        set { if (_securityDataUnreadable != value) { _securityDataUnreadable = value; MaybeRefresh(); } }
     }
 
     public UsageSnapshot? LatestUsage
@@ -452,6 +471,15 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     /// hint -- Windows has a tray icon, not a menu bar.
     public const string SettingsHint = "Right-click the tray icon for Settings.";
 
+    /// <summary>
+    /// The distinct re-auth detail copy shown when a saved account's security data could not be read
+    /// on this PC (a DPAPI drop: profile copy / SID change), so it is not mistaken for the
+    /// session-restore bug (U6/R4). The flyout's ReauthRequired panel binds this via <c>x:Static</c>,
+    /// so the rendered copy and the tested copy are one string.
+    /// </summary>
+    public const string ReauthRequiredHint =
+        "Your saved security data could not be read on this PC. Please sign in again.";
+
     // MARK: - Re-resolution
 
     /// <summary>
@@ -461,7 +489,7 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     /// </summary>
     public void Refresh()
     {
-        State = ResolveState(_loginState, _isAuthenticated, _latestUsage, _authFailed, _consecutiveFailures);
+        State = ResolveState(_loginState, _isAuthenticated, _latestUsage, _authFailed, _consecutiveFailures, _securityDataUnreadable);
         LoginErrorMessage = _loginState.Kind == LoginStateKind.Error ? _loginState.Message ?? string.Empty : string.Empty;
 
         if (State == FlyoutContentState.Authenticated && _latestUsage is { } usage)
@@ -559,7 +587,8 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         bool isAuthenticated,
         UsageSnapshot? latestUsage,
         bool authFailed,
-        int consecutiveFailures)
+        int consecutiveFailures,
+        bool securityDataUnreadable = false)
     {
         // 1. login in progress (signing-in / capturing / org-discovery / picker) wins over everything,
         // like the Mac. Keys on the SAME predicate as SuppressDismissOnDeactivate so the flyout cannot
@@ -572,6 +601,14 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         if (loginState.Kind == LoginStateKind.Error)
         {
             return FlyoutContentState.LoginError;
+        }
+        // 2b. security data unreadable + no active account: a DPAPI drop (profile copy / SID change),
+        // distinct from a plain signed-out user so the flyout can say WHY re-auth is needed (U6/R4).
+        // Ordered BEFORE the Unauthenticated arm; an authenticated survivor (a second account that
+        // loaded fine) is isAuthenticated and never reaches here.
+        if (securityDataUnreadable && !isAuthenticated)
+        {
+            return FlyoutContentState.ReauthRequired;
         }
         // 3. unauthenticated.
         if (!isAuthenticated)
