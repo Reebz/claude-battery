@@ -155,18 +155,20 @@ public class ClaudeApiTests
     }
 
     [Fact]
-    public async Task GetUsageAsync_OnFiveHundred_ReturnsEmptyResponse_NotThrow()
+    public async Task GetUsageAsync_OnFiveHundred_Throws_NeverFabricatesEmptySuccess()
     {
+        // Review #5: the old contract returned `new UsageApiResponse()` here, which the poller
+        // published as a SUCCESSFUL poll - a full-looking tray during any 5xx/429 incident,
+        // including non-403 Cloudflare challenges that bypass the U3 discriminator. A non-auth,
+        // non-2xx must now throw a plain transport error (never ClaudeAuthException, so the poller
+        // takes the backoff arm, not the auth arm).
         var handler = new CapturingHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError));
         using var client = new HttpClient(handler);
         var api = new ClaudeApi(client, TestUserAgent);
 
-        var result = await api.GetUsageAsync("org-1", CancellationToken.None);
-
-        // Non-auth, non-2xx is a soft failure: a default response, never a ClaudeAuthException.
-        Assert.NotNull(result);
-        Assert.Null(result.Limits);
-        Assert.Null(result.FiveHour);
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(
+            () => api.GetUsageAsync("org-1", CancellationToken.None));
+        Assert.IsNotType<ClaudeAuthException>(ex);
     }
 
     // --- (2b) Cloudflare-block discrimination on the auth exception (U3) ------------------------
@@ -363,7 +365,10 @@ public class ClaudeApiTests
             using var client = new HttpClient(handler);
             var api = new ClaudeApi(client, TestUserAgent);
 
-            await api.GetUsageAsync("org-1", CancellationToken.None);
+            // A non-auth non-2xx now THROWS (review #5) instead of returning an empty success;
+            // the assertion under test is unchanged - nothing secret-bearing may reach the log.
+            await Assert.ThrowsAsync<HttpRequestException>(
+                () => api.GetUsageAsync("org-1", CancellationToken.None));
         }
         finally
         {

@@ -99,6 +99,12 @@ public partial class App : Application
     // so the fact is captured here and fed into the flyout's distinct re-auth surface (U6/R4).
     private bool _securityDataUnreadable;
 
+    // Mirrors "the polling transport currently runs the frozen DefaultUserAgent" (no persisted
+    // per-account UA). Read live by the UsageService CF-block escalation (review F1); written only
+    // at the initial seed and in RebuildApiWithUserAgent. UI-thread writes, poll-thread reads - a
+    // stale read is benign (one extra backoff round before escalation).
+    private bool _transportUaIsFallback;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         // --- Velopack MUST run first (U12) ----------------------------------------------------
@@ -249,13 +255,20 @@ public partial class App : Application
         // carries the same UA the login session used (a Cloudflare necessity), not the frozen
         // DefaultUserAgent. The SwappableClaudeApi wrapper is unchanged - a live login still swaps the
         // freshest UA in via OnAuthSuccess; this only fixes the no-login-this-session restore path.
-        _api = new SwappableClaudeApi(new ClaudeApi(_cookieJar, ResolveSeedUserAgent(_accountStore.ActiveAccount)));
+        var seedUserAgent = ResolveSeedUserAgent(_accountStore.ActiveAccount);
+        _transportUaIsFallback = seedUserAgent == DefaultUserAgent;
+        _api = new SwappableClaudeApi(new ClaudeApi(_cookieJar, seedUserAgent));
 
         _network = new SystemNetworkAvailability();
         _clock = new SystemSchedulerClock();
         // The poller reads the AccountStore's request generation live so a poll superseded by an
         // account switch/re-auth discards its result instead of writing onto the new account (U2).
-        _usageService = new UsageService(_api, _network, _clock, () => _accountStore?.CurrentGeneration ?? 0);
+        _usageService = new UsageService(_api, _network, _clock,
+            () => _accountStore?.CurrentGeneration ?? 0,
+            // Live fallback-UA signal for the CF-block escalation (review F1): true only while the
+            // transport runs the frozen DefaultUserAgent. Updated on every re-seed in
+            // RebuildApiWithUserAgent, so a login swap or activation re-seed retires it.
+            () => _transportUaIsFallback);
         _usageService.StateChanged += OnUsageStateChanged;
         _usageService.AuthFailureDetected += OnAuthFailureDetected;
 
@@ -320,6 +333,10 @@ public partial class App : Application
         }
 
         _api.Swap(new ClaudeApi(_cookieJar, userAgent));
+        // Single invariant for the CF-block escalation: the flag mirrors "the transport UA is the
+        // frozen fallback" and is maintained ONLY here and at the initial seed - every re-seed
+        // (login swap with a captured UA, activation re-seed from a persisted UA) passes through.
+        _transportUaIsFallback = userAgent == DefaultUserAgent;
     }
 
     /// <summary>
@@ -343,6 +360,17 @@ public partial class App : Application
     /// </summary>
     internal static bool ShouldFlagSecurityDataUnreadable(AccountStore? store)
         => store is not null && store.DroppedAccountIds.Count > 0 && !store.IsAuthenticated;
+
+    /// <summary>
+    /// The retirement rule for the startup DPAPI-drop latch: any authenticated state observed
+    /// retires it permanently (returns false), and a retired latch stays retired - a later
+    /// deliberate sign-out must NOT resurface the "security data could not be read" copy (false in,
+    /// false out). Pure + internal so the promise the inline comment in
+    /// <see cref="SyncViewModelFromServices"/> makes is unit-tested directly (U6/R4), matching the
+    /// <see cref="ResolveSeedUserAgent"/> / <see cref="ShouldFlagSecurityDataUnreadable"/> pattern.
+    /// </summary>
+    internal static bool RetireSecurityDataUnreadable(bool latched, bool isAuthenticated)
+        => !isAuthenticated && latched;
 
     private IToastSink CreateToastSink()
     {
@@ -544,11 +572,9 @@ public partial class App : Application
             // Retire the startup DPAPI-drop nudge once any authenticated state is observed: a later
             // sign-out is then the user's own action, not the unreadable-security-data cause, so it
             // must not resurface the re-auth copy (review: avoid a stale re-auth surface after a
-            // sign-in / account-removal sequence).
-            if (store?.IsAuthenticated == true)
-            {
-                _securityDataUnreadable = false;
-            }
+            // sign-in / account-removal sequence). The rule lives in the pure
+            // RetireSecurityDataUnreadable so the retire-then-never-relatch promise is unit-tested.
+            _securityDataUnreadable = RetireSecurityDataUnreadable(_securityDataUnreadable, store?.IsAuthenticated == true);
             _flyoutViewModel.SecurityDataUnreadable = _securityDataUnreadable;
 
             if (svc is not null)
@@ -799,6 +825,12 @@ public partial class App : Application
         {
             if (_accountStore?.ActiveAccount is { } active)
             {
+                // Re-seed the transport with the activated account's persisted UA (review F2): the
+                // U2 cold-start seed alone left an in-session switch polling the target account's
+                // cookies under the PREVIOUS account's UA (a Cloudflare mismatch when their captured
+                // UAs differ). Same swap plumbing as the login path; also keeps the fallback-UA
+                // escalation flag honest for accounts with no persisted UA.
+                RebuildApiWithUserAgent(ResolveSeedUserAgent(active));
                 _usageService?.SwitchAccount(active.OrganizationId);
             }
             else

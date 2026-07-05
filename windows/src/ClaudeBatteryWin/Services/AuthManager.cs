@@ -62,6 +62,13 @@ public sealed class AuthManager
     /// edge resets it; the capture funnel and every navigation/cookie trigger guard on it.
     private bool _hasCapturedSession;
 
+    // Latched when the login window's one-shot CoreWebView2 init fails (InitFailed). A dead-init
+    // window can never navigate - a Navigate would only feed its pending-navigation latch, which
+    // nothing will ever consume (the init success path already cannot run again) - so RetryLogin
+    // keys on this to tear down and re-present a FRESH window instead of re-driving the dead one
+    // (the blank-window trap). Reset when a new window is presented.
+    private bool _loginInitFailed;
+
     private string? _pendingSessionKey;
     private string? _pendingCookieHeader;
 
@@ -393,6 +400,7 @@ public sealed class AuthManager
         _pendingSessionKey = null;
         _pendingCookieHeader = null;
         CapturedUserAgent = null;
+        _loginInitFailed = false;
 
         var webView = _loginWebViewFactory.Create();
         _loginWebView = webView;
@@ -479,8 +487,23 @@ public sealed class AuthManager
         _pendingSessionKey = null;
         _pendingCookieHeader = null;
         LoginState = LoginState.Idle;
+
+        // Two shapes where navigating the existing window cannot work, and only a fresh window
+        // (whose one-shot CoreWebView2 init runs again) is a real retry:
+        // 1. The window's init FAILED: its core is permanently null, so Navigate would only latch
+        //    the URL into the pending-navigation slot nothing will ever consume - the overlay hides
+        //    and the window sits blank at about:blank forever (the blank-window trap).
+        // 2. No window is alive (the user closed it): the old `_loginWebView?.Navigate` was a
+        //    silent no-op, leaving "Try again" doing nothing.
+        if (_loginInitFailed || _loginWebView is null)
+        {
+            StopLoginWindow();
+            PresentLogin();
+            return;
+        }
+
         ArmLoginTimeout();
-        _loginWebView?.Navigate("https://claude.ai/login");
+        _loginWebView.Navigate("https://claude.ai/login");
     }
 
     /// <summary>
@@ -595,7 +618,14 @@ public sealed class AuthManager
     /// failure handler so the capture guard is reset and the window stays open showing the error
     /// (Try again / Sign in manually); it is not torn down here.
     /// </summary>
-    private void OnLoginInitFailed(string message) => HandleOrgDiscoveryFailure(message);
+    private void OnLoginInitFailed(string message)
+    {
+        // Remember that THIS window's init is dead before surfacing the error: the window stays
+        // open showing the error + retry (the HandleOrgDiscoveryFailure contract), but a retry must
+        // re-present a fresh window rather than navigate this one (see RetryLogin).
+        _loginInitFailed = true;
+        HandleOrgDiscoveryFailure(message);
+    }
 
     // ============================================================================================
     // Capture funnel (U6).

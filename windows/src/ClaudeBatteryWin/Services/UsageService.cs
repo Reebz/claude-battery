@@ -64,6 +64,25 @@ public sealed class UsageService : IDisposable
     /// only the cancellation token gates writes.
     private readonly Func<int>? _currentGeneration;
 
+    /// Reads whether the polling transport is currently running the frozen fallback UA (no persisted
+    /// per-account UA - a pre-1.50.2 account, or nothing restored). Live, not construction-frozen:
+    /// the integration root flips it whenever the transport is re-seeded (login swap, activation
+    /// re-seed). Null in tests that do not exercise the escalation; the escalation is then inert.
+    private readonly Func<bool>? _transportUaIsFallback;
+
+    /// Consecutive Cloudflare-block 403s observed with no intervening success. Drives the
+    /// fallback-UA escalation below; reset on success and on account switch. Guarded by _gate.
+    private int _consecutiveCfBlocks;
+
+    /// How many consecutive Cloudflare-block 403s a FALLBACK-UA transport absorbs before the block
+    /// is escalated to the auth-failed surface. Rationale (review F1, amending KTD4): for an account
+    /// with no persisted UA the poll runs the frozen DefaultUserAgent, the exact wrong-UA shape the
+    /// session-restore RCA blames for the block - and re-login IS the cure there (it captures and
+    /// persists a real UA, U1, and swaps the transport). A transport running a CAPTURED UA never
+    /// escalates (KTD4 holds: re-login cannot fix a genuine edge block). Three blocks = the one-shot
+    /// grace plus two backoff rounds, ~6-10 minutes before the re-auth nudge.
+    private const int CfBlockEscalationThreshold = 3;
+
     private readonly object _gate = new();
     private bool _isPolling;
     private bool _disposed;
@@ -92,13 +111,19 @@ public sealed class UsageService : IDisposable
     /// Reads the AccountStore's current request-generation token. The integration root wires
     /// <c>() =&gt; accountStore.CurrentGeneration</c>; tests omit it (the guard is then inert).
     /// </param>
+    /// <param name="transportUaIsFallback">
+    /// Reads whether the polling transport currently runs the frozen fallback UA (see
+    /// <see cref="CfBlockEscalationThreshold"/>). The integration root wires a live flag it updates
+    /// on every transport re-seed; tests omit it (the CF-block escalation is then inert).
+    /// </param>
     public UsageService(IClaudeApi api, INetworkAvailability network, ISchedulerClock clock,
-        Func<int>? currentGeneration = null)
+        Func<int>? currentGeneration = null, Func<bool>? transportUaIsFallback = null)
     {
         _api = api ?? throw new ArgumentNullException(nameof(api));
         _network = network ?? throw new ArgumentNullException(nameof(network));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _currentGeneration = currentGeneration;
+        _transportUaIsFallback = transportUaIsFallback;
         _network.AvailabilityChanged += OnNetworkAvailabilityChanged;
     }
 
@@ -197,6 +222,7 @@ public sealed class UsageService : IDisposable
             LastSuccessfulFetch = null;
             ConsecutiveFailures = 0;
             AuthFailed = false;
+            _consecutiveCfBlocks = 0; // a new activation starts a fresh CF-block streak
             _firstPollAfterResume = true;
         }
         if (changed) RaiseStateChanged();
@@ -350,6 +376,23 @@ public sealed class UsageService : IDisposable
                 var cfBlock = ex.StatusCode == 403 && ex.LooksLikeCloudflareBlock;
                 if (cfBlock)
                 {
+                    int cfStreak;
+                    lock (_gate) { cfStreak = ++_consecutiveCfBlocks; }
+
+                    // Fallback-UA escalation (review F1, the one amendment to KTD4): when the
+                    // transport is running the frozen DefaultUserAgent (no persisted per-account UA -
+                    // the pre-1.50.2 upgrade population), a persistent Cloudflare block is the very
+                    // wrong-UA condition the RCA identified, and re-login IS the fix: it captures a
+                    // real UA, persists it (U1), and swaps the transport. After the threshold, route
+                    // to the auth-failed surface so the user gets the "Sign In Again" nudge instead
+                    // of backing off forever into the actionless Error card. A captured-UA transport
+                    // NEVER takes this arm - KTD4 holds there (re-login cannot clear an edge block).
+                    if (cfStreak >= CfBlockEscalationThreshold && _transportUaIsFallback?.Invoke() == true)
+                    {
+                        MarkAuthFailed(dispatchGeneration, cancellationToken);
+                        return;
+                    }
+
                     if (!tolerateNoNetwork) RecordHardFailure(dispatchGeneration, cancellationToken);
                     return;
                 }
@@ -426,6 +469,7 @@ public sealed class UsageService : IDisposable
                 LastSuccessfulFetch = _clock.Now;
                 ConsecutiveFailures = 0;
                 AuthFailed = false;
+                _consecutiveCfBlocks = 0; // any success breaks the CF-block streak
             }
             RaiseStateChanged(); // snapshot itself changed; always notify
         }

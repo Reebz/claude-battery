@@ -220,6 +220,29 @@ public sealed class AccountStoreTests : IDisposable
         Assert.Equal("UA/New", store.Accounts[0].UserAgent);
     }
 
+    [Fact]
+    public void DuplicateOrg_Reauth_WithNullUserAgent_PreservesExistingUserAgent()
+    {
+        // The other half of the coalesce guard (`account.UserAgent ?? existing.UserAgent`): a
+        // re-auth that captured NO UA - reachable, since capture can complete via cookie/history
+        // events before any NavigationCompleted sets CapturedUserAgent - must never clobber a
+        // known-good persisted UA to null. (Empty string cannot reach here: AuthManager captures a
+        // UA only through a !string.IsNullOrEmpty gate.)
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "old", OrganizationId = "org-A", UserAgent = "UA/Old",
+        });
+
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "new", OrganizationId = "org-A", UserAgent = null,
+        });
+
+        Assert.Single(store.Accounts);
+        Assert.Equal("UA/Old", store.Accounts[0].UserAgent); // preserved, not clobbered to null
+    }
+
     // ---- corrupt blob drops the account + deletes the file + flags re-auth ----
 
     [Fact]
@@ -300,6 +323,17 @@ public sealed class AccountStoreTests : IDisposable
         Assert.NotEmpty(reloaded.DroppedAccountIds); // A dropped
         Assert.True(reloaded.IsAuthenticated);       // B survived and is active
         Assert.False(ClaudeBatteryWin.App.ShouldFlagSecurityDataUnreadable(reloaded));
+    }
+
+    [Fact]
+    public void App_RetireSecurityDataUnreadable_RetiredOnAuth_NeverRelatchesAfterSignOut()
+    {
+        // The latch lifecycle promise (U6/R4): flagged at startup, retired by the FIRST
+        // authenticated state observed, and a later deliberate sign-out must NOT resurface the
+        // "security data could not be read" copy - the plain Sign In surface shows instead.
+        Assert.True(ClaudeBatteryWin.App.RetireSecurityDataUnreadable(latched: true, isAuthenticated: false));   // pre-auth: still latched
+        Assert.False(ClaudeBatteryWin.App.RetireSecurityDataUnreadable(latched: true, isAuthenticated: true));   // auth observed: retired
+        Assert.False(ClaudeBatteryWin.App.RetireSecurityDataUnreadable(latched: false, isAuthenticated: false)); // sign-out later: never re-latches
     }
 
     // ---- switch concurrency: a late prior-generation response cannot flag the new account ----
@@ -433,6 +467,23 @@ public sealed class AccountStoreTests : IDisposable
         store.UpsertAccount(NewAccount("org-B", sessionKey: "sk-B", cookieHeader: "sessionKey=sk-B; __cf_bm=cf-B"));
         store.SwitchTo(store.Accounts.First(a => a.OrganizationId == "org-B").Id);
         Assert.Equal("cf-B", jar.GetCookies(ClaudeUri)["__cf_bm"]!.Value);
+    }
+
+    [Fact]
+    public void ReauthOfActiveAccount_ReinjectsFullSet_InclCfBm()
+    {
+        // The one full-set ActivateCookies caller the U5 cluster did not jar-assert: an in-place
+        // re-auth of the currently ACTIVE org re-primes the jar with the FRESH full set including
+        // __cf_bm - the restore-only drop must never leak into this path (KTD5).
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-1", cookieHeader: "sessionKey=sk-1; __cf_bm=cf-OLD"));
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-2", cookieHeader: "sessionKey=sk-2; __cf_bm=cf-NEW"));
+
+        var cookies = jar.GetCookies(ClaudeUri);
+        Assert.Equal("sk-2", cookies["sessionKey"]!.Value);
+        Assert.Equal("cf-NEW", cookies["__cf_bm"]!.Value); // full set injected, __cf_bm kept
     }
 
     [Fact]

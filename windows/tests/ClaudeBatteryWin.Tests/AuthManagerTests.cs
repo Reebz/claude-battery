@@ -334,6 +334,52 @@ public sealed class AuthManagerTests : IDisposable
         Assert.True(manager.HasActiveLoginWebView);   // window stays open showing the error + retry
     }
 
+    [Fact]
+    public void RetryLogin_AfterInitFailure_RecreatesTheWindow_InsteadOfNavigatingTheDeadOne()
+    {
+        // The blank-window trap: CoreWebView2 init is ctor-invoked and one-shot, so a window whose
+        // init FAILED can never consume a navigation - Navigate would only latch the URL into the
+        // pending-navigation slot forever, hiding the error overlay and leaving the window blank at
+        // about:blank. Retry must tear the dead window down and present a FRESH one whose init runs
+        // again.
+        var web = new FakeLoginWebView();
+        var factory = new FakeLoginWebViewFactory(web);
+        var manager = new AuthManager(new FakeClaudeApi(), NewStore(), factory, new FakeOrgPicker());
+
+        manager.PresentLogin();
+        Assert.Equal(1, factory.CreateCount);
+        web.RaiseInitFailed("Could not start the sign-in browser. Please try again.");
+        Assert.Equal(LoginStateKind.Error, manager.LoginState.Kind);
+
+        manager.RetryLogin();
+
+        // CreateCount is the discriminator: without the fix, RetryLogin navigates the SAME dead
+        // window and the count stays 1. (LastNavigatedUrl is not asserted - the shared fake
+        // instance already recorded the first PresentLogin's navigation, so it cannot discriminate.)
+        Assert.Equal(2, factory.CreateCount);
+        Assert.True(manager.HasActiveLoginWebView);
+    }
+
+    [Fact]
+    public void RetryLogin_WithNoLiveWindow_RePresents_InsteadOfSilentNoOp()
+    {
+        // "Try again" can arrive with no window alive (the user closed it: OnWindowClosed runs the
+        // teardown). The old `_loginWebView?.Navigate` was a silent no-op; retry must re-present.
+        var web = new FakeLoginWebView();
+        var factory = new FakeLoginWebViewFactory(web);
+        var manager = new AuthManager(new FakeClaudeApi(), NewStore(), factory, new FakeOrgPicker());
+
+        manager.PresentLogin();
+        web.RaiseClosed(); // user closed the login window
+        Assert.False(manager.HasActiveLoginWebView);
+
+        manager.RetryLogin();
+
+        // Without the fix the old `_loginWebView?.Navigate` no-ops and CreateCount stays 1.
+        Assert.Equal(2, factory.CreateCount);
+        Assert.True(manager.HasActiveLoginWebView);
+    }
+
     // ---- PresentLogin re-entrancy keyed on IsLoginInProgress (U3 / R4) -------------------------
 
     [Fact]
@@ -537,7 +583,15 @@ internal sealed class FakeLoginWebViewFactory : ILoginWebViewFactory
 
     public FakeLoginWebViewFactory(ILoginWebView instance) => _instance = instance;
 
-    public ILoginWebView Create() => _instance;
+    /// How many windows the manager asked for - lets tests assert a retry re-CREATED the window
+    /// (a fresh init) rather than re-driving the existing dead one.
+    public int CreateCount { get; private set; }
+
+    public ILoginWebView Create()
+    {
+        CreateCount++;
+        return _instance;
+    }
 }
 
 /// A fake org picker scripted with a fixed choice (or null = cancel). Records that it was asked, and

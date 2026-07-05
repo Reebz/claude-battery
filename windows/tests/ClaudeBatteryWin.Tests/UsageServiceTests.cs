@@ -377,6 +377,147 @@ public class UsageServiceTests
         Assert.Equal(0, service.ConsecutiveFailures); // superseded backoff bump discarded
     }
 
+    // MARK: - Fallback-UA escalation on a persistent Cloudflare block (review F1, KTD4 amendment)
+
+    [Fact]
+    public async Task FallbackUaTransport_ThirdConsecutiveCfBlock_EscalatesToAuthFailed()
+    {
+        // A transport running the frozen DefaultUserAgent (no persisted per-account UA - the
+        // pre-1.50.2 upgrade population) under a PERSISTENT Cloudflare block: re-login is the cure
+        // there (it captures + persists a real UA), so after the third consecutive block the
+        // poller must route to the auth-failed surface instead of backing off forever.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+
+        using var service = new UsageService(api, net, clock, transportUaIsFallback: () => true);
+        service.StartPolling(Org);
+        var authFired = false;
+        service.AuthFailureDetected += (_, _) => authFired = true;
+
+        await service.PollUsageAsync(CancellationToken.None); // block 1: the one-shot grace
+        Assert.False(service.AuthFailed);
+        await service.PollUsageAsync(CancellationToken.None); // block 2: network-like backoff
+        Assert.False(service.AuthFailed);
+        Assert.Equal(1, service.ConsecutiveFailures);
+
+        await service.PollUsageAsync(CancellationToken.None); // block 3: escalate
+
+        Assert.True(service.AuthFailed);
+        Assert.True(authFired);
+        Assert.False(clock.IsArmed); // polling stopped, exactly like any auth failure
+    }
+
+    [Fact]
+    public async Task CapturedUaTransport_PersistentCfBlock_NeverEscalates_Ktd4Holds()
+    {
+        // The KTD4 core is untouched: a transport running a CAPTURED per-account UA never
+        // escalates a CF block to re-auth, no matter how long it persists - re-login cannot fix a
+        // genuine edge block when the UA already matches the login session's.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+
+        using var service = new UsageService(api, net, clock, transportUaIsFallback: () => false);
+        service.StartPolling(Org);
+
+        for (var i = 0; i < 5; i++)
+        {
+            await service.PollUsageAsync(CancellationToken.None);
+        }
+
+        Assert.False(service.AuthFailed);
+        Assert.Equal(4, service.ConsecutiveFailures); // first was graced; the rest backed off
+    }
+
+    [Fact]
+    public async Task CfBlockStreak_IsResetBySuccess_NoStaleEscalation()
+    {
+        // The streak counts CONSECUTIVE blocks: any success resets it, so two blocks, a recovery,
+        // and two more blocks must not add up to an escalation.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+
+        using var service = new UsageService(api, net, clock, transportUaIsFallback: () => true);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None); // block (streak 1, graced)
+        await service.PollUsageAsync(CancellationToken.None); // block (streak 2)
+
+        api.UsageBehavior = null; // default: success
+        await service.PollUsageAsync(CancellationToken.None); // success resets the streak
+        Assert.Equal(0, service.ConsecutiveFailures);
+
+        api.UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true);
+        await service.PollUsageAsync(CancellationToken.None); // block (streak 1 again)
+        await service.PollUsageAsync(CancellationToken.None); // block (streak 2)
+
+        Assert.False(service.AuthFailed); // never reached 3 consecutive
+    }
+
+    [Fact]
+    public async Task NoFallbackSignalWired_CfBlocks_NeverEscalate()
+    {
+        // Escalation is inert when the integration root wires no fallback-UA signal (and in every
+        // pre-existing test): the CF soft path is exactly as before.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+
+        for (var i = 0; i < 4; i++)
+        {
+            await service.PollUsageAsync(CancellationToken.None);
+        }
+
+        Assert.False(service.AuthFailed);
+    }
+
+    // MARK: - Invariant pins (review testing gaps)
+
+    [Fact]
+    public async Task Poll_401WithCloudflareFlag_StillHardStops()
+    {
+        // LooksLikeCloudflareBlock's cf-mitigated branch is status-independent, so a 401 CAN carry
+        // the flag; only the poller's StatusCode == 403 conjunct keeps a flagged 401 a hard stop.
+        // This pins that conjunct directly - a refactor weakening either half now fails a test.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(401, looksLikeCloudflareBlock: true) };
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.True(service.AuthFailed); // hard stop despite the flag and the first-poll grace
+    }
+
+    [Fact]
+    public async Task CfBlock_SoftPath_PreservesLatestUsage_UnlikeAuthFailure()
+    {
+        // The CF soft path must keep showing the stale snapshot during a block - only a genuine
+        // auth failure nulls LatestUsage. Pins the distinction from MarkAuthFailed.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi();
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None); // success: snapshot published
+        Assert.NotNull(service.LatestUsage);
+
+        api.UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true);
+        await service.PollUsageAsync(CancellationToken.None); // CF block: soft
+
+        Assert.NotNull(service.LatestUsage); // stale snapshot retained
+        Assert.False(service.AuthFailed);
+    }
+
     [Fact]
     public async Task AuthFailure_On403_SameAs401()
     {

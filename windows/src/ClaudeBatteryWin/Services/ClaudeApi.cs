@@ -160,7 +160,15 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
         // resets_at to ResetDateParser (AssumeUniversal | AdjustToUniversal), so an offset-naive ISO
         // value resolves as UTC. The 25 UsageParsingTests exercise this exact parser, so the tested
         // decode is the shipped decode.
-        return bytes is { Length: > 0 } ? UsageResponseParser.Parse(bytes) : new UsageApiResponse();
+        // A null/empty body here means SendRawAsync saw a non-success, non-auth status (5xx, 429,
+        // a non-403 Cloudflare challenge) or an empty 2xx - NOT a usable usage payload. Throw so the
+        // poller's catch-all arm classifies it as a hard failure with backoff (review #5): the old
+        // `new UsageApiResponse()` fallback published an empty snapshot as a SUCCESSFUL poll,
+        // masking server incidents with fresh-looking data. Message is a constant - no body or
+        // header material (redaction gate).
+        return bytes is { Length: > 0 }
+            ? UsageResponseParser.Parse(bytes)
+            : throw new HttpRequestException("claude.ai /usage returned no usable body (non-success status or empty response).");
     }
 
     /// <inheritdoc />
