@@ -218,6 +218,10 @@ final class DiagnosticsLogger: @unchecked Sendable {
             try handle.synchronize()
         } catch {
             logger.notice("[write-failed] \(error.localizedDescription, privacy: .public)")
+            // Drop the dead handle so later milestones degrade to the os_log [file-unavailable]
+            // path instead of re-fsyncing a broken handle every line (e.g. transient disk-full).
+            try? handle.close()
+            fileHandle = nil
         }
     }
 
