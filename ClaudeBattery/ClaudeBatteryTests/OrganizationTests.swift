@@ -63,6 +63,29 @@ final class OrganizationTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode([Organization].self, from: json))
     }
 
+    // MARK: - sanitizedName (stored on Account for disambiguation, issue #32)
+
+    func testSanitizedName_nilWhenNoName() {
+        let org = Organization(uuid: "o", name: nil, billingType: "pro", emailAddress: nil)
+        XCTAssertNil(org.sanitizedName, "no real name -> nil (billingType is a displayName fallback, not a name)")
+    }
+
+    func testSanitizedName_stripsNewlinesAndRTLMarks() {
+        let org = Organization(uuid: "o", name: "Ac\nme\u{200F}", billingType: nil, emailAddress: nil)
+        XCTAssertEqual(org.sanitizedName, "Acme")
+    }
+
+    func testSanitizedName_capsAt100Chars() {
+        let org = Organization(uuid: "o", name: String(repeating: "x", count: 150), billingType: nil, emailAddress: nil)
+        XCTAssertEqual(org.sanitizedName?.count, 100)
+    }
+
+    func testDisplayName_stillFallsBackToBillingTypeThenOrganization() {
+        XCTAssertEqual(Organization(uuid: "o", name: nil, billingType: "pro", emailAddress: nil).displayName, "Pro")
+        XCTAssertEqual(Organization(uuid: "o", name: nil, billingType: nil, emailAddress: nil).displayName, "Organization")
+        XCTAssertEqual(Organization(uuid: "o", name: "Acme", billingType: nil, emailAddress: nil).displayName, "Acme")
+    }
+
     // MARK: - Helpers
 
     private func fixtureData(_ name: String) throws -> Data {

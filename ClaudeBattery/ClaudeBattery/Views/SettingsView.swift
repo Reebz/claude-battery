@@ -151,7 +151,7 @@ struct SettingsView: View {
                 .frame(width: 8, height: 8)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(account.displayName)
+                Text(accountStore.disambiguatedName(for: account))
                     .font(.body)
                 if account.nickname != nil {
                     Text(account.email)
@@ -250,7 +250,8 @@ private struct ManualSignInSection: View {
             if !orgChoices.isEmpty {
                 Picker("Organization", selection: $selectedOrgIndex) {
                     ForEach(Array(orgChoices.enumerated()), id: \.offset) { index, org in
-                        Text(org.displayName).tag(index)
+                        let alreadyAdded = authManager.accountStore.accounts.contains { $0.organizationId == org.uuid }
+                        Text(alreadyAdded ? "\(org.displayName) (already added)" : org.displayName).tag(index)
                     }
                 }
                 Button("Use this organization") { chooseOrg() }
@@ -298,6 +299,11 @@ private struct ManualSignInSection: View {
             selectedOrgIndex = 0
             statusIsError = false
             statusText = "Multiple organizations found. Choose one to finish."
+        case .alreadySignedInAllOrgs:
+            statusIsError = false
+            statusText = "You're already signed in to all organizations on this account. Refreshed the session."
+            pasted = ""
+            orgChoices = []
         case .invalidInput:
             statusIsError = true
             statusText = "That doesn't look like a cookie header. Paste the full Cookie value, or your sessionKey."

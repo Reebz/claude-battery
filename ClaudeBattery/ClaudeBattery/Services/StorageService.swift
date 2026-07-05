@@ -10,6 +10,10 @@ struct Account: Codable, Identifiable, Equatable {
     var email: String
     var sessionKey: String
     var organizationId: String
+    /// The org's display name, captured at add time (sanitized like `Organization.displayName`).
+    /// Used only to disambiguate two orgs of the SAME account in the UI. Optional and additive:
+    /// accounts persisted before issue #32 decode this as nil and render by email as before.
+    var organizationName: String?
     var nickname: String?
     let addedDate: Date
     var notificationThreshold: Double
@@ -25,11 +29,12 @@ struct Account: Codable, Identifiable, Equatable {
         nickname ?? email
     }
 
-    init(id: UUID = UUID(), email: String, sessionKey: String, organizationId: String, nickname: String? = nil, addedDate: Date = Date(), notificationThreshold: Double = 20.0, didNotifyBelowThreshold: Bool = false, allCookieHeader: String? = nil) {
+    init(id: UUID = UUID(), email: String, sessionKey: String, organizationId: String, organizationName: String? = nil, nickname: String? = nil, addedDate: Date = Date(), notificationThreshold: Double = 20.0, didNotifyBelowThreshold: Bool = false, allCookieHeader: String? = nil) {
         self.id = id
         self.email = email
         self.sessionKey = sessionKey
         self.organizationId = organizationId
+        self.organizationName = organizationName
         self.nickname = nickname
         self.addedDate = addedDate
         self.notificationThreshold = notificationThreshold
