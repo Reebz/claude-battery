@@ -331,6 +331,18 @@ enum SecretRedactor {
         options: []
     )
 
+    /// Anthropic session/API tokens carry the unambiguous `sk-ant-` prefix. In production these are
+    /// only ever emitted UNDER a credential key (redacted by `redactCredentialPairs`), but a future
+    /// producer could interpolate one into a free-text field — e.g. a `login-state` error message —
+    /// with no `key=`/`:` delimiter, where none of the structured passes fire. This last-resort pass
+    /// scrubs the token wherever it appears; the `sk-ant-` prefix is distinctive enough that matching
+    /// it anywhere carries no realistic over-redaction risk. (Caught by the NoSecretsExportGate
+    /// login-state sentinel case.)
+    private static let apiTokenRegex = try! NSRegularExpression(
+        pattern: "sk-ant-[A-Za-z0-9_\\-]{1,512}",
+        options: []
+    )
+
     /// Cookie-header keys whose values are redacted by `redactCookieHeader`. Three of these
     /// (`__cf_bm`, `anthropic-csrf-token`, `sessionkey`) are ALSO in `credentialKeys` and already
     /// redacted by the earlier `redactCredentialPairs` pass; the overlap is intentional, not dead.
@@ -405,6 +417,13 @@ enum SecretRedactor {
         //    surviving every structured pass is still caught (defense in depth).
         if hasAt {
             result = redactEmails(result)
+        }
+
+        // 7. Anthropic sk-ant- tokens anywhere — last-resort backstop for a token that reached a
+        //    free-text field under no credential key (e.g. interpolated into an error message) and
+        //    so was never matched by the structured key=value passes.
+        if result.contains("sk-ant-") {
+            result = redactAPITokens(result)
         }
 
         return result
@@ -487,6 +506,18 @@ enum SecretRedactor {
         var replaced = input
         for match in matches.reversed() {
             replaced = (replaced as NSString).replacingCharacters(in: match.range, with: "[EMAIL]")
+        }
+        return replaced
+    }
+
+    private static func redactAPITokens(_ input: String) -> String {
+        let nsString = input as NSString
+        let matches = apiTokenRegex.matches(in: input, range: NSRange(location: 0, length: nsString.length))
+        guard !matches.isEmpty else { return input }
+        var replaced = input
+        for match in matches.reversed() {
+            let token = nsString.substring(with: match.range)
+            replaced = (replaced as NSString).replacingCharacters(in: match.range, with: "REDACTED_LEN_\(token.count)")
         }
         return replaced
     }

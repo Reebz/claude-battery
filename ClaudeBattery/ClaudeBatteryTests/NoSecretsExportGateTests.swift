@@ -147,5 +147,44 @@ final class NoSecretsExportGateTests: XCTestCase {
         XCTAssertTrue(combined.contains("claude.ai"), "cookie domain signal lost: \(combined)")
     }
 
+    /// Plant the REAL `login-state` producer shape (the U5 adversarial-pass gate blind spot).
+    /// `AuthManager.updateLoginOverlay` interpolates the LoginState `.error` message into
+    /// `payload["state"] = "error: \(message)"` and emits `kind: "login-state"`. Today every `.error`
+    /// message is a static literal so nothing leaks — but the gate never planted this kind, so a future
+    /// error path interpolating a secret (an org name, an API body, `error.localizedDescription`) would
+    /// ship unredacted with a green suite. This pins the contract: a secret-shaped value in a
+    /// login-state error is scrubbed by the unconditional producer→redactor→archive pipeline, which
+    /// applies `SecretRedactor.redact` to every kind with no kind-based branch.
+    func testEndToEnd_loginStateError_hasNoSecrets() throws {
+        let logger = DiagnosticsLogger(directoryOverride: dir, enabledOverride: true)
+        logger.emitMilestone(kind: "login-state", payload: [
+            "state": "error: sign-in failed for victim@example.com (token sk-ant-LOGINSTATESECRET)"
+        ])
+        logger.flush()
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let eligible = LogsExporter.eligibleLogFiles(in: dir, installedAfter: Date(timeIntervalSince1970: 0))
+        let archiveURL = try LogsExporter.buildArchive(from: eligible)
+        defer { try? FileManager.default.removeItem(at: archiveURL) }
+        let extractDir = dir.appendingPathComponent("extracted-loginstate", isDirectory: true)
+        try ArchiveTestSupport.decode(at: archiveURL, into: extractDir)
+
+        var combined = ""
+        for f in try FileManager.default.contentsOfDirectory(at: extractDir, includingPropertiesForKeys: nil) {
+            combined += (try? String(contentsOf: f, encoding: .utf8)) ?? ""
+        }
+        XCTAssertFalse(combined.contains("sk-ant-LOGINSTATESECRET"),
+                       "login-state error token leaked into archive: \(combined)")
+        XCTAssertFalse(combined.contains("victim@example.com"),
+                       "login-state error email leaked into archive: \(combined)")
+        XCTAssertNil(combined.range(of: "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", options: .regularExpression),
+                     "an @-email survived from the login-state line: \(combined)")
+        XCTAssertTrue(combined.contains("REDACTED_LEN_"),
+                      "expected redaction marker proving the login-state line was processed")
+        // The non-secret signal — the `login-state` kind — must survive so the diagnostic stays useful.
+        XCTAssertTrue(combined.contains("login-state"),
+                      "login-state kind signal lost: \(combined)")
+    }
+
     // MARK: - Helpers (archive decode is shared via ArchiveTestSupport in LogsExporterTests)
 }
