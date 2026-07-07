@@ -121,66 +121,52 @@ struct UsagePopoverView: View {
     // the 3-bar model case the way a fixed height would.
 
     private func sessionCard(usage: UsageData) -> some View {
-        UsageCard(title: "Session") {
-            VStack(spacing: 12) {
-                ArcGauge(value: usage.sessionRemaining,
-                         color: gaugeColor(for: usage.sessionRemaining),
-                         tickCount: 5)
-                    .frame(height: 58)
-                paceBar(resetsAt: usage.sessionResetDate,
-                        window: Self.sessionWindow)
-            }
-        }
-        .frame(height: gaugeCardHeight)
+        gaugeCard(title: "Session",
+                  remaining: usage.sessionRemaining,
+                  resetsAt: usage.sessionResetDate,
+                  window: Self.sessionWindow,
+                  tickCount: 5)
     }
 
     private func weeklyCard(usage: UsageData) -> some View {
-        UsageCard(title: "Weekly") {
-            VStack(spacing: 12) {
-                ArcGauge(value: usage.weeklyRemaining,
-                         color: gaugeColor(for: usage.weeklyRemaining),
-                         tickCount: 7)
+        gaugeCard(title: "Weekly",
+                  remaining: usage.weeklyRemaining,
+                  resetsAt: usage.weeklyResetDate,
+                  window: Self.weeklyWindow,
+                  tickCount: 7)
+    }
+
+    /// Shared Session/Weekly card: a concentric dual-arc gauge (outer = usage remaining, inner =
+    /// time remaining, both on the batteryColor scale, KTD1/KTD2) over a muted run-out caption
+    /// (#31). The inner arc, time %, and caption self-omit when the reset time is unknown (KTD4).
+    private func gaugeCard(title: String, remaining: Double, resetsAt: Date?, window: TimeInterval, tickCount: Int) -> some View {
+        let timeRemaining = Self.timeRemainingPercent(resetsAt: resetsAt, window: window)
+        let forecast = Self.projectedRunOut(remainingPercent: remaining, resetsAt: resetsAt, window: window)
+        return UsageCard(title: title) {
+            VStack(spacing: 8) {
+                ArcGauge(value: remaining,
+                         color: gaugeColor(for: remaining),
+                         innerValue: timeRemaining,
+                         innerColor: timeRemaining.map { gaugeColor(for: $0) } ?? .clear,
+                         tickCount: tickCount)
                     .frame(height: 58)
-                paceBar(resetsAt: usage.weeklyResetDate,
-                        window: Self.weeklyWindow)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Self.gaugeAccessibilityLabel(name: title, usage: remaining,
+                                                                     timeRemaining: timeRemaining, forecast: forecast))
+                forecastCaptionView(forecast)
             }
         }
         .frame(height: gaugeCardHeight)
     }
 
-    /// Thin time-remaining bar under an arc (U3): fills to the time-remaining percent and shares
-    /// the arc's remaining-% color scale (batteryColor: <20 red, <45 orange, else green), with a
-    /// small trailing clock glyph + percent label marking it as TIME (the non-color cue, KTD9).
-    /// When the reset date is unknown the percent is nil and the bar is omitted entirely (KTD4)
-    /// rather than shown as a misleading empty or full track.
-    // Test expectation: none - SwiftUI layout; the fill (timeRemainingPercent) is covered by
-    // PaceBarTests (U2) and the color reuses the tested batteryColor scale.
+    /// Muted run-out caption under a dial; omitted entirely when the forecast is `.unknown` (KTD4).
     @ViewBuilder
-    private func paceBar(resetsAt: Date?, window: TimeInterval) -> some View {
-        if let timeRemaining = Self.timeRemainingPercent(resetsAt: resetsAt, window: window) {
-            HStack(spacing: 6) {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Self.trackColor)
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Self.batteryColor(remainingPercent: timeRemaining))
-                            .frame(width: max(0, geo.size.width * timeRemaining / 100))
-                    }
-                }
-                .frame(height: 6)
-                HStack(spacing: 3) {
-                    Image(systemName: "clock")
-                        .font(.system(size: 8, weight: .medium))
-                        .foregroundColor(Self.mutedLabelColor)
-                    Text("\(Int(timeRemaining.rounded()))%")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(Self.mutedLabelColor)
-                        .fixedSize()
-                }
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Time remaining, \(Int(timeRemaining.rounded())) percent")
+    private func forecastCaptionView(_ forecast: RunOutForecast) -> some View {
+        if let text = Self.forecastCaption(forecast) {
+            Text(text)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(Self.mutedLabelColor)
+                .fixedSize()
         }
     }
 
@@ -287,6 +273,88 @@ struct UsagePopoverView: View {
         // The `max(0, ...)` lower clamp is defense-in-depth, made unreachable by remainingSeconds'
         // positive-delta guard (a non-positive delta returns nil above); kept regardless.
         return max(0, min(100, percent))
+    }
+
+    // MARK: - Run-out forecast (#31)
+
+    /// Projected-run-out states for one window (session or weekly). Pure, stateless single-sample
+    /// linear extrapolation; the caption view (`forecastCaption`) maps each case to copy.
+    enum RunOutForecast: Equatable {
+        case runsOut(Date)     // burning faster than the clock; a projected clock time before reset
+        case onPace            // pace within `paceBand` of the clock
+        case willNotRunOut     // burning slower than the clock (includes 0% used)
+        case depleted          // already at 100% used
+        case tooEarly          // elapsed fraction below `minElapsedFraction`; extrapolation unstable
+        case resettingSoon     // under `minRemainingSeconds` left; defer to the reset countdown
+        case unknown           // resetsAt nil or past/non-finite; caller omits the caption
+    }
+
+    /// Below this fraction of the window elapsed, burn rate (used / elapsed) divides by a tiny
+    /// denominator and the projection swings wildly, so it is suppressed (KTD3, edge case a).
+    static let minElapsedFraction: Double = 0.10
+    /// Under this many seconds until reset, a projected run-out lands inside the reset countdown's
+    /// own resolution and would flicker across the boundary poll-to-poll, so it defers (edge case b).
+    static let minRemainingSeconds: TimeInterval = 600
+    /// Half-width of the "on track" band, in percentage points: within this of the clock we do not
+    /// over-claim a precise run-out time.
+    static let paceBand: Double = 3
+
+    /// Projected run-out for one window, from the current usage snapshot only. Mirrors
+    /// `timeRemainingPercent` (window start = `resetsAt - window`; a nil/past/non-finite delta
+    /// yields `.unknown` so the caller omits the caption). Run-out lands before the reset exactly
+    /// when `timeRemainingPercent > remainingPercent` (the inner time arc longer than the outer
+    /// usage arc), so the `.runsOut` date is always before `resetsAt`.
+    static func projectedRunOut(remainingPercent: Double, resetsAt: Date?, window: TimeInterval, now: Date = Date()) -> RunOutForecast {
+        guard let resetsAt,
+              let r = CountdownFormat.remainingSeconds(until: resetsAt, now: now) else { return .unknown }
+        if remainingPercent <= 0 { return .depleted }
+        if r < minRemainingSeconds { return .resettingSoon }
+        let elapsedFraction = 1 - r / window
+        if elapsedFraction < minElapsedFraction { return .tooEarly }
+        // 0% used: no burn, and guards the `100 - remainingPercent` divisor below.
+        if remainingPercent >= 100 { return .willNotRunOut }
+        let timeRemaining = min(100, r / window * 100)
+        let paceDelta = timeRemaining - remainingPercent
+        if paceDelta > paceBand {
+            let secondsUntilRunOut = (window - r) * remainingPercent / (100 - remainingPercent)
+            return .runsOut(now.addingTimeInterval(secondsUntilRunOut))
+        }
+        if paceDelta < -paceBand { return .willNotRunOut }
+        return .onPace
+    }
+
+    /// Copy for the run-out caption under each dial (#31). nil hides the line (`.unknown`, KTD4).
+    static func forecastCaption(_ forecast: RunOutForecast, now: Date = Date()) -> String? {
+        switch forecast {
+        case .runsOut(let date):        return formatForecastTime(date, now: now)
+        case .onPace:                   return "On track"
+        case .willNotRunOut:            return "Won't run out"
+        case .depleted:                 return "Used up"
+        case .tooEarly, .resettingSoon: return "--"
+        case .unknown:                  return nil
+        }
+    }
+
+    /// Short run-out clock time: "~3:40 pm" same day, "~Thu 2 pm" a later day, in the user's locale.
+    static func formatForecastTime(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        let sameDay = calendar.isDate(date, inSameDayAs: now)
+        formatter.setLocalizedDateFormatFromTemplate(sameDay ? "jmm" : "EEE jmm")
+        return "~" + formatter.string(from: date)
+    }
+
+    /// One spoken label per dial combining usage, time-remaining, and the forecast (R9). The
+    /// caption's "~" prefix is spoken as "around" and the "--" placeholder is dropped.
+    static func gaugeAccessibilityLabel(name: String, usage: Double, timeRemaining: Double?, forecast: RunOutForecast) -> String {
+        var parts = ["\(name) usage \(Int(usage.rounded())) percent"]
+        if let timeRemaining {
+            parts.append("time remaining \(Int(timeRemaining.rounded())) percent")
+        }
+        if let caption = forecastCaption(forecast), caption != "--" {
+            parts.append(caption.replacingOccurrences(of: "~", with: "around "))
+        }
+        return parts.joined(separator: ", ")
     }
 
     @ViewBuilder
@@ -821,25 +889,58 @@ private struct UsageCard<Content: View>: View {
 private struct ArcGauge: View {
     let value: Double
     let color: Color
+    /// Optional inner concentric arc for time-remaining (#31). nil renders the single-arc
+    /// gauge exactly as before, so an unknown reset omits it (KTD4).
+    var innerValue: Double? = nil
+    var innerColor: Color = .gray
     /// Number of evenly-spaced quota segments; `count - 1` interior ticks are drawn.
     /// 0 disables ticks (e.g. the menu-bar gauge, which is excluded - U6).
     var tickCount: Int = 0
 
+    private let lineWidth: CGFloat = 5
+    private let innerLineWidth: CGFloat = 4      // thinner so two same-colour arcs stay separable (KTD1)
+    private let innerInset: CGFloat = 7          // radial gap between the outer and inner arc
+
     var body: some View {
         ZStack {
+            // Outer arc: usage remaining.
             ArcShape()
-                .stroke(Color(white: 0.25), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .stroke(Color(white: 0.25), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
             ArcShape()
                 .trim(from: 0, to: value / 100)
-                .stroke(color, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+
+            // Inner concentric arc: time remaining in the window (only when known).
+            if let innerValue {
+                ArcShape(radiusInset: innerInset)
+                    .stroke(Color(white: 0.25), style: StrokeStyle(lineWidth: innerLineWidth, lineCap: .round))
+                ArcShape(radiusInset: innerInset)
+                    .trim(from: 0, to: innerValue / 100)
+                    .stroke(innerColor, style: StrokeStyle(lineWidth: innerLineWidth, lineCap: .round))
+            }
+
             if tickCount > 1 {
                 ArcTicks(count: tickCount)
                     .stroke(Color(white: 0.12), lineWidth: 1.5)
             }
-            Text(String(format: "%.0f%%", value))
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundColor(.white)
-                .offset(y: 2)
+
+            // Centre: big usage %, and a small clock + time % when the inner arc is shown (R5).
+            VStack(spacing: 1) {
+                Text(String(format: "%.0f%%", value))
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                if let innerValue {
+                    HStack(spacing: 2) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 7, weight: .medium))
+                        Text(String(format: "%.0f%%", innerValue))
+                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                            .monospacedDigit()
+                    }
+                    .foregroundColor(Color(white: 0.6))
+                }
+            }
+            .offset(y: 2)
         }
     }
 }
@@ -861,10 +962,13 @@ enum GaugeTicks {
 }
 
 private struct ArcShape: Shape {
+    /// Shrinks the radius so a second arc nests inside the first on the same centre/angles.
+    var radiusInset: CGFloat = 0
+
     func path(in rect: CGRect) -> Path {
         var path = Path()
         let center = CGPoint(x: rect.midX, y: rect.midY + 6)
-        let radius = min(rect.width, rect.height) / 2 - 3
+        let radius = min(rect.width, rect.height) / 2 - 3 - radiusInset
         path.addArc(center: center, radius: radius,
                     startAngle: .degrees(135), endAngle: .degrees(405),
                     clockwise: false)

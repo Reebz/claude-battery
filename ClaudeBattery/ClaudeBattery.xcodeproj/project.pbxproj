@@ -34,6 +34,7 @@
 		E10000020000000000000002 /* ArcGaugeNotchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E20000020000000000000002 /* ArcGaugeNotchTests.swift */; };
 		F10000010000000000000001 /* CountdownFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000010000000000000001 /* CountdownFormatTests.swift */; };
 		F10000020000000000000002 /* PaceBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000020000000000000002 /* PaceBarTests.swift */; };
+		F10000070000000000000007 /* RunOutForecastTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000070000000000000007 /* RunOutForecastTests.swift */; };
 		F10000030000000000000003 /* ModelsCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000030000000000000003 /* ModelsCardTests.swift */; };
 		F10000040000000000000004 /* UsageCreditsRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000040000000000000004 /* UsageCreditsRowTests.swift */; };
 		F10000050000000000000005 /* SettingsCountdownToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000050000000000000005 /* SettingsCountdownToggleTests.swift */; };
@@ -108,6 +109,7 @@
 		E20000020000000000000002 /* ArcGaugeNotchTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ArcGaugeNotchTests.swift; path = ArcGaugeNotchTests.swift; sourceTree = "<group>"; };
 		F20000010000000000000001 /* CountdownFormatTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = CountdownFormatTests.swift; path = CountdownFormatTests.swift; sourceTree = "<group>"; };
 		F20000020000000000000002 /* PaceBarTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = PaceBarTests.swift; path = PaceBarTests.swift; sourceTree = "<group>"; };
+		F20000070000000000000007 /* RunOutForecastTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = RunOutForecastTests.swift; path = RunOutForecastTests.swift; sourceTree = "<group>"; };
 		F20000030000000000000003 /* ModelsCardTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ModelsCardTests.swift; path = ModelsCardTests.swift; sourceTree = "<group>"; };
 		F20000040000000000000004 /* UsageCreditsRowTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = UsageCreditsRowTests.swift; path = UsageCreditsRowTests.swift; sourceTree = "<group>"; };
 		F20000050000000000000005 /* SettingsCountdownToggleTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = SettingsCountdownToggleTests.swift; path = SettingsCountdownToggleTests.swift; sourceTree = "<group>"; };
@@ -179,6 +181,7 @@
 				E20000020000000000000002 /* ArcGaugeNotchTests.swift */,
 				F20000010000000000000001 /* CountdownFormatTests.swift */,
 				F20000020000000000000002 /* PaceBarTests.swift */,
+				F20000070000000000000007 /* RunOutForecastTests.swift */,
 				F20000030000000000000003 /* ModelsCardTests.swift */,
 				F20000040000000000000004 /* UsageCreditsRowTests.swift */,
 				F20000050000000000000005 /* SettingsCountdownToggleTests.swift */,
@@ -461,6 +464,7 @@
 				E10000020000000000000002 /* ArcGaugeNotchTests.swift in Sources */,
 				F10000010000000000000001 /* CountdownFormatTests.swift in Sources */,
 				F10000020000000000000002 /* PaceBarTests.swift in Sources */,
+				F10000070000000000000007 /* RunOutForecastTests.swift in Sources */,
 				F10000030000000000000003 /* ModelsCardTests.swift in Sources */,
 				F10000040000000000000004 /* UsageCreditsRowTests.swift in Sources */,
 				F10000050000000000000005 /* SettingsCountdownToggleTests.swift in Sources */,
