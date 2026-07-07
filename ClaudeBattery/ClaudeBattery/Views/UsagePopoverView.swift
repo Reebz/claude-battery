@@ -113,8 +113,8 @@ struct UsagePopoverView: View {
 
     // MARK: - Cards
 
-    // Gauge cards (Session/Weekly) are taller to give the arc and pace bar breathing room (U3).
-    private let gaugeCardHeight: CGFloat = 142
+    // Gauge cards (Session/Weekly) give the concentric dial and the run-out caption room (#31).
+    private let gaugeCardHeight: CGFloat = 132
     // Info cards (Resets/Models) take no fixed height: they size to their content and equalize to
     // each other in the grid (maxHeight at the call site), with content vertically centered. This
     // hugs the content (no excess bottom padding), keeps the two boxes symmetric, and never clips
@@ -250,9 +250,9 @@ struct UsagePopoverView: View {
         return .green
     }
 
-    /// Shared bar-track gray, so paceBar and unifiedBarRow cannot drift apart.
+    /// Shared bar-track gray for the usage-credits bar row.
     private static let trackColor = Color(white: 0.25)
-    /// Shared muted-label gray used for secondary labels/percent text in the bar rows.
+    /// Shared muted-label gray for secondary label/percent text (bar rows and the run-out caption).
     private static let mutedLabelColor = Color(white: 0.6)
 
     // MARK: - Pace (U2)
@@ -339,20 +339,30 @@ struct UsagePopoverView: View {
     static func formatForecastTime(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
         let formatter = DateFormatter()
         formatter.locale = .current
+        // Render on the same clock the same-day check uses, so the boundary and the printed
+        // time never disagree (they match in production where both are `.current`).
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
         let sameDay = calendar.isDate(date, inSameDayAs: now)
         formatter.setLocalizedDateFormatFromTemplate(sameDay ? "jmm" : "EEE jmm")
         return "~" + formatter.string(from: date)
     }
 
     /// One spoken label per dial combining usage, time-remaining, and the forecast (R9). The
-    /// caption's "~" prefix is spoken as "around" and the "--" placeholder is dropped.
-    static func gaugeAccessibilityLabel(name: String, usage: Double, timeRemaining: Double?, forecast: RunOutForecast) -> String {
+    /// run-out state is spelled out ("projected to run out around ...") rather than reusing the
+    /// terse visual caption, and the "--" placeholder states have nothing to add.
+    static func gaugeAccessibilityLabel(name: String, usage: Double, timeRemaining: Double?, forecast: RunOutForecast, now: Date = Date()) -> String {
         var parts = ["\(name) usage \(Int(usage.rounded())) percent"]
         if let timeRemaining {
             parts.append("time remaining \(Int(timeRemaining.rounded())) percent")
         }
-        if let caption = forecastCaption(forecast), caption != "--" {
-            parts.append(caption.replacingOccurrences(of: "~", with: "around "))
+        switch forecast {
+        case .runsOut(let date):
+            parts.append("projected to run out around " + formatForecastTime(date, now: now).replacingOccurrences(of: "~", with: ""))
+        case .onPace, .willNotRunOut, .depleted:
+            if let caption = forecastCaption(forecast) { parts.append(caption) }
+        case .tooEarly, .resettingSoon, .unknown:
+            break
         }
         return parts.joined(separator: ", ")
     }
@@ -899,7 +909,7 @@ private struct ArcGauge: View {
 
     private let lineWidth: CGFloat = 5
     private let innerLineWidth: CGFloat = 4      // thinner so two same-colour arcs stay separable (KTD1)
-    private let innerInset: CGFloat = 7          // radial gap between the outer and inner arc
+    private let innerInset: CGFloat = 9          // radial gap between the outer and inner arc (KTD1 separation)
 
     var body: some View {
         ZStack {
@@ -912,8 +922,10 @@ private struct ArcGauge: View {
 
             // Inner concentric arc: time remaining in the window (only when known).
             if let innerValue {
+                // Inner track a touch darker than the outer (0.25) so the two rings never merge
+                // into one band when both fills land on the same colour (KTD1).
                 ArcShape(radiusInset: innerInset)
-                    .stroke(Color(white: 0.25), style: StrokeStyle(lineWidth: innerLineWidth, lineCap: .round))
+                    .stroke(Color(white: 0.18), style: StrokeStyle(lineWidth: innerLineWidth, lineCap: .round))
                 ArcShape(radiusInset: innerInset)
                     .trim(from: 0, to: innerValue / 100)
                     .stroke(innerColor, style: StrokeStyle(lineWidth: innerLineWidth, lineCap: .round))
@@ -940,7 +952,9 @@ private struct ArcGauge: View {
                     .foregroundColor(Color(white: 0.6))
                 }
             }
-            .offset(y: 2)
+            // Two-line centre sits on the ring centre (ArcShape uses midY + 6); the single-line
+            // legacy gauge keeps its original +2.
+            .offset(y: innerValue == nil ? 2 : 6)
         }
     }
 }
