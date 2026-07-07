@@ -705,7 +705,7 @@ private struct AccountListSection: View {
                     .fill(isActive ? Color.green : Color(white: 0.4))
                     .frame(width: 7, height: 7)
 
-                Text(account.displayName)
+                Text(accountStore.disambiguatedName(for: account))
                     .font(.system(size: 11))
                     .foregroundColor(.white)
                     .lineLimit(1)
