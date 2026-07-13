@@ -490,13 +490,19 @@
       <h1>Claude Battery</h1>
       <p class="tagline">Your Claude usage at a glance. A lightweight macOS menu bar app that turns confusing token counts into a simple battery.</p>
       <div class="hero-actions">
-        <a href="https://github.com/Reebz/claude-battery/releases/download/v1.50/claude-battery_v1.50.dmg" class="btn btn-primary">
+        <a id="heroDownload"
+           href="https://github.com/Reebz/claude-battery/releases/download/v1.50/claude-battery_v1.50.dmg"
+           data-mac-href="https://github.com/Reebz/claude-battery/releases/download/v1.50/claude-battery_v1.50.dmg"
+           data-mac-label="Download for macOS"
+           data-win-href="https://github.com/Reebz/claude-battery/releases/download/windows-test-1.50.3-beta/ClaudeBattery-windows-test-1.50.3-beta-win-x64.zip"
+           data-win-label="Download for Windows (Beta)"
+           class="btn btn-primary">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          Download for macOS
+          <span class="btn-label">Download for macOS</span>
         </a>
         <a href="#install" class="btn btn-secondary">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-          Install via Homebrew
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          Other ways to install
         </a>
       </div>
       <div class="menubar-preview">
@@ -612,11 +618,11 @@
         </div>
         <div class="install-card">
           <h3>Windows</h3>
-          <p>A native Windows build is on the way.</p>
-          <span class="btn btn-disabled" role="button" aria-disabled="true" tabindex="-1" style="width: 100%; justify-content: center;">
+          <p>Native Beta build. Unzip and run -- Windows may warn (unsigned).</p>
+          <a href="https://github.com/Reebz/claude-battery/releases/download/windows-test-1.50.3-beta/ClaudeBattery-windows-test-1.50.3-beta-win-x64.zip" class="btn btn-primary" style="width: 100%; justify-content: center;">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style="width:18px;height:18px"><path d="M3 5.1 10.4 4v7.2H3V5.1Zm0 13.8 7.4 1.1v-7.1H3v6Zm8.2 1.2L21 21v-8.6h-9.8v7.7Zm0-16.2v7.7H21V3l-9.8 1.9Z"/></svg>
-            Install for Windows (coming soon)
-          </span>
+            Download Beta (1.50.3)
+          </a>
         </div>
       </div>
     </div>
@@ -634,5 +640,25 @@
     </div>
   </footer>
 
+  <script>
+    // Route Windows visitors to the Windows build. Default markup is macOS (works with no JS and
+    // for every non-Windows OS, since the app is macOS-first). Prefer the User-Agent Client Hints
+    // platform (Chromium), fall back to a userAgent regex for Firefox/Safari.
+    (function () {
+      var uaData = navigator.userAgentData;
+      var isWindows = uaData && uaData.platform
+        ? uaData.platform === 'Windows'
+        : /Windows|Win32|Win64|WOW64/i.test(navigator.userAgent || '');
+      if (!isWindows) return;
+
+      var btn = document.getElementById('heroDownload');
+      if (!btn) return;
+      var winHref = btn.getAttribute('data-win-href');
+      var winLabel = btn.getAttribute('data-win-label');
+      if (winHref) btn.setAttribute('href', winHref);
+      var label = btn.querySelector('.btn-label');
+      if (label && winLabel) label.textContent = winLabel;
+    })();
+  </script>
 </body>
 </html>
