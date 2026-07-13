@@ -121,11 +121,16 @@ struct UsagePopoverView: View {
     // the 3-bar model case the way a fixed height would.
 
     private func sessionCard(usage: UsageData) -> some View {
+        // The gauge shows the weekly-capped value (sessionGaugeRemaining) so a nearly-exhausted
+        // weekly can't display a high, unreachable session number; the forecast is computed
+        // separately from the RAW session (via sessionForecast) so the cap never corrupts it.
         gaugeCard(title: "Session",
-                  remaining: usage.sessionRemaining,
+                  remaining: usage.sessionGaugeRemaining,
                   resetsAt: usage.sessionResetDate,
                   window: Self.sessionWindow,
-                  tickCount: 5)
+                  tickCount: 5,
+                  forecastOverride: Self.sessionForecast(for: usage),
+                  suppressTimeArc: usage.isSessionWeeklyLimited)
     }
 
     private func weeklyCard(usage: UsageData) -> some View {
@@ -139,9 +144,17 @@ struct UsagePopoverView: View {
     /// Shared Session/Weekly card: a concentric dual-arc gauge (outer = usage remaining, inner =
     /// time remaining, both on the batteryColor scale, KTD1/KTD2) over a muted run-out caption
     /// (#31). The inner arc, time %, and caption self-omit when the reset time is unknown (KTD4).
-    private func gaugeCard(title: String, remaining: Double, resetsAt: Date?, window: TimeInterval, tickCount: Int) -> some View {
-        let timeRemaining = Self.timeRemainingPercent(resetsAt: resetsAt, window: window)
-        let forecast = Self.projectedRunOut(remainingPercent: remaining, resetsAt: resetsAt, window: window)
+    private func gaugeCard(title: String, remaining: Double, resetsAt: Date?, window: TimeInterval, tickCount: Int,
+                           forecastOverride: RunOutForecast? = nil, suppressTimeArc: Bool = false) -> some View {
+        // Suppress the inner time arc when the shown value is not on this card's own clock: a
+        // weekly-limited Session displays the weekly quota, so a session-window time arc would pair
+        // two different windows and mislead (the concentric grammar reads "runs out before reset").
+        // nil hides the inner arc, its centre clock, and the a11y "time remaining" (KTD4).
+        let timeRemaining = suppressTimeArc ? nil : Self.timeRemainingPercent(resetsAt: resetsAt, window: window)
+        // `forecastOverride` lets the Session card supply a forecast computed from the RAW
+        // session value (or `.weeklyLimited`) instead of the possibly-capped `remaining` shown
+        // on the dial; the Weekly card passes nil and forecasts from its own value as before.
+        let forecast = forecastOverride ?? Self.projectedRunOut(remainingPercent: remaining, resetsAt: resetsAt, window: window)
         return UsageCard(title: title) {
             VStack(spacing: 8) {
                 ArcGauge(value: remaining,
@@ -286,6 +299,7 @@ struct UsagePopoverView: View {
         case depleted          // already at 100% used
         case tooEarly          // elapsed fraction below `minElapsedFraction`; extrapolation unstable
         case resettingSoon     // under `minRemainingSeconds` left; defer to the reset countdown
+        case weeklyLimited     // the weekly limit is the binding constraint; the Session dial defers to it
         case unknown           // resetsAt nil or past/non-finite; caller omits the caption
     }
 
@@ -323,6 +337,27 @@ struct UsagePopoverView: View {
         return .onPace
     }
 
+    /// The Session card's run-out forecast (#31). When the weekly limit binds
+    /// (`isSessionWeeklyLimited`), the session defers to it: `.weeklyLimited` drives the
+    /// "Limited by weekly" caption while the real run-out time is shown on the Weekly card.
+    /// Otherwise the forecast runs on the RAW `sessionRemaining` over the 5h window - never the
+    /// capped gauge value (`sessionGaugeRemaining`), which is a weekly percentage over a
+    /// weekly clock and would fabricate a bogus, too-soon run-out on the session timeline.
+    static func sessionForecast(for usage: UsageData, now: Date = Date()) -> RunOutForecast {
+        let raw = projectedRunOut(remainingPercent: usage.sessionRemaining,
+                                  resetsAt: usage.sessionResetDate,
+                                  window: sessionWindow, now: now)
+        // When the weekly limit binds, defer to it - UNLESS the 5h session itself is projected to
+        // run out within its own window first. That is a nearer, concrete wall (a clock time today,
+        // not a weekly reset days away), so a fast-burning session is never hidden behind
+        // "Limited by weekly" just because the weekly percentage is numerically lower.
+        if usage.isSessionWeeklyLimited {
+            if case .runsOut = raw { return raw }
+            return .weeklyLimited
+        }
+        return raw
+    }
+
     /// Copy for the run-out caption under each dial (#31). nil hides the line (`.unknown`, KTD4).
     static func forecastCaption(_ forecast: RunOutForecast, now: Date = Date()) -> String? {
         switch forecast {
@@ -330,6 +365,7 @@ struct UsagePopoverView: View {
         case .onPace:                   return "On track"
         case .willNotRunOut:            return "Won't run out"
         case .depleted:                 return "Used up"
+        case .weeklyLimited:            return "Limited by weekly"
         case .tooEarly, .resettingSoon: return "--"
         case .unknown:                  return nil
         }
@@ -359,7 +395,7 @@ struct UsagePopoverView: View {
         switch forecast {
         case .runsOut(let date):
             parts.append("projected to run out around " + formatForecastTime(date, now: now).replacingOccurrences(of: "~", with: ""))
-        case .onPace, .willNotRunOut, .depleted:
+        case .onPace, .willNotRunOut, .depleted, .weeklyLimited:
             if let caption = forecastCaption(forecast) { parts.append(caption) }
         case .tooEarly, .resettingSoon, .unknown:
             break

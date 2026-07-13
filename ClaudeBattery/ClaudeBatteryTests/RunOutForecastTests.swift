@@ -60,9 +60,79 @@ final class RunOutForecastTests: XCTestCase {
         XCTAssertEqual(UsagePopoverView.forecastCaption(.onPace), "On track")
         XCTAssertEqual(UsagePopoverView.forecastCaption(.willNotRunOut), "Won't run out")
         XCTAssertEqual(UsagePopoverView.forecastCaption(.depleted), "Used up")
+        XCTAssertEqual(UsagePopoverView.forecastCaption(.weeklyLimited), "Limited by weekly")
         XCTAssertEqual(UsagePopoverView.forecastCaption(.tooEarly), "--")
         XCTAssertEqual(UsagePopoverView.forecastCaption(.resettingSoon), "--")
         XCTAssertNil(UsagePopoverView.forecastCaption(.unknown))
+    }
+
+    // MARK: - sessionForecast (weekly-gated Session card, #31 must stay on RAW session)
+
+    /// UsageData with session/weekly derived independently and a session reset `sessionResetsIn`
+    /// seconds from `now`.
+    private func makeUsage(session: Double, weekly: Double, sessionResetsIn: TimeInterval?) -> UsageData {
+        UsageData(from: UsageResponse(
+            fiveHour: makeTier(utilization: 100 - session, resetsAt: sessionResetsIn.map(resetsIn)),
+            sevenDay: makeTier(utilization: 100 - weekly),
+            sevenDayOpus: nil, sevenDaySonnet: nil, extraUsage: nil, limits: nil, spend: nil))
+    }
+
+    private func makeTier(utilization: Double, resetsAt: Date? = nil) -> UsageTier {
+        var json: [String: Any] = ["utilization": utilization]
+        if let date = resetsAt {
+            let f = ISO8601DateFormatter()
+            f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            json["resets_at"] = f.string(from: date)
+        }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        return try! decoder.decode(UsageTier.self, from: try! JSONSerialization.data(withJSONObject: json))
+    }
+
+    func testSessionForecast_weeklyBindsAndLow_isWeeklyLimited() {
+        // Weekly nearly exhausted (5) with a high session (90): the Session card defers to weekly.
+        let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
+        XCTAssertEqual(UsagePopoverView.sessionForecast(for: usage, now: now), .weeklyLimited)
+    }
+
+    func testSessionForecast_healthyWeek_forecastsOnRawSession() {
+        // Weekly healthy (50): forecast runs on RAW session=90 over the 5h window. At 50% time
+        // remaining, 90% usage remaining is slower than the clock -> .willNotRunOut.
+        let usage = makeUsage(session: 90, weekly: 50, sessionResetsIn: 9000)
+        XCTAssertEqual(UsagePopoverView.sessionForecast(for: usage, now: now), .willNotRunOut)
+    }
+
+    func testSessionForecast_weeklyBindsButSessionRunsOutFirst_showsSessionRunOut() {
+        // Weekly binds (14 < 15 and < 20), but the RAW session (15%, 50% of the window elapsed)
+        // is projected to run out within ~26 min. That nearer, concrete wall must win over the
+        // "Limited by weekly" label (whose reset is days away).
+        let usage = makeUsage(session: 15, weekly: 14, sessionResetsIn: 9000)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        guard case .runsOut = UsagePopoverView.sessionForecast(for: usage, now: now) else {
+            return XCTFail("expected .runsOut (session runs out before the weekly), got weekly-limited")
+        }
+    }
+
+    func testGaugeA11y_weeklyLimited_omitsSessionTimeAndSaysLimited() {
+        // P3: a weekly-limited Session shows the weekly quota, so the session time-arc is
+        // suppressed (timeRemaining nil). The a11y label must then NOT announce a session time,
+        // and must not pair weekly usage with session time.
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Session", usage: 2, timeRemaining: nil, forecast: .weeklyLimited)
+        XCTAssertEqual(label, "Session usage 2 percent, Limited by weekly")
+    }
+
+    func testSessionForecast_neverFeedsCappedValueIntoRunOut() {
+        // Discriminator: if the capped gauge value (weekly=5) were fed into projectedRunOut over
+        // the 5h window it would compute a bogus .runsOut. sessionForecast must instead return
+        // .weeklyLimited, and must NOT equal the wrong .runsOut result.
+        let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
+        let wrong = UsagePopoverView.projectedRunOut(remainingPercent: usage.sessionGaugeRemaining,
+                                                     resetsAt: usage.sessionResetDate,
+                                                     window: s, now: now)
+        if case .runsOut = wrong {} else { XCTFail("expected the capped-value path to (wrongly) produce .runsOut") }
+        XCTAssertEqual(UsagePopoverView.sessionForecast(for: usage, now: now), .weeklyLimited)
     }
 
     func testCaption_runsOut_matchesFormattedTime() {
