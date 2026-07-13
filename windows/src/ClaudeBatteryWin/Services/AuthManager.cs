@@ -472,6 +472,12 @@ public sealed class AuthManager
         _pendingSessionKey = null;
         _pendingCookieHeader = null;
 
+        // Undo any PrimeCookies done during this (now-abandoned) login: a capture may have clobbered
+        // the active account's cookies in the shared jar. Mirror ManualSignIn's jar discipline so a
+        // healthy active account is never left signed out by a cancelled add. No-op / clears when
+        // there is no active account (first-login cancel).
+        _accountStore.RestoreActiveCookies();
+
         LoginState = LoginState.Idle;
         StopLoginWindow();
     }
@@ -556,6 +562,9 @@ public sealed class AuthManager
         _hasCapturedSession = false;
         _pendingSessionKey = null;
         _pendingCookieHeader = null;
+        // Same jar restore as the cancel path: a timeout after capture must not leave the active
+        // account's cookies clobbered by the abandoned add.
+        _accountStore.RestoreActiveCookies();
         LoginState = LoginState.Idle;
         StopLoginWindow();
     }
@@ -696,6 +705,16 @@ public sealed class AuthManager
         if (_pendingSessionKey is { } key)
         {
             _accountStore.PrimeCookies(key, _pendingCookieHeader);
+
+            // Adding a second account primes the ONE shared jar with the new identity while the
+            // already-active account may still be polling. Discard any in-flight poll on the old
+            // identity so its now-wrong-identity 403 is superseded (IsCurrentGeneration) rather than
+            // mis-flagging the healthy active account as auth-failed. First login (no active account)
+            // needs no invalidation - UpsertAccount bumps the generation when it activates.
+            if (_accountStore.ActiveAccount is not null)
+            {
+                _accountStore.InvalidateActivePolls();
+            }
         }
 
         _orgDiscoveryCts?.Cancel();
@@ -776,6 +795,11 @@ public sealed class AuthManager
             case { Kind: OrgSelectionKind.NeedsChoice } choice:
             {
                 LoginState = LoginState.Picker;
+                // Discovery already ran on the primed new-identity jar; the org picker is a user-paced
+                // wait. Restore the active account's cookies for its duration so its poll is undisturbed
+                // (the chosen account re-primes on commit via UpsertAccount/SwitchTo). On cancel/timeout
+                // the teardown paths restore again; on pick-cancel HandleOrgDiscoveryFailure does.
+                _accountStore.RestoreActiveCookies();
                 Organization? picked;
                 try
                 {
@@ -863,6 +887,10 @@ public sealed class AuthManager
         _pendingSessionKey = null;
         _pendingCookieHeader = null;
         _hasCapturedSession = false;
+        // Discovery failed after the capture primed the jar with the (possibly invalid) new identity.
+        // Restore the active account's cookies so it keeps polling normally behind the error card,
+        // instead of being clobbered until the user retries or restarts (mirrors ManualSignIn).
+        _accountStore.RestoreActiveCookies();
         LoginState = LoginState.ErrorWith(message);
     }
 

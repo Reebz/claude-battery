@@ -53,7 +53,6 @@ public partial class LoginWindow : Window, ILoginWebView
 
     private CoreWebView2Environment? _environment;
     private Microsoft.Web.WebView2.Wpf.WebView2? _popup;
-    private Func<string, bool>? _popupGate;
     private bool _hasCapturedUserAgent;
     private bool _disposed;
 
@@ -388,8 +387,9 @@ public partial class LoginWindow : Window, ILoginWebView
             // is preserved and the OAuth callback can postMessage back to the claude.ai page. Setting
             // e.NewWindow IS the handling here - do NOT also set Handled = true (that would suppress the
             // window instead of hosting it). A deferral keeps the script blocked until NewWindow is set.
-            _popupGate = decision.PopupNavigationGate;
-            _ = HostPopupAsync(e);
+            // The gate travels as an argument (not a shared field) so a 2nd popup's TeardownPopup of the
+            // 1st cannot null the gate the new popup's NavigationStarting closure depends on.
+            _ = HostPopupAsync(e, decision.PopupNavigationGate);
         }
         catch (Exception ex)
         {
@@ -399,7 +399,7 @@ public partial class LoginWindow : Window, ILoginWebView
         }
     }
 
-    private async Task HostPopupAsync(CoreWebView2NewWindowRequestedEventArgs e)
+    private async Task HostPopupAsync(CoreWebView2NewWindowRequestedEventArgs e, Func<string, bool>? popupGate)
     {
         // Take the deferral INSIDE the try and complete it in finally so no path - including a throw
         // from GetDeferral itself - can leave WebView2 awaiting an uncompleted deferral (U9). A null
@@ -416,10 +416,11 @@ public partial class LoginWindow : Window, ILoginWebView
             await popup.EnsureCoreWebView2Async(_environment).ConfigureAwait(true);
 
             // The popup gets its OWN navigation gate enforcing the same allowlist so it cannot
-            // wander outside the OAuth providers after the bootstrap.
+            // wander outside the OAuth providers after the bootstrap. Bind the gate captured for THIS
+            // popup (the argument), never a shared field a later popup's teardown could null.
             popup.CoreWebView2.NavigationStarting += (_, args) =>
             {
-                var allowed = _popupGate?.Invoke(args.Uri) ?? false;
+                var allowed = popupGate?.Invoke(args.Uri) ?? false;
                 args.Cancel = !allowed;
             };
 
@@ -460,7 +461,6 @@ public partial class LoginWindow : Window, ILoginWebView
         }
 
         _popup = null;
-        _popupGate = null;
     }
 
     // ---- Cookie reads --------------------------------------------------------------------------

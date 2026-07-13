@@ -231,8 +231,21 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
     {
         using var request = BuildRequest(path);
 
+        // HttpClient.Timeout stops applying once SendAsync returns at the ResponseHeadersRead boundary,
+        // so on its own it does NOT bound the body read below - a server that returns 200 headers then
+        // stalls the body would hang ReadAsByteArrayAsync indefinitely (the poll token is not cancelled
+        // during a healthy poll), silently wedging the whole chained poll loop. A linked CTS with an
+        // explicit deadline covers the entire transfer (headers + body), restoring Mac URLSession
+        // timeoutIntervalForRequest = 30 parity. The deadline cancels timeoutCts only; the caller's
+        // cancellationToken stays un-cancelled, so a body stall surfaces to the poller as a hard
+        // failure with backoff (UsageService's cancellationToken.IsCancellationRequested filter is
+        // false) rather than as a benign "poll cancelled" no-op.
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
+        var timeoutToken = timeoutCts.Token;
+
         using var response = await _httpClient
-            .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+            .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutToken)
             .ConfigureAwait(false);
 
         var status = (int)response.StatusCode;
@@ -257,7 +270,7 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
             return null;
         }
 
-        return await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+        return await response.Content.ReadAsByteArrayAsync(timeoutToken).ConfigureAwait(false);
     }
 
     /// <summary>

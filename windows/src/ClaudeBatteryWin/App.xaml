@@ -1,9 +1,14 @@
 <Application x:Class="ClaudeBatteryWin.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:tb="clr-namespace:H.NotifyIcon;assembly=H.NotifyIcon.Wpf">
+             xmlns:tb="clr-namespace:H.NotifyIcon;assembly=H.NotifyIcon.Wpf"
+             ShutdownMode="OnExplicitShutdown">
     <!-- No StartupUri: this is a windowless tray app (R1). The TaskbarIcon below is the only
-         persistent UI surface; the flyout and login/settings windows are created on demand. -->
+         persistent UI surface; the flyout and login/settings windows are created on demand.
+         ShutdownMode=OnExplicitShutdown is REQUIRED: with the WPF default (OnLastWindowClose) the
+         process starts with zero windows and would quit the moment the first on-demand window (e.g.
+         Settings) is closed, taking the tray icon with it. Every real exit path calls Shutdown()
+         explicitly (the tray Quit item and the second-instance bail), so nothing else changes. -->
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
