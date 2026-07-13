@@ -705,16 +705,6 @@ public sealed class AuthManager
         if (_pendingSessionKey is { } key)
         {
             _accountStore.PrimeCookies(key, _pendingCookieHeader);
-
-            // Adding a second account primes the ONE shared jar with the new identity while the
-            // already-active account may still be polling. Discard any in-flight poll on the old
-            // identity so its now-wrong-identity 403 is superseded (IsCurrentGeneration) rather than
-            // mis-flagging the healthy active account as auth-failed. First login (no active account)
-            // needs no invalidation - UpsertAccount bumps the generation when it activates.
-            if (_accountStore.ActiveAccount is not null)
-            {
-                _accountStore.InvalidateActivePolls();
-            }
         }
 
         _orgDiscoveryCts?.Cancel();

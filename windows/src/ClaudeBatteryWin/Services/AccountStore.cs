@@ -320,21 +320,6 @@ public sealed class AccountStore
         ActiveAccountChanged?.Invoke();
     }
 
-    /// <summary>
-    /// Advance the request generation WITHOUT firing <see cref="ActiveAccountChanged"/>, so the poller
-    /// is neither restarted nor stopped. Used when the shared jar is transiently re-primed for another
-    /// identity while an account is still active - e.g. a WebView "add account" capture primes the new
-    /// identity's cookies (<see cref="PrimeCookies"/>) before its org is committed. A poll already in
-    /// flight for the active account stamped the prior generation, so <see cref="IsCurrentGeneration"/>
-    /// now returns false for it and its result (in particular a wrong-identity 403) is discarded rather
-    /// than mis-flagging the active account as auth-failed. A committed add/switch/re-auth bumps again
-    /// via <see cref="BumpGenerationAndNotify"/>.
-    /// </summary>
-    public void InvalidateActivePolls()
-    {
-        _generation++;
-    }
-
     // MARK: - Cookie jar management (ported from Mac ClaudeAPI)
 
     /// <summary>
