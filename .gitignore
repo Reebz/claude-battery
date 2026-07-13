@@ -42,6 +42,9 @@ excalidraw.log
 .worktrees
 .claude/
 .serena/
+.impeccable/
 CLAUDE.md
+AGENTS.md
+mempalace.yaml
 scripts/release.local
 docs/
