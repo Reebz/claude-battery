@@ -116,11 +116,17 @@
     }
 
     .hero-actions {
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
+      align-items: stretch;
+      max-width: 600px;   /* wide enough that "Other ways to install" stays on one line */
+      margin: 0 auto;
+    }
+
+    .hero-actions .btn {
+      width: 100%;
       justify-content: center;
-      align-items: center;
     }
 
     .btn {
@@ -177,11 +183,25 @@
       flex-shrink: 0;
     }
 
-    /* OS-adaptive download button: brand logo on the left, label over a small version line. */
+    /* Download button: OS brand logo pinned at the left edge, a two-line CENTERED text
+       block (bold label over a smaller, lighter version). The logo is absolutely positioned
+       so the text stays centered in the full button width. Shared by the hero button and
+       both install-section download buttons so all three match. */
     .btn-download {
+      position: relative;
+      justify-content: center;
       align-items: center;
-      gap: 10px;
-      text-align: left;
+      gap: 0;
+      padding: 13px 48px;   /* symmetric H-pad clears the left logo (16 + 22 + gap) so centered text never collides */
+      min-height: 44px;
+      text-align: center;
+    }
+
+    .btn-download .btn-os-icon {
+      position: absolute;
+      left: 16px;
+      top: 50%;
+      transform: translateY(-50%);
     }
 
     .btn-os-icon {
@@ -202,14 +222,19 @@
     .btn-download-text {
       display: flex;
       flex-direction: column;
-      align-items: flex-start;
+      align-items: center;
       line-height: 1.15;
     }
 
+    .btn-label {
+      font-size: 1rem;
+      font-weight: 700;
+    }
+
     .btn-version {
-      font-size: 0.75rem;
+      font-size: 0.8125rem;   /* 13px - slightly smaller than the 16px label */
       font-weight: 500;
-      opacity: 0.82;
+      opacity: 0.85;
     }
 
     .menubar-preview {
@@ -492,7 +517,7 @@
       .hero-icon { width: 88px; }
       .hero h1 { font-size: 1.85rem; }
       .hero .tagline { font-size: 1rem; margin-bottom: 24px; }
-      .hero-actions { flex-direction: column; gap: 10px; }
+      .hero-actions { grid-template-columns: 1fr; gap: 10px; max-width: 340px; }
       .hero-actions .btn { width: 100%; justify-content: center; }
       .menubar-preview { margin-top: 32px; }
       .menubar-preview img { height: 44px; }
@@ -653,9 +678,14 @@
         <div class="install-card">
           <h3>Direct download</h3>
           <p>Open the DMG, drag to Applications, done.</p>
-          <a href="https://github.com/Reebz/claude-battery/releases/download/v1.50/claude-battery_v1.50.dmg" class="btn btn-primary" style="width: 100%; justify-content: center;">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Download v1.50
+          <a href="https://github.com/Reebz/claude-battery/releases/download/v1.50/claude-battery_v1.50.dmg" class="btn btn-primary btn-download" style="width: 100%;">
+            <span class="btn-os-icon" aria-hidden="true">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>
+            </span>
+            <span class="btn-download-text">
+              <span class="btn-label">Download Mac</span>
+              <span class="btn-version">(v1.50)</span>
+            </span>
           </a>
         </div>
         <div class="install-card">
@@ -666,9 +696,14 @@
         <div class="install-card">
           <h3>Windows</h3>
           <p>Native Beta build. Unzip and run -- Windows may warn (unsigned).</p>
-          <a href="https://github.com/Reebz/claude-battery/releases/download/windows-test-1.50.3-beta/ClaudeBattery-windows-test-1.50.3-beta-win-x64.zip" class="btn btn-primary" style="width: 100%; justify-content: center;">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" style="width:18px;height:18px"><path d="M3 5.1 10.4 4v7.2H3V5.1Zm0 13.8 7.4 1.1v-7.1H3v6Zm8.2 1.2L21 21v-8.6h-9.8v7.7Zm0-16.2v7.7H21V3l-9.8 1.9Z"/></svg>
-            Download Beta (1.50.3)
+          <a href="https://github.com/Reebz/claude-battery/releases/download/windows-test-1.50.3-beta/ClaudeBattery-windows-test-1.50.3-beta-win-x64.zip" class="btn btn-primary btn-download" style="width: 100%;">
+            <span class="btn-os-icon" aria-hidden="true">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-13.051-1.851"/></svg>
+            </span>
+            <span class="btn-download-text">
+              <span class="btn-label">Download Win</span>
+              <span class="btn-version">(v1.50.3 beta)</span>
+            </span>
           </a>
         </div>
       </div>
