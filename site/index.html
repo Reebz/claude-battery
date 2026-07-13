@@ -177,6 +177,41 @@
       flex-shrink: 0;
     }
 
+    /* OS-adaptive download button: brand logo on the left, label over a small version line. */
+    .btn-download {
+      align-items: center;
+      gap: 10px;
+      text-align: left;
+    }
+
+    .btn-os-icon {
+      display: inline-flex;
+      align-items: center;
+    }
+
+    /* Explicit display above overrides the UA [hidden] rule, so restore it for the swap. */
+    .btn-os-icon[hidden] {
+      display: none;
+    }
+
+    .btn-os-icon svg {
+      width: 22px;
+      height: 22px;
+    }
+
+    .btn-download-text {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      line-height: 1.15;
+    }
+
+    .btn-version {
+      font-size: 0.75rem;
+      font-weight: 500;
+      opacity: 0.82;
+    }
+
     .menubar-preview {
       margin-top: 40px;
     }
@@ -493,12 +528,24 @@
         <a id="heroDownload"
            href="https://github.com/Reebz/claude-battery/releases/download/v1.50/claude-battery_v1.50.dmg"
            data-mac-href="https://github.com/Reebz/claude-battery/releases/download/v1.50/claude-battery_v1.50.dmg"
-           data-mac-label="Download for macOS"
+           data-mac-label="Download Mac"
+           data-mac-version="(v1.50)"
            data-win-href="https://github.com/Reebz/claude-battery/releases/download/windows-test-1.50.3-beta/ClaudeBattery-windows-test-1.50.3-beta-win-x64.zip"
-           data-win-label="Download for Windows (Beta)"
-           class="btn btn-primary">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          <span class="btn-label">Download for macOS</span>
+           data-win-label="Download Win"
+           data-win-version="(v1.50.3 beta)"
+           class="btn btn-primary btn-download">
+          <!-- OS logo sits left of the label. Apple shows by default (macOS-first, works with no
+               JS and for every non-Windows OS); the script below swaps in the Windows logo. -->
+          <span class="btn-os-icon" data-os-icon="mac" aria-hidden="true">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>
+          </span>
+          <span class="btn-os-icon" data-os-icon="win" aria-hidden="true" hidden>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-13.051-1.851"/></svg>
+          </span>
+          <span class="btn-download-text">
+            <span class="btn-label">Download Mac</span>
+            <span class="btn-version">(v1.50)</span>
+          </span>
         </a>
         <a href="#install" class="btn btn-secondary">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
@@ -655,9 +702,17 @@
       if (!btn) return;
       var winHref = btn.getAttribute('data-win-href');
       var winLabel = btn.getAttribute('data-win-label');
+      var winVersion = btn.getAttribute('data-win-version');
       if (winHref) btn.setAttribute('href', winHref);
       var label = btn.querySelector('.btn-label');
       if (label && winLabel) label.textContent = winLabel;
+      var version = btn.querySelector('.btn-version');
+      if (version && winVersion) version.textContent = winVersion;
+      // Swap the Apple logo for the Windows logo.
+      var macIcon = btn.querySelector('[data-os-icon="mac"]');
+      var winIcon = btn.querySelector('[data-os-icon="win"]');
+      if (macIcon) macIcon.hidden = true;
+      if (winIcon) winIcon.hidden = false;
     })();
   </script>
 </body>
