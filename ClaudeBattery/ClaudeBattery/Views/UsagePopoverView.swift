@@ -124,14 +124,14 @@ struct UsagePopoverView: View {
 
     private func sessionCard(usage: UsageData) -> some View {
         // The gauge shows the weekly-capped value (sessionGaugeRemaining) so a nearly-exhausted
-        // weekly can't display a high, unreachable session number; the forecast is computed
-        // separately from the RAW session (via sessionForecast) so the cap never corrupts it.
+        // weekly can't display a high, unreachable session number; the pace is graded
+        // separately from the RAW session (via sessionPace) so the cap never corrupts it.
         gaugeCard(title: "Session",
                   remaining: usage.sessionGaugeRemaining,
                   resetsAt: usage.sessionResetDate,
                   window: Self.sessionWindow,
                   tickCount: 5,
-                  forecastOverride: Self.sessionForecast(for: usage),
+                  paceOverride: Self.sessionPace(for: usage),
                   suppressTimeArc: usage.isSessionWeeklyLimited)
     }
 
@@ -144,19 +144,19 @@ struct UsagePopoverView: View {
     }
 
     /// Shared Session/Weekly card: a concentric dual-arc gauge (outer = usage remaining, inner =
-    /// time remaining, both on the batteryColor scale, KTD1/KTD2) over a muted run-out caption
+    /// time remaining, both on the batteryColor scale, KTD1/KTD2) over a RAG pace caption
     /// (#31). The inner arc, time %, and caption self-omit when the reset time is unknown (KTD4).
     private func gaugeCard(title: String, remaining: Double, resetsAt: Date?, window: TimeInterval, tickCount: Int,
-                           forecastOverride: RunOutForecast? = nil, suppressTimeArc: Bool = false) -> some View {
+                           paceOverride: PaceStatus? = nil, suppressTimeArc: Bool = false) -> some View {
         // Suppress the inner time arc when the shown value is not on this card's own clock: a
         // weekly-limited Session displays the weekly quota, so a session-window time arc would pair
-        // two different windows and mislead (the concentric grammar reads "runs out before reset").
-        // nil hides the inner arc, its centre clock, and the a11y "time remaining" (KTD4).
+        // two different windows and mislead. nil hides the inner arc, its centre clock, and the
+        // a11y "time remaining" (KTD4).
         let timeRemaining = suppressTimeArc ? nil : Self.timeRemainingPercent(resetsAt: resetsAt, window: window)
-        // `forecastOverride` lets the Session card supply a forecast computed from the RAW
-        // session value (or `.weeklyLimited`) instead of the possibly-capped `remaining` shown
-        // on the dial; the Weekly card passes nil and forecasts from its own value as before.
-        let forecast = forecastOverride ?? Self.projectedRunOut(remainingPercent: remaining, resetsAt: resetsAt, window: window)
+        // `paceOverride` lets the Session card supply a pace graded from the RAW session value
+        // (or `.weeklyLimited`) instead of the possibly-capped `remaining` shown on the dial; the
+        // Weekly card passes nil and grades its own value.
+        let pace = paceOverride ?? Self.paceStatus(remainingPercent: remaining, resetsAt: resetsAt, window: window)
         return UsageCard(title: title) {
             VStack(spacing: 8) {
                 ArcGauge(value: remaining,
@@ -171,20 +171,20 @@ struct UsagePopoverView: View {
                     .frame(height: 80)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(Self.gaugeAccessibilityLabel(name: title, usage: remaining,
-                                                                     timeRemaining: timeRemaining, forecast: forecast))
-                forecastCaptionView(forecast)
+                                                                     timeRemaining: timeRemaining, pace: pace))
+                paceCaptionView(pace)
             }
         }
         .frame(height: gaugeCardHeight)
     }
 
-    /// Muted run-out caption under a dial; omitted entirely when the forecast is `.unknown` (KTD4).
+    /// RAG-coloured pace caption under a dial; omitted entirely when the pace is `.unknown` (KTD4).
     @ViewBuilder
-    private func forecastCaptionView(_ forecast: RunOutForecast) -> some View {
-        if let text = Self.forecastCaption(forecast) {
+    private func paceCaptionView(_ pace: PaceStatus) -> some View {
+        if let text = Self.paceCaption(pace) {
             Text(text)
                 .font(.system(size: 10, weight: .medium))
-                .foregroundColor(Self.mutedLabelColor)
+                .foregroundColor(Self.paceColor(pace))
                 .fixedSize()
         }
     }
@@ -294,117 +294,98 @@ struct UsagePopoverView: View {
         return max(0, min(100, percent))
     }
 
-    // MARK: - Run-out forecast (#31)
+    // MARK: - Pace status (#31)
 
-    /// Projected-run-out states for one window (session or weekly). Pure, stateless single-sample
-    /// linear extrapolation; the caption view (`forecastCaption`) maps each case to copy.
-    enum RunOutForecast: Equatable {
-        case runsOut(Date)     // burning faster than the clock; a projected clock time before reset
-        case onPace            // pace within `paceBand` of the clock
-        case willNotRunOut     // burning slower than the clock (includes 0% used)
-        case depleted          // already at 100% used
-        case tooEarly          // elapsed fraction below `minElapsedFraction`; extrapolation unstable
-        case resettingSoon     // under `minRemainingSeconds` left; defer to the reset countdown
-        case weeklyLimited     // the weekly limit is the binding constraint; the Session dial defers to it
-        case unknown           // resetsAt nil or past/non-finite; caller omits the caption
+    /// Pace status for one window (session or weekly): how far usage burn is ahead of / behind the
+    /// clock, bucketed into a 3-level RAG status (#31). `weeklyLimited` and `unknown` are the two
+    /// non-pace states the caption still needs (Session deferring to weekly; no reset/time data).
+    enum PaceStatus: Equatable {
+        case onTrack        // pace delta < cautionDelta (includes being ahead of pace)
+        case caution        // cautionDelta <= delta < dangerDelta
+        case danger         // delta >= dangerDelta, or usage already at 0
+        case weeklyLimited  // the weekly limit binds; the Session dial defers to it
+        case unknown        // resetsAt nil or past/non-finite; caller omits the caption
     }
 
-    /// Below this fraction of the window elapsed, burn rate (used / elapsed) divides by a tiny
-    /// denominator and the projection swings wildly, so it is suppressed (KTD3, edge case a).
-    static let minElapsedFraction: Double = 0.10
-    /// Under this many seconds until reset, a projected run-out lands inside the reset countdown's
-    /// own resolution and would flicker across the boundary poll-to-poll, so it defers (edge case b).
-    static let minRemainingSeconds: TimeInterval = 600
-    /// Half-width of the "on track" band, in percentage points: within this of the clock we do not
-    /// over-claim a precise run-out time.
-    static let paceBand: Double = 3
+    /// Pace delta = timeRemaining% - usageRemaining% (percentage points; positive means burning
+    /// faster than the clock). It is exactly how much longer the inner time arc is than the outer
+    /// usage arc, so the RAG status names the visible gap between the two arcs.
+    /// At or above this delta the pace is Caution (amber).
+    static let cautionDelta: Double = 10
+    /// At or above this delta the pace is Danger (red).
+    static let dangerDelta: Double = 25
 
-    /// Projected run-out for one window, from the current usage snapshot only. Mirrors
+    /// Pace status for one window, from the current usage snapshot only. Mirrors
     /// `timeRemainingPercent` (window start = `resetsAt - window`; a nil/past/non-finite delta
-    /// yields `.unknown` so the caller omits the caption). Run-out lands before the reset exactly
-    /// when `timeRemainingPercent > remainingPercent` (the inner time arc longer than the outer
-    /// usage arc), so the `.runsOut` date is always before `resetsAt`.
-    static func projectedRunOut(remainingPercent: Double, resetsAt: Date?, window: TimeInterval, now: Date = Date()) -> RunOutForecast {
+    /// yields `.unknown` so the caller omits the caption). Buckets the signed pace delta; being
+    /// ahead of pace (negative delta) is always `.onTrack`, and 0% usage remaining is `.danger`
+    /// (already used up). No early-window or near-reset guard is needed: unlike a projected run-out
+    /// time, the delta is stable across the whole window (it never divides by elapsed time).
+    static func paceStatus(remainingPercent: Double, resetsAt: Date?, window: TimeInterval, now: Date = Date()) -> PaceStatus {
         guard let resetsAt,
               let r = CountdownFormat.remainingSeconds(until: resetsAt, now: now) else { return .unknown }
-        if remainingPercent <= 0 { return .depleted }
-        if r < minRemainingSeconds { return .resettingSoon }
-        let elapsedFraction = 1 - r / window
-        if elapsedFraction < minElapsedFraction { return .tooEarly }
-        // 0% used: no burn, and guards the `100 - remainingPercent` divisor below.
-        if remainingPercent >= 100 { return .willNotRunOut }
+        if remainingPercent <= 0 { return .danger }
         let timeRemaining = min(100, r / window * 100)
-        let paceDelta = timeRemaining - remainingPercent
-        if paceDelta > paceBand {
-            let secondsUntilRunOut = (window - r) * remainingPercent / (100 - remainingPercent)
-            return .runsOut(now.addingTimeInterval(secondsUntilRunOut))
-        }
-        if paceDelta < -paceBand { return .willNotRunOut }
-        return .onPace
+        let delta = timeRemaining - remainingPercent
+        if delta >= dangerDelta { return .danger }
+        if delta >= cautionDelta { return .caution }
+        return .onTrack
     }
 
-    /// The Session card's run-out forecast (#31). When the weekly limit binds
-    /// (`isSessionWeeklyLimited`), the session defers to it: `.weeklyLimited` drives the
-    /// "Limited by weekly" caption while the real run-out time is shown on the Weekly card.
-    /// Otherwise the forecast runs on the RAW `sessionRemaining` over the 5h window - never the
-    /// capped gauge value (`sessionGaugeRemaining`), which is a weekly percentage over a
-    /// weekly clock and would fabricate a bogus, too-soon run-out on the session timeline.
-    static func sessionForecast(for usage: UsageData, now: Date = Date()) -> RunOutForecast {
-        let raw = projectedRunOut(remainingPercent: usage.sessionRemaining,
-                                  resetsAt: usage.sessionResetDate,
-                                  window: sessionWindow, now: now)
-        // When the weekly limit binds, defer to it - UNLESS the 5h session itself is projected to
-        // run out within its own window first. That is a nearer, concrete wall (a clock time today,
-        // not a weekly reset days away), so a fast-burning session is never hidden behind
-        // "Limited by weekly" just because the weekly percentage is numerically lower.
+    /// The Session card's pace status (#31). When the weekly limit binds (`isSessionWeeklyLimited`)
+    /// the Session defers to it (`.weeklyLimited`) - UNLESS the RAW 5h session is itself in Danger,
+    /// a nearer concrete wall that must not be hidden behind "Limited by weekly". The pace always
+    /// grades the RAW `sessionRemaining` over the 5h window, never the capped gauge value
+    /// (`sessionGaugeRemaining`), which is a weekly percentage over a weekly clock and would
+    /// fabricate a bogus pace on the session timeline.
+    static func sessionPace(for usage: UsageData, now: Date = Date()) -> PaceStatus {
+        let raw = paceStatus(remainingPercent: usage.sessionRemaining,
+                             resetsAt: usage.sessionResetDate,
+                             window: sessionWindow, now: now)
         if usage.isSessionWeeklyLimited {
-            if case .runsOut = raw { return raw }
-            return .weeklyLimited
+            return raw == .danger ? raw : .weeklyLimited
         }
         return raw
     }
 
-    /// Copy for the run-out caption under each dial (#31). nil hides the line (`.unknown`, KTD4).
-    static func forecastCaption(_ forecast: RunOutForecast, now: Date = Date()) -> String? {
-        switch forecast {
-        case .runsOut(let date):        return formatForecastTime(date, now: now)
-        case .onPace:                   return "On track"
-        case .willNotRunOut:            return "Won't run out"
-        case .depleted:                 return "Used up"
-        case .weeklyLimited:            return "Limited by weekly"
-        case .tooEarly, .resettingSoon: return "--"
-        case .unknown:                  return nil
+    /// Copy for the pace caption under each dial (#31). nil hides the line (`.unknown`, KTD4).
+    static func paceCaption(_ status: PaceStatus) -> String? {
+        switch status {
+        case .onTrack:       return "On Track"
+        case .caution:       return "Caution"
+        case .danger:        return "Danger"
+        case .weeklyLimited: return "Limited by weekly"
+        case .unknown:       return nil
         }
     }
 
-    /// Short run-out clock time: "~3:40 pm" same day, "~Thu 2 pm" a later day, in the user's locale.
-    static func formatForecastTime(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = .current
-        // Render on the same clock the same-day check uses, so the boundary and the printed
-        // time never disagree (they match in production where both are `.current`).
-        formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
-        let sameDay = calendar.isDate(date, inSameDayAs: now)
-        formatter.setLocalizedDateFormatFromTemplate(sameDay ? "jmm" : "EEE jmm")
-        return "~" + formatter.string(from: date)
+    /// RAG colour for the pace caption, reusing the batteryColor palette (green/orange/red) so the
+    /// label matches the arc colours. `weeklyLimited` is neutral (no pace to grade); `unknown`
+    /// never renders (its caption is nil).
+    static func paceColor(_ status: PaceStatus) -> Color {
+        switch status {
+        case .onTrack:       return .green
+        case .caution:       return .orange
+        case .danger:        return .red
+        case .weeklyLimited: return mutedLabelColor
+        case .unknown:       return .clear
+        }
     }
 
-    /// One spoken label per dial combining usage, time-remaining, and the forecast (R9). The
-    /// run-out state is spelled out ("projected to run out around ...") rather than reusing the
-    /// terse visual caption, and the "--" placeholder states have nothing to add.
-    static func gaugeAccessibilityLabel(name: String, usage: Double, timeRemaining: Double?, forecast: RunOutForecast, now: Date = Date()) -> String {
+    /// One spoken label per dial combining usage, time-remaining, and the pace status (R9). The
+    /// pace is spelled out with its meaning ("over pace") rather than reusing the terse visual
+    /// caption, and `.unknown` has nothing to add.
+    static func gaugeAccessibilityLabel(name: String, usage: Double, timeRemaining: Double?, pace: PaceStatus) -> String {
         var parts = ["\(name) usage \(Int(usage.rounded())) percent"]
         if let timeRemaining {
             parts.append("time remaining \(Int(timeRemaining.rounded())) percent")
         }
-        switch forecast {
-        case .runsOut(let date):
-            parts.append("projected to run out around " + formatForecastTime(date, now: now).replacingOccurrences(of: "~", with: ""))
-        case .onPace, .willNotRunOut, .depleted, .weeklyLimited:
-            if let caption = forecastCaption(forecast) { parts.append(caption) }
-        case .tooEarly, .resettingSoon, .unknown:
-            break
+        switch pace {
+        case .onTrack:       parts.append("on track")
+        case .caution:       parts.append("caution, over pace")
+        case .danger:        parts.append("danger, over pace")
+        case .weeklyLimited: parts.append("limited by weekly")
+        case .unknown:       break
         }
         return parts.joined(separator: ", ")
     }
