@@ -1,5 +1,14 @@
 # Change Log
 
+### v1.60
+
+**Concentric Usage Arcs**
+- Each Session and Weekly dial is now a two-ring gauge: an outer ring for how much usage is left and an inner ring for how much of the window's time is left. When the inner ring runs longer than the outer one, you are using the quota faster than the clock (issue #31).
+- A short pace label sits under each dial - On Track, Caution, or Danger - colored green, amber, or red by how far usage is running ahead of the time left.
+
+**Sign-In**
+- You can now add a second organization from the same account through manual sign-in. Reusing the saved account cookie no longer stops at the first organization it finds (issue #32).
+
 ### v1.50
 
 **Sign-In Reliability & Opt-In Diagnostics**
