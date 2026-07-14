@@ -33,6 +33,9 @@ enum ManualSignInResult: Equatable {
     case success(String)
     /// Multiple orgs with no existing match — the user must pick one (pattern #6).
     case needsOrgChoice([Organization])
+    /// Every org on the account is already stored (any N >= 2); the matched session was refreshed
+    /// rather than a new account added (issue #32, KTD-3).
+    case alreadySignedInAllOrgs
     /// The paste did not contain a usable `sessionKey`.
     case invalidInput
     /// 401/403 from claude.ai. `suggestFullHeader` is true when only a bare key was pasted,
@@ -722,13 +725,18 @@ class AuthManager: NSObject, ObservableObject {
     // MARK: - Org Discovery
 
     /// Pure org-selection rule (pattern #6: never blindly take orgs[0]) shared by the WebView and
-    /// manual-paste sign-in paths. Single org -> take it; else if an existing account's org is in
-    /// the list -> auto-select that match; else the caller must show a picker. Unit-tested in
-    /// isolation; each call site supplies its own side-effect shell (NSAlert vs ManualSignInResult).
+    /// manual-paste sign-in paths. Single org -> take it; a multi-org account with at least one
+    /// un-added org -> the caller shows a picker (so a second org of the same account is reachable,
+    /// issue #32); a multi-org account where every org is already stored -> the caller refreshes
+    /// the matched session and reports it. There is deliberately NO silent auto-match: the same
+    /// paste is used both to refresh an existing org and to add a different org of the same account,
+    /// so when an addable org exists the user must choose. Unit-tested in isolation; each call site
+    /// supplies its own side-effect shell (NSAlert vs ManualSignInResult).
     enum OrgSelection {
         case single(Organization)
-        case autoMatched(Organization, accountId: UUID)
         case needsChoice([Organization])
+        /// Every org on the account is already stored — refresh, do not add (KTD-3).
+        case allAlreadyAdded([Organization])
     }
 
     // `nonisolated`: a pure rule over value types, so it needs no main-actor isolation and can be
@@ -737,11 +745,24 @@ class AuthManager: NSObject, ObservableObject {
         if orgs.count == 1 {
             return .single(orgs[0])
         }
-        if let existing = accounts.first(where: { acct in orgs.contains(where: { $0.uuid == acct.organizationId }) }),
-           let match = orgs.first(where: { $0.uuid == existing.organizationId }) {
-            return .autoMatched(match, accountId: existing.id)
+        let unadded = orgs.filter { org in !accounts.contains(where: { $0.organizationId == org.uuid }) }
+        if unadded.isEmpty {
+            return .allAlreadyAdded(orgs)
         }
         return .needsChoice(orgs)
+    }
+
+    /// The stored account to refresh when every org is already added (`.allAlreadyAdded`): the
+    /// active account when its org is in the list, else the first stored match. Active-preference
+    /// is mandatory, not cosmetic — `AccountStore.updateSessionKey` re-primes the shared cookie jar
+    /// only for the active account, so refreshing a non-active sibling while the active account's
+    /// org is present would leave the live session unrefreshed (KTD-3).
+    func matchedAccount(in orgs: [Organization]) -> Account? {
+        if let active = accountStore.activeAccount,
+           orgs.contains(where: { $0.uuid == active.organizationId }) {
+            return active
+        }
+        return accountStore.accounts.first { acct in orgs.contains { $0.uuid == acct.organizationId } }
     }
 
     // internal for @testable access in AuthManagerTests
@@ -808,11 +829,24 @@ class AuthManager: NSObject, ObservableObject {
             switch Self.selectOrg(orgs: orgs, accounts: accountStore.accounts) {
             case .single(let org):
                 chosenOrg = org
-            case .autoMatched(let org, let accountId):
-                chosenOrg = org
-                // Log the non-PII account id, not displayName (= email when no nickname) or the
-                // org name — both can carry PII, and os_log lines can be read off-device.
-                logger.info("Re-auth auto-selected org for account \(accountId.uuidString)")
+            case .allAlreadyAdded:
+                // Every org on this account is already stored. This is a foreground sign-in the
+                // user just completed, so refresh the matched account and switch to it (KTD-3
+                // WebView branch — unlike the manual path, switching is expected here). Log the
+                // non-PII account id only; displayName/org name can carry PII in off-device logs.
+                guard let matched = matchedAccount(in: orgs) else {
+                    handleOrgDiscoveryFailure("Account limit reached.")
+                    return
+                }
+                accountStore.updateSessionKey(matched.id, sessionKey, cookieHeader: pendingCookieHeader)
+                accountStore.switchTo(matched.id)
+                logger.info("Re-auth: all orgs already added, refreshed account \(matched.id.uuidString)")
+                pendingSessionKey = nil
+                pendingCookieHeader = nil
+                loginState = .idle
+                stopLoginWindow()
+                onAuthSuccess?()
+                return
             case .needsChoice(let choices):
                 let picked = await showOrgPicker(orgs: choices)
                 // If teardown (timeout / window close) resumed the picker with nil, orgDiscoveryTask
@@ -835,6 +869,7 @@ class AuthManager: NSObject, ObservableObject {
                 email: email,
                 sessionKey: sessionKey,
                 organizationId: chosenOrg.uuid,
+                organizationName: chosenOrg.sanitizedName,
                 allCookieHeader: pendingCookieHeader
             )
 
@@ -898,6 +933,10 @@ class AuthManager: NSObject, ObservableObject {
                 let duplicateCount = orgs.prefix(index).filter { $0.displayName == org.displayName && org.displayName != "Organization" }.count
                 if duplicateCount > 0 {
                     title = "\(title) (\(duplicateCount + 1))"
+                }
+                // Mark orgs already stored so the user can tell an "add" choice from a "reactivate".
+                if accountStore.accounts.contains(where: { $0.organizationId == org.uuid }) {
+                    title = "\(title) (already added)"
                 }
                 popup.addItem(withTitle: title)
             }
@@ -1060,14 +1099,37 @@ class AuthManager: NSObject, ObservableObject {
             switch Self.selectOrg(orgs: orgs, accounts: accountStore.accounts) {
             case .single(let org):
                 selectedOrg = org
-            case .autoMatched(let org, _):
-                selectedOrg = org
             case .needsChoice(let choices):
                 // Restore the active account's jar while the picker is shown; completeManualSignIn
                 // re-primes the jar to the chosen account via switchTo.
                 restoreActiveJar()
                 pendingManualSignIn = (sessionKey, cookieHeader, email)
                 return .needsOrgChoice(choices)
+            case .allAlreadyAdded:
+                // Every org on this account is already stored. Refresh the matched account's
+                // session and report it (KTD-3). Early-return here so this bypasses the trailing
+                // `if case .success = result {} else { restoreActiveJar() }` guard below — Branch A
+                // must NOT restore, or it would undo the refresh it just primed into the jar.
+                guard let matched = matchedAccount(in: orgs) else {
+                    restoreActiveJar()
+                    return .accountLimitReached
+                }
+                accountStore.updateSessionKey(matched.id, sessionKey, cookieHeader: cookieHeader)
+                if matched.id == accountStore.activeAccountId {
+                    // Branch A — matched IS active: updateSessionKey already re-primed the jar to
+                    // the fresh cookies. Do not restore, do not switch. Fire onAuthSuccess so
+                    // polling restarts (recovers an active session that had gone authFailed).
+                    logger.info("Manual sign-in: all orgs already added, refreshed active account")
+                    onAuthSuccess?()
+                } else {
+                    // Branch B — matched is NOT active: persist fresh creds on the sibling, then
+                    // restore the real active account's jar so it keeps serving its own cookies.
+                    // Do not switch (a paste must not silently switch the active account) and do
+                    // not fire onAuthSuccess (the active account was left untouched).
+                    restoreActiveJar()
+                    logger.info("Manual sign-in: all orgs already added, refreshed a background account")
+                }
+                return .alreadySignedInAllOrgs
             }
 
             let result = addOrReactivateManualAccount(org: selectedOrg, sessionKey: sessionKey, cookieHeader: cookieHeader, email: email)
@@ -1083,18 +1145,19 @@ class AuthManager: NSObject, ObservableObject {
     }
 
     private func addOrReactivateManualAccount(org: Organization, sessionKey: String, cookieHeader: String?, email: String) -> ManualSignInResult {
-        let account = Account(email: email, sessionKey: sessionKey, organizationId: org.uuid, allCookieHeader: cookieHeader)
+        let account = Account(email: email, sessionKey: sessionKey, organizationId: org.uuid, organizationName: org.sanitizedName, allCookieHeader: cookieHeader)
         if accountStore.addAccount(account) {
             accountStore.switchTo(account.id)
             logger.info("Manual sign-in added a new account")
             onAuthSuccess?()
-            return .success(account.displayName)
+            // Disambiguated so adding org B of a same-email account confirms which org (issue #32).
+            return .success(accountStore.disambiguatedName(for: account))
         } else if let existing = accountStore.accounts.first(where: { $0.organizationId == org.uuid }) {
             accountStore.updateSessionKey(existing.id, sessionKey, cookieHeader: cookieHeader)
             accountStore.switchTo(existing.id)
             logger.info("Manual sign-in reactivated an existing account")
             onAuthSuccess?()
-            return .success(existing.displayName)
+            return .success(accountStore.disambiguatedName(for: existing))
         }
         return .accountLimitReached
     }
@@ -1462,10 +1525,20 @@ struct Organization: Codable, Equatable {
     let billingType: String?
     let emailAddress: String?
 
+    /// The org's real name, sanitized (newline/RTL-mark strip, 100-char cap), or nil when the org
+    /// has no usable name. This is what gets stored on `Account.organizationName`, so a persisted
+    /// org name matches how the name renders everywhere else and never carries the `displayName`
+    /// "Organization"/billing-type fallback.
+    var sanitizedName: String? {
+        guard let name, !name.isEmpty else { return nil }
+        let sanitized = name.filter { !$0.isNewline && $0 != "\u{200F}" && $0 != "\u{200E}" }
+        let capped = String(sanitized.prefix(100))
+        return capped.isEmpty ? nil : capped
+    }
+
     var displayName: String {
-        if let name, !name.isEmpty {
-            let sanitized = name.filter { !$0.isNewline && $0 != "\u{200F}" && $0 != "\u{200E}" }
-            return String(sanitized.prefix(100))
+        if let sanitizedName {
+            return sanitizedName
         }
         if let billingType, !billingType.isEmpty {
             return billingType.capitalized

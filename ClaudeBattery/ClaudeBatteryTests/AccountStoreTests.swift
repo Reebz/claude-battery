@@ -195,4 +195,59 @@ final class AccountStoreTests: XCTestCase {
         XCTAssertEqual(store2.accounts.first, account)
         XCTAssertEqual(store2.activeAccountId, account.id)
     }
+
+    // MARK: - Display: disambiguatedName (issue #32 — two orgs of the same account)
+
+    @MainActor
+    func testDisambiguatedName_uniqueEmailShowsEmail() {
+        let store = AccountStore(storage: makeStorage())
+        let a = Account(email: "solo@x.com", sessionKey: "sk", organizationId: "org-1", organizationName: "Acme")
+        _ = store.addAccount(a)
+        XCTAssertEqual(store.disambiguatedName(for: a), "solo@x.com",
+                       "a unique email renders plainly even when an org name exists")
+    }
+
+    @MainActor
+    func testDisambiguatedName_sameEmailAppendsOrgName() {
+        let store = AccountStore(storage: makeStorage())
+        let a = Account(email: "me@x.com", sessionKey: "sk", organizationId: "org-a", organizationName: "Acme")
+        let b = Account(email: "me@x.com", sessionKey: "sk", organizationId: "org-b", organizationName: "Beta")
+        _ = store.addAccount(a)
+        _ = store.addAccount(b)
+        XCTAssertEqual(store.disambiguatedName(for: a), "me@x.com (Acme)")
+        XCTAssertEqual(store.disambiguatedName(for: b), "me@x.com (Beta)")
+    }
+
+    @MainActor
+    func testDisambiguatedName_nicknameAlwaysWins() {
+        let store = AccountStore(storage: makeStorage())
+        let a = Account(email: "me@x.com", sessionKey: "sk", organizationId: "org-a", organizationName: "Acme", nickname: "Work")
+        let b = Account(email: "me@x.com", sessionKey: "sk", organizationId: "org-b", organizationName: "Beta")
+        _ = store.addAccount(a)
+        _ = store.addAccount(b)
+        XCTAssertEqual(store.disambiguatedName(for: a), "Work", "a nickname overrides email/org disambiguation")
+    }
+
+    @MainActor
+    func testDisambiguatedName_sameEmailButNoOrgNameFallsBackToEmail() {
+        let store = AccountStore(storage: makeStorage())
+        // Accounts migrated from before issue #32 have nil organizationName; they cannot
+        // disambiguate and must fall back to the email, unchanged from before.
+        let a = Account(email: "me@x.com", sessionKey: "sk", organizationId: "org-a")
+        let b = Account(email: "me@x.com", sessionKey: "sk", organizationId: "org-b")
+        _ = store.addAccount(a)
+        _ = store.addAccount(b)
+        XCTAssertEqual(store.disambiguatedName(for: a), "me@x.com")
+    }
+
+    // MARK: - Codable migration: legacy Account JSON without organizationName (R7, #32)
+
+    func testAccountDecodesLegacyJSONWithoutOrganizationName() throws {
+        let legacy = """
+        {"id":"\(UUID().uuidString)","email":"old@x.com","sessionKey":"sk","organizationId":"org-1","addedDate":0,"notificationThreshold":20,"didNotifyBelowThreshold":false}
+        """.data(using: .utf8)!
+        let account = try JSONDecoder().decode(Account.self, from: legacy)
+        XCTAssertNil(account.organizationName, "a missing organizationName key decodes as nil")
+        XCTAssertEqual(account.displayName, "old@x.com", "legacy account still renders by email")
+    }
 }

@@ -131,6 +131,23 @@ class AccountStore: ObservableObject {
         persist()
     }
 
+    // MARK: - Display
+
+    /// Name to show for an account, disambiguated by org name ONLY when another stored account
+    /// shares the same email (two orgs of one Claude account — issue #32). A nickname always wins.
+    /// Single-org accounts, unique-email accounts, and accounts with no stored org name render
+    /// exactly as `Account.displayName` (nickname ?? email), so existing users see no change.
+    func disambiguatedName(for account: Account) -> String {
+        if let nickname = account.nickname, !nickname.isEmpty {
+            return nickname
+        }
+        let sharesEmail = accounts.contains { $0.id != account.id && $0.email == account.email }
+        if sharesEmail, let orgName = account.organizationName, !orgName.isEmpty {
+            return "\(account.email) (\(orgName))"
+        }
+        return account.displayName
+    }
+
     // MARK: - Persistence
 
     private func persist() {

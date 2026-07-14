@@ -850,15 +850,28 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(org.uuid, "org-a")
     }
 
-    func testSelectOrg_multiOrg_autoMatchesExistingAccountOrg() {
+    func testSelectOrg_multiOrg_oneAlreadyStored_requiresChoice() {
+        // Issue #32: the silent auto-match is gone. When one org of a multi-org account is already
+        // stored, selectOrg must return .needsChoice (not reuse the stored org) so the picker can
+        // offer the second, un-added org.
         let a = Organization(uuid: "org-a", name: nil, billingType: nil, emailAddress: nil)
         let b = Organization(uuid: "org-b", name: nil, billingType: nil, emailAddress: nil)
         let acct = Account(email: "x@test.com", sessionKey: "sk", organizationId: "org-b", allCookieHeader: nil)
-        guard case .autoMatched(let org, let accountId) = AuthManager.selectOrg(orgs: [a, b], accounts: [acct]) else {
-            return XCTFail("an existing account's org present in the list should auto-match")
+        guard case .needsChoice(let choices) = AuthManager.selectOrg(orgs: [a, b], accounts: [acct]) else {
+            return XCTFail("one-of-two orgs stored must still require a choice, not silently auto-match")
         }
-        XCTAssertEqual(org.uuid, "org-b")
-        XCTAssertEqual(accountId, acct.id)
+        XCTAssertEqual(choices.map(\.uuid), ["org-a", "org-b"])
+    }
+
+    func testSelectOrg_multiOrg_allAlreadyStored_reportsAllAdded() {
+        let a = Organization(uuid: "org-a", name: nil, billingType: nil, emailAddress: nil)
+        let b = Organization(uuid: "org-b", name: nil, billingType: nil, emailAddress: nil)
+        let acctA = Account(email: "x@test.com", sessionKey: "sk", organizationId: "org-a", allCookieHeader: nil)
+        let acctB = Account(email: "x@test.com", sessionKey: "sk", organizationId: "org-b", allCookieHeader: nil)
+        guard case .allAlreadyAdded(let orgs) = AuthManager.selectOrg(orgs: [a, b], accounts: [acctA, acctB]) else {
+            return XCTFail("every org already stored must report .allAlreadyAdded, not a picker")
+        }
+        XCTAssertEqual(orgs.map(\.uuid), ["org-a", "org-b"])
     }
 
     func testSelectOrg_multiOrg_noExistingMatch_requiresChoice_neverOrgsZero() {
@@ -869,6 +882,156 @@ final class AuthManagerTests: XCTestCase {
             return XCTFail("multi-org with no existing match must require a choice, never blindly orgs[0]")
         }
         XCTAssertEqual(choices.map(\.uuid), ["org-a", "org-b"])
+    }
+
+    // MARK: - Issue #32: reach a second org of the same account; jar discipline when all stored
+
+    @MainActor
+    func testManualSignIn_addsSecondOrgOfSameAccount() async {
+        let auth = makeAuthManager()
+        _ = auth.accountStore.addAccount(Account(email: "me@x.com", sessionKey: "sk-A",
+            organizationId: "org-a", organizationName: "Acme", allCookieHeader: "sessionKey=sk-A"))
+
+        mockSession.responseData = #"[{"uuid":"org-a","name":"Acme","email_address":"me@x.com"},{"uuid":"org-b","name":"Beta","email_address":"me@x.com"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        let result = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf")
+        guard case .needsOrgChoice(let orgs) = result else {
+            return XCTFail("one org stored, one addable must show the picker, got \(result)")
+        }
+        XCTAssertEqual(orgs.map(\.uuid), ["org-a", "org-b"])
+
+        let completed = auth.completeManualSignIn(org: orgs[1])
+        guard case .success = completed else { return XCTFail("adding org-b should succeed, got \(completed)") }
+        XCTAssertEqual(auth.accountStore.accounts.count, 2, "both orgs of the account persist as separate accounts")
+        XCTAssertTrue(auth.accountStore.accounts.contains { $0.organizationId == "org-a" })
+        XCTAssertTrue(auth.accountStore.accounts.contains { $0.organizationId == "org-b" })
+    }
+
+    @MainActor
+    func testManualSignIn_pickingStoredOrgReactivatesNoDuplicate() async {
+        let auth = makeAuthManager()
+        _ = auth.accountStore.addAccount(Account(email: "me@x.com", sessionKey: "sk-old",
+            organizationId: "org-a", allCookieHeader: "sessionKey=sk-old"))
+
+        mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-b"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        let result = await auth.manualSignIn("sessionKey=sk-new; __cf_bm=cf")
+        guard case .needsOrgChoice(let orgs) = result else { return XCTFail("expected picker, got \(result)") }
+        // Re-pick org-a (already stored) to refresh it.
+        let completed = auth.completeManualSignIn(org: orgs[0])
+        guard case .success = completed else { return XCTFail("reactivating org-a should succeed") }
+        XCTAssertEqual(auth.accountStore.accounts.count, 1, "reactivate, not duplicate")
+        XCTAssertEqual(auth.accountStore.accounts.first?.sessionKey, "sk-new", "session refreshed")
+    }
+
+    @MainActor
+    func testManualSignIn_allOrgsStored_activeMatched_refreshesJarBranchA() async {
+        let auth = makeAuthManager()
+        let url = URL(string: "https://claude.ai")!
+        func jarSessionKey() -> String? {
+            ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: url)?.first { $0.name == "sessionKey" }?.value
+        }
+        // Both orgs of the account are stored; the org-a account is active with STALE cookies.
+        let a = Account(email: "me@x.com", sessionKey: "sk-stale", organizationId: "org-a",
+                        allCookieHeader: "sessionKey=sk-stale; __cf_bm=cf-stale")
+        _ = auth.accountStore.addAccount(a)
+        _ = auth.accountStore.addAccount(Account(email: "me@x.com", sessionKey: "sk-b",
+                        organizationId: "org-b", allCookieHeader: "sessionKey=sk-b"))
+        auth.accountStore.switchTo(a.id)
+        XCTAssertEqual(jarSessionKey(), "sk-stale", "precondition: jar holds the active account's stale cookies")
+
+        mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-b"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        let result = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
+
+        XCTAssertEqual(result, .alreadySignedInAllOrgs)
+        XCTAssertEqual(auth.accountStore.activeAccountId, a.id, "active account unchanged, no switch")
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.id == a.id }?.sessionKey, "sk-fresh",
+                       "the active account's stored session is refreshed to the pasted value")
+        XCTAssertEqual(jarSessionKey(), "sk-fresh",
+                       "Branch A: the shared jar serves the FRESH cookies, not the stale snapshot (no restore)")
+    }
+
+    @MainActor
+    func testManualSignIn_allOrgsStored_activeNotInList_restoresJarBranchB() async {
+        let auth = makeAuthManager()
+        let url = URL(string: "https://claude.ai")!
+        func jarSessionKey() -> String? {
+            ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: url)?.first { $0.name == "sessionKey" }?.value
+        }
+        // Active account C is unrelated to the pasted account (orgs a, b), both already stored.
+        let c = Account(email: "c@other.com", sessionKey: "sk-C", organizationId: "org-c",
+                        allCookieHeader: "sessionKey=sk-C; __cf_bm=cf-C")
+        _ = auth.accountStore.addAccount(c)
+        _ = auth.accountStore.addAccount(Account(email: "me@x.com", sessionKey: "sk-a", organizationId: "org-a", allCookieHeader: "sessionKey=sk-a"))
+        _ = auth.accountStore.addAccount(Account(email: "me@x.com", sessionKey: "sk-b", organizationId: "org-b", allCookieHeader: "sessionKey=sk-b"))
+        auth.accountStore.switchTo(c.id)
+        XCTAssertEqual(jarSessionKey(), "sk-C", "precondition: jar holds active account C")
+
+        mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-b"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        let result = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
+
+        XCTAssertEqual(result, .alreadySignedInAllOrgs)
+        XCTAssertEqual(auth.accountStore.activeAccountId, c.id, "active account C is unchanged, no silent switch")
+        XCTAssertEqual(jarSessionKey(), "sk-C",
+                       "Branch B: the real active account C keeps serving its own cookies (jar restored)")
+    }
+
+    @MainActor
+    func testManualSignIn_allOrgsStored_threeOrgs_isCountAgnostic() async {
+        let auth = makeAuthManager()
+        for uuid in ["org-a", "org-b", "org-c"] {
+            _ = auth.accountStore.addAccount(Account(email: "me@x.com", sessionKey: "sk-\(uuid)",
+                organizationId: uuid, allCookieHeader: "sessionKey=sk-\(uuid)"))
+        }
+        mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-b"},{"uuid":"org-c"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        let result = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf")
+        XCTAssertEqual(result, .alreadySignedInAllOrgs, "N>=2 all-stored reports the same result regardless of count")
+    }
+
+    @MainActor
+    func testFetchOrganizationId_partialStored_showsPickerNotAutoMatch() async {
+        let auth = makeAuthManager()
+        _ = auth.accountStore.addAccount(Account(email: "me@x.com", sessionKey: "sk-a",
+            organizationId: "org-a", allCookieHeader: "sessionKey=sk-a"))
+        mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-b"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        auth.pendingSessionKey = "sk-fresh"
+
+        await auth.fetchOrganizationId()
+
+        // No login window in tests, so .needsChoice -> picker returns nil -> graceful failure. The
+        // point: it routed to .needsChoice, NOT the removed .autoMatched (which would have silently
+        // reactivated org-a and overwritten its sessionKey with sk-fresh — the #32 bug).
+        XCTAssertEqual(auth.accountStore.accounts.count, 1, "no account added or removed")
+        XCTAssertEqual(auth.accountStore.accounts.first?.sessionKey, "sk-a",
+                       "org-a must NOT be silently reactivated")
+    }
+
+    @MainActor
+    func testFetchOrganizationId_allStored_refreshesMatchedAndSwitches() async {
+        let auth = makeAuthManager()
+        let a = Account(email: "me@x.com", sessionKey: "sk-a-old", organizationId: "org-a", allCookieHeader: "sessionKey=sk-a-old")
+        _ = auth.accountStore.addAccount(a)
+        _ = auth.accountStore.addAccount(Account(email: "me@x.com", sessionKey: "sk-b", organizationId: "org-b", allCookieHeader: "sessionKey=sk-b"))
+        auth.accountStore.switchTo(a.id)
+        mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-b"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        auth.pendingSessionKey = "sk-a-fresh"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertEqual(auth.accountStore.accounts.count, 2, "all-stored: no new account")
+        XCTAssertEqual(auth.accountStore.activeAccountId, a.id)
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.id == a.id }?.sessionKey, "sk-a-fresh",
+                       "WebView all-stored refreshes the matched account's session")
+        XCTAssertEqual(auth.loginState, .idle, "window closes via the success path")
     }
 
     // MARK: - fetchOrganizationId: Happy Path — single org creates account
