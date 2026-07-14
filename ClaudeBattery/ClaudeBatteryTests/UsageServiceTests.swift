@@ -107,6 +107,69 @@ final class UsageDataTests: XCTestCase {
         XCTAssertTrue(usage.modelUsages.allSatisfy { $0.remainingPercent == 100.0 })
     }
 
+    // MARK: - Session gauge capped by a low weekly (session over-reports when weekly is nearly exhausted)
+
+    /// Build a UsageData with session and weekly derived INDEPENDENTLY from the legacy tiers,
+    /// so the gating rule can be exercised across the (session, weekly) plane.
+    private func makeUsage(session: Double, weekly: Double) -> UsageData {
+        UsageData(from: UsageResponse(
+            fiveHour: makeTier(utilization: 100 - session),
+            sevenDay: makeTier(utilization: 100 - weekly),
+            sevenDayOpus: nil,
+            sevenDaySonnet: nil,
+            extraUsage: nil,
+            limits: nil,
+            spend: nil
+        ))
+    }
+
+    func testGauge_weeklyBindsAndLow_capsSessionToWeekly() {
+        // The reported bug: weekly nearly exhausted, session still high -> gauge must drop to weekly.
+        let usage = makeUsage(session: 94, weekly: 2)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        XCTAssertEqual(usage.sessionGaugeRemaining, 2, accuracy: 0.01)
+        // Raw session is untouched (menu bar + forecast keep the true 5h value).
+        XCTAssertEqual(usage.sessionRemaining, 94, accuracy: 0.01)
+    }
+
+    func testGauge_weeklyExhausted_gaugeReadsZero() {
+        let usage = makeUsage(session: 80, weekly: 0)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        XCTAssertEqual(usage.sessionGaugeRemaining, 0, accuracy: 0.01)
+        XCTAssertEqual(usage.sessionRemaining, 80, accuracy: 0.01)
+    }
+
+    func testGauge_healthyWeek_doesNotDownRateSession() {
+        // Regression lock: weekly < session but NOT low (63% is healthy) must leave the gauge
+        // on the true session value. This is the exact fixture case (94 / 63); an unconditional
+        // min() would wrongly collapse the dial to 63% here.
+        let usage = makeUsage(session: 94, weekly: 63)
+        XCTAssertFalse(usage.isSessionWeeklyLimited)
+        XCTAssertEqual(usage.sessionGaugeRemaining, 94, accuracy: 0.01)
+    }
+
+    func testGauge_sessionIsTighterLimit_showsSessionNotWeekly() {
+        // Weekly is low (15) but the session is even lower (8): the session is the real binding
+        // limit, so the gauge shows the session and does NOT claim it is "weekly limited".
+        let usage = makeUsage(session: 8, weekly: 15)
+        XCTAssertFalse(usage.isSessionWeeklyLimited)
+        XCTAssertEqual(usage.sessionGaugeRemaining, 8, accuracy: 0.01)
+    }
+
+    func testGauge_floorBoundary_isExclusiveAtTwenty() {
+        // At exactly the floor (weekly == 20) the gate is off; just below it turns on.
+        XCTAssertFalse(makeUsage(session: 90, weekly: 20).isSessionWeeklyLimited)
+        XCTAssertTrue(makeUsage(session: 90, weekly: 19.99).isSessionWeeklyLimited)
+    }
+
+    func testGauge_realFixture_notGated_leavesSessionRaw() throws {
+        // usage_limits_spend: session 94, weekly 63 -> healthy, gauge unchanged at 94.
+        let usage = UsageData(from: try decodeFixture("usage_limits_spend"))
+        XCTAssertFalse(usage.isSessionWeeklyLimited)
+        XCTAssertEqual(usage.sessionGaugeRemaining, usage.sessionRemaining, accuracy: 0.01)
+        XCTAssertEqual(usage.sessionGaugeRemaining, 94, accuracy: 0.01)
+    }
+
     // MARK: - Helpers
 
     /// Build a UsageTier by round-tripping through JSON so Codable init is used.

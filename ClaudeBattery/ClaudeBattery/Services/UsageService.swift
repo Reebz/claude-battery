@@ -591,6 +591,31 @@ struct UsageData: Equatable {
         usageCredits = UsageCreditsData.derive(spend: response.spend, prepaidCredits: prepaidCredits)
     }
 
+    /// Weekly-remaining floor (percent) below which the weekly limit is treated as the
+    /// near-term binding constraint. Matches the popover's red color line (batteryColor red
+    /// < 20) so a weekly in the red gates the Session gauge. See `sessionGaugeRemaining`.
+    static let weeklyGateFloor: Double = 20
+
+    /// True when the weekly limit is BOTH lower than the session AND in its low/red zone, so
+    /// the weekly - not the 5h session - is the wall the user hits next. Only then does the
+    /// popover Session gauge defer to the weekly remainder, fixing the case where a
+    /// nearly-exhausted weekly still showed a high, unreachable session number. Above the
+    /// floor (a healthy week), or when the session is already the tighter limit, this is false
+    /// and the gauge shows the true session value - so normal weeks are never down-rated.
+    var isSessionWeeklyLimited: Bool {
+        weeklyRemaining < sessionRemaining && weeklyRemaining < UsageData.weeklyGateFloor
+    }
+
+    /// Value the popover Session gauge should DISPLAY: the true 5h-session remaining, but
+    /// capped to the weekly remainder when the weekly limit binds (`isSessionWeeklyLimited`)
+    /// so the dial never shows session headroom a near-exhausted weekly cannot support.
+    /// Display-only and popover-only: raw `sessionRemaining` is left untouched for the
+    /// menu-bar icons (which already show session and weekly side by side) and for the #31
+    /// session run-out forecast, both of which must keep the true 5h value.
+    var sessionGaugeRemaining: Double {
+        isSessionWeeklyLimited ? weeklyRemaining : sessionRemaining
+    }
+
     private static func clamp(_ value: Double) -> Double { max(0, min(100, value)) }
 
     private static func legacyModelUsages(from response: UsageResponse) -> [ModelUsage] {

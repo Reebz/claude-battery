@@ -173,6 +173,19 @@ final class RenderStateTests: XCTestCase {
         return UsageData(from: response)
     }
 
+    /// UsageData with session (fiveHour) and weekly (sevenDay) utilization set independently.
+    static func makeUsage(sessionUtilization: Double, weeklyUtilization: Double) -> UsageData {
+        UsageData(from: UsageResponse(
+            fiveHour: Self.makeTier(utilization: sessionUtilization),
+            sevenDay: Self.makeTier(utilization: weeklyUtilization),
+            sevenDayOpus: nil,
+            sevenDaySonnet: nil,
+            extraUsage: nil,
+            limits: nil,
+            spend: nil
+        ))
+    }
+
     private static func makeTier(utilization: Double) -> UsageTier {
         let json: [String: Any] = ["utilization": utilization]
         let data = try! JSONSerialization.data(withJSONObject: json)
@@ -261,6 +274,25 @@ final class IconSignatureTests: XCTestCase {
         let sigA = makeSignature(isAuthenticated: true, usage: usageA)
         let sigB = makeSignature(isAuthenticated: true, usage: usageB)
         XCTAssertNotEqual(sigA, sigB)
+    }
+
+    // The popover Session gauge caps its value to a low weekly (sessionGaugeRemaining), but the
+    // menu bar must key on RAW sessionRemaining. Two snapshots with the same low weekly but
+    // different session collapse to the same capped gauge value, yet must produce DIFFERENT
+    // signatures - proving the weekly cap never folded into UsageData.sessionRemaining and broke
+    // the menu-bar renderers (which show session and weekly side by side).
+    func testMenuBarKeysOnRawSession_notWeeklyCappedGaugeValue() {
+        let high = RenderStateTests.makeUsage(sessionUtilization: 20, weeklyUtilization: 95) // session 80, weekly 5
+        let low = RenderStateTests.makeUsage(sessionUtilization: 92, weeklyUtilization: 95)  // session 8, weekly 5
+
+        XCTAssertTrue(high.isSessionWeeklyLimited)
+        XCTAssertTrue(low.isSessionWeeklyLimited)
+        XCTAssertEqual(high.sessionGaugeRemaining, low.sessionGaugeRemaining, accuracy: 0.01) // both -> 5
+        XCTAssertNotEqual(high.sessionRemaining, low.sessionRemaining, accuracy: 0.01)        // 80 vs 8
+
+        let sigHigh = makeSignature(isAuthenticated: true, usage: high)
+        let sigLow = makeSignature(isAuthenticated: true, usage: low)
+        XCTAssertNotEqual(sigHigh, sigLow)
     }
 
     func testUsageNilVsPresent_produceUnequalSignatures() {

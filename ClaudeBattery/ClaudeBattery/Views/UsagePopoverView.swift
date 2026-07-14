@@ -113,74 +113,79 @@ struct UsagePopoverView: View {
 
     // MARK: - Cards
 
-    // Gauge cards (Session/Weekly) are taller to give the arc and pace bar breathing room (U3).
-    private let gaugeCardHeight: CGFloat = 142
+    // Gauge cards (Session/Weekly) give the concentric dial and the run-out caption room (#31).
+    // Taller than the arc alone needs: the enlarged dial (frame height 80) plus the caption sit
+    // with vertical slack so title/gauge/caption never clip.
+    private let gaugeCardHeight: CGFloat = 160
     // Info cards (Resets/Models) take no fixed height: they size to their content and equalize to
     // each other in the grid (maxHeight at the call site), with content vertically centered. This
     // hugs the content (no excess bottom padding), keeps the two boxes symmetric, and never clips
     // the 3-bar model case the way a fixed height would.
 
     private func sessionCard(usage: UsageData) -> some View {
-        UsageCard(title: "Session") {
-            VStack(spacing: 12) {
-                ArcGauge(value: usage.sessionRemaining,
-                         color: gaugeColor(for: usage.sessionRemaining),
-                         tickCount: 5)
-                    .frame(height: 58)
-                paceBar(resetsAt: usage.sessionResetDate,
-                        window: Self.sessionWindow)
-            }
-        }
-        .frame(height: gaugeCardHeight)
+        // The gauge shows the weekly-capped value (sessionGaugeRemaining) so a nearly-exhausted
+        // weekly can't display a high, unreachable session number; the pace is graded
+        // separately from the RAW session (via sessionPace) so the cap never corrupts it.
+        gaugeCard(title: "Session",
+                  remaining: usage.sessionGaugeRemaining,
+                  resetsAt: usage.sessionResetDate,
+                  window: Self.sessionWindow,
+                  tickCount: 5,
+                  paceOverride: Self.sessionPace(for: usage),
+                  suppressTimeArc: usage.isSessionWeeklyLimited)
     }
 
     private func weeklyCard(usage: UsageData) -> some View {
-        UsageCard(title: "Weekly") {
-            VStack(spacing: 12) {
-                ArcGauge(value: usage.weeklyRemaining,
-                         color: gaugeColor(for: usage.weeklyRemaining),
-                         tickCount: 7)
-                    .frame(height: 58)
-                paceBar(resetsAt: usage.weeklyResetDate,
-                        window: Self.weeklyWindow)
+        gaugeCard(title: "Weekly",
+                  remaining: usage.weeklyRemaining,
+                  resetsAt: usage.weeklyResetDate,
+                  window: Self.weeklyWindow,
+                  tickCount: 7)
+    }
+
+    /// Shared Session/Weekly card: a concentric dual-arc gauge (outer = usage remaining, inner =
+    /// time remaining, both on the batteryColor scale, KTD1/KTD2) over a RAG pace caption
+    /// (#31). The inner arc, time %, and caption self-omit when the reset time is unknown (KTD4).
+    private func gaugeCard(title: String, remaining: Double, resetsAt: Date?, window: TimeInterval, tickCount: Int,
+                           paceOverride: PaceStatus? = nil, suppressTimeArc: Bool = false) -> some View {
+        // Suppress the inner time arc when the shown value is not on this card's own clock: a
+        // weekly-limited Session displays the weekly quota, so a session-window time arc would pair
+        // two different windows and mislead. nil hides the inner arc, its centre clock, and the
+        // a11y "time remaining" (KTD4).
+        let timeRemaining = suppressTimeArc ? nil : Self.timeRemainingPercent(resetsAt: resetsAt, window: window)
+        // `paceOverride` lets the Session card supply a pace graded from the RAW session value
+        // (or `.weeklyLimited`) instead of the possibly-capped `remaining` shown on the dial; the
+        // Weekly card passes nil and grades its own value.
+        let pace = paceOverride ?? Self.paceStatus(remainingPercent: remaining, resetsAt: resetsAt, window: window)
+        return UsageCard(title: title) {
+            VStack(spacing: 8) {
+                ArcGauge(value: remaining,
+                         color: gaugeColor(for: remaining),
+                         innerValue: timeRemaining,
+                         innerColor: timeRemaining.map { gaugeColor(for: $0) } ?? .clear,
+                         tickCount: tickCount)
+                    // Height drives the arc radius (ArcShape uses min(width,height)); at ~114pt card
+                    // width the height binds, so 80 (was 58) grows the rings enough that even the
+                    // widest 100%-over-100% readout (right after a window reset) clears the inner
+                    // arc with margin, while the inner inset (9) keeps the two rings visibly apart.
+                    .frame(height: 80)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Self.gaugeAccessibilityLabel(name: title, usage: remaining,
+                                                                     timeRemaining: timeRemaining, pace: pace))
+                paceCaptionView(pace)
             }
         }
         .frame(height: gaugeCardHeight)
     }
 
-    /// Thin time-remaining bar under an arc (U3): fills to the time-remaining percent and shares
-    /// the arc's remaining-% color scale (batteryColor: <20 red, <45 orange, else green), with a
-    /// small trailing clock glyph + percent label marking it as TIME (the non-color cue, KTD9).
-    /// When the reset date is unknown the percent is nil and the bar is omitted entirely (KTD4)
-    /// rather than shown as a misleading empty or full track.
-    // Test expectation: none - SwiftUI layout; the fill (timeRemainingPercent) is covered by
-    // PaceBarTests (U2) and the color reuses the tested batteryColor scale.
+    /// RAG-coloured pace caption under a dial; omitted entirely when the pace is `.unknown` (KTD4).
     @ViewBuilder
-    private func paceBar(resetsAt: Date?, window: TimeInterval) -> some View {
-        if let timeRemaining = Self.timeRemainingPercent(resetsAt: resetsAt, window: window) {
-            HStack(spacing: 6) {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Self.trackColor)
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Self.batteryColor(remainingPercent: timeRemaining))
-                            .frame(width: max(0, geo.size.width * timeRemaining / 100))
-                    }
-                }
-                .frame(height: 6)
-                HStack(spacing: 3) {
-                    Image(systemName: "clock")
-                        .font(.system(size: 8, weight: .medium))
-                        .foregroundColor(Self.mutedLabelColor)
-                    Text("\(Int(timeRemaining.rounded()))%")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(Self.mutedLabelColor)
-                        .fixedSize()
-                }
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Time remaining, \(Int(timeRemaining.rounded())) percent")
+    private func paceCaptionView(_ pace: PaceStatus) -> some View {
+        if let text = Self.paceCaption(pace) {
+            Text(text)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(Self.paceColor(pace))
+                .fixedSize()
         }
     }
 
@@ -264,9 +269,9 @@ struct UsagePopoverView: View {
         return .green
     }
 
-    /// Shared bar-track gray, so paceBar and unifiedBarRow cannot drift apart.
+    /// Shared bar-track gray for the usage-credits bar row.
     private static let trackColor = Color(white: 0.25)
-    /// Shared muted-label gray used for secondary labels/percent text in the bar rows.
+    /// Shared muted-label gray for secondary label/percent text (bar rows and the run-out caption).
     private static let mutedLabelColor = Color(white: 0.6)
 
     // MARK: - Pace (U2)
@@ -287,6 +292,102 @@ struct UsagePopoverView: View {
         // The `max(0, ...)` lower clamp is defense-in-depth, made unreachable by remainingSeconds'
         // positive-delta guard (a non-positive delta returns nil above); kept regardless.
         return max(0, min(100, percent))
+    }
+
+    // MARK: - Pace status (#31)
+
+    /// Pace status for one window (session or weekly): how far usage burn is ahead of / behind the
+    /// clock, bucketed into a 3-level RAG status (#31). `weeklyLimited` and `unknown` are the two
+    /// non-pace states the caption still needs (Session deferring to weekly; no reset/time data).
+    enum PaceStatus: Equatable {
+        case onTrack        // pace delta < cautionDelta (includes being ahead of pace)
+        case caution        // cautionDelta <= delta < dangerDelta
+        case danger         // delta >= dangerDelta, or usage already at 0
+        case weeklyLimited  // the weekly limit binds; the Session dial defers to it
+        case unknown        // resetsAt nil or past/non-finite; caller omits the caption
+    }
+
+    /// Pace delta = timeRemaining% - usageRemaining% (percentage points; positive means burning
+    /// faster than the clock). It is exactly how much longer the inner time arc is than the outer
+    /// usage arc, so the RAG status names the visible gap between the two arcs.
+    /// At or above this delta the pace is Caution (amber).
+    static let cautionDelta: Double = 10
+    /// At or above this delta the pace is Danger (red).
+    static let dangerDelta: Double = 25
+
+    /// Pace status for one window, from the current usage snapshot only. Mirrors
+    /// `timeRemainingPercent` (window start = `resetsAt - window`; a nil/past/non-finite delta
+    /// yields `.unknown` so the caller omits the caption). Buckets the signed pace delta; being
+    /// ahead of pace (negative delta) is always `.onTrack`, and 0% usage remaining is `.danger`
+    /// (already used up). No early-window or near-reset guard is needed: unlike a projected run-out
+    /// time, the delta is stable across the whole window (it never divides by elapsed time).
+    static func paceStatus(remainingPercent: Double, resetsAt: Date?, window: TimeInterval, now: Date = Date()) -> PaceStatus {
+        guard let resetsAt,
+              let r = CountdownFormat.remainingSeconds(until: resetsAt, now: now) else { return .unknown }
+        if remainingPercent <= 0 { return .danger }
+        let timeRemaining = min(100, r / window * 100)
+        let delta = timeRemaining - remainingPercent
+        if delta >= dangerDelta { return .danger }
+        if delta >= cautionDelta { return .caution }
+        return .onTrack
+    }
+
+    /// The Session card's pace status (#31). When the weekly limit binds (`isSessionWeeklyLimited`)
+    /// the Session defers to it (`.weeklyLimited`) - UNLESS the RAW 5h session is itself in Danger,
+    /// a nearer concrete wall that must not be hidden behind "Limited by weekly". The pace always
+    /// grades the RAW `sessionRemaining` over the 5h window, never the capped gauge value
+    /// (`sessionGaugeRemaining`), which is a weekly percentage over a weekly clock and would
+    /// fabricate a bogus pace on the session timeline.
+    static func sessionPace(for usage: UsageData, now: Date = Date()) -> PaceStatus {
+        let raw = paceStatus(remainingPercent: usage.sessionRemaining,
+                             resetsAt: usage.sessionResetDate,
+                             window: sessionWindow, now: now)
+        if usage.isSessionWeeklyLimited {
+            return raw == .danger ? raw : .weeklyLimited
+        }
+        return raw
+    }
+
+    /// Copy for the pace caption under each dial (#31). nil hides the line (`.unknown`, KTD4).
+    static func paceCaption(_ status: PaceStatus) -> String? {
+        switch status {
+        case .onTrack:       return "On Track"
+        case .caution:       return "Caution"
+        case .danger:        return "Danger"
+        case .weeklyLimited: return "Limited by weekly"
+        case .unknown:       return nil
+        }
+    }
+
+    /// RAG colour for the pace caption, reusing the batteryColor palette (green/orange/red) so the
+    /// label matches the arc colours. `weeklyLimited` is neutral (no pace to grade); `unknown`
+    /// never renders (its caption is nil).
+    static func paceColor(_ status: PaceStatus) -> Color {
+        switch status {
+        case .onTrack:       return .green
+        case .caution:       return .orange
+        case .danger:        return .red
+        case .weeklyLimited: return mutedLabelColor
+        case .unknown:       return .clear
+        }
+    }
+
+    /// One spoken label per dial combining usage, time-remaining, and the pace status (R9). The
+    /// pace is spelled out with its meaning ("over pace") rather than reusing the terse visual
+    /// caption, and `.unknown` has nothing to add.
+    static func gaugeAccessibilityLabel(name: String, usage: Double, timeRemaining: Double?, pace: PaceStatus) -> String {
+        var parts = ["\(name) usage \(Int(usage.rounded())) percent"]
+        if let timeRemaining {
+            parts.append("time remaining \(Int(timeRemaining.rounded())) percent")
+        }
+        switch pace {
+        case .onTrack:       parts.append("on track")
+        case .caution:       parts.append("caution, over pace")
+        case .danger:        parts.append("danger, over pace")
+        case .weeklyLimited: parts.append("limited by weekly")
+        case .unknown:       break
+        }
+        return parts.joined(separator: ", ")
     }
 
     @ViewBuilder
@@ -821,25 +922,62 @@ private struct UsageCard<Content: View>: View {
 private struct ArcGauge: View {
     let value: Double
     let color: Color
+    /// Optional inner concentric arc for time-remaining (#31). nil renders the single-arc
+    /// gauge exactly as before, so an unknown reset omits it (KTD4).
+    var innerValue: Double? = nil
+    var innerColor: Color = .gray
     /// Number of evenly-spaced quota segments; `count - 1` interior ticks are drawn.
     /// 0 disables ticks (e.g. the menu-bar gauge, which is excluded - U6).
     var tickCount: Int = 0
 
+    private let lineWidth: CGFloat = 5
+    private let innerLineWidth: CGFloat = 4      // thinner so two same-colour arcs stay separable (KTD1)
+    private let innerInset: CGFloat = 9          // radial gap between the outer and inner arc (KTD1 separation)
+
     var body: some View {
         ZStack {
+            // Outer arc: usage remaining.
             ArcShape()
-                .stroke(Color(white: 0.25), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .stroke(Color(white: 0.25), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
             ArcShape()
                 .trim(from: 0, to: value / 100)
-                .stroke(color, style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+
+            // Inner concentric arc: time remaining in the window (only when known).
+            if let innerValue {
+                // Inner track a touch darker than the outer (0.25) so the two rings never merge
+                // into one band when both fills land on the same colour (KTD1).
+                ArcShape(radiusInset: innerInset)
+                    .stroke(Color(white: 0.18), style: StrokeStyle(lineWidth: innerLineWidth, lineCap: .round))
+                ArcShape(radiusInset: innerInset)
+                    .trim(from: 0, to: innerValue / 100)
+                    .stroke(innerColor, style: StrokeStyle(lineWidth: innerLineWidth, lineCap: .round))
+            }
+
             if tickCount > 1 {
                 ArcTicks(count: tickCount)
                     .stroke(Color(white: 0.12), lineWidth: 1.5)
             }
-            Text(String(format: "%.0f%%", value))
-                .font(.system(size: 15, weight: .bold, design: .rounded))
-                .foregroundColor(.white)
-                .offset(y: 2)
+
+            // Centre: big usage %, and a small clock + time % when the inner arc is shown (R5).
+            VStack(spacing: 1) {
+                Text(String(format: "%.0f%%", value))
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                if let innerValue {
+                    HStack(spacing: 2) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 7, weight: .medium))
+                        Text(String(format: "%.0f%%", innerValue))
+                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                            .monospacedDigit()
+                    }
+                    .foregroundColor(Color(white: 0.6))
+                }
+            }
+            // Two-line centre sits on the ring centre (ArcShape uses midY + 6); the single-line
+            // legacy gauge keeps its original +2.
+            .offset(y: innerValue == nil ? 2 : 6)
         }
     }
 }
@@ -861,10 +999,13 @@ enum GaugeTicks {
 }
 
 private struct ArcShape: Shape {
+    /// Shrinks the radius so a second arc nests inside the first on the same centre/angles.
+    var radiusInset: CGFloat = 0
+
     func path(in rect: CGRect) -> Path {
         var path = Path()
         let center = CGPoint(x: rect.midX, y: rect.midY + 6)
-        let radius = min(rect.width, rect.height) / 2 - 3
+        let radius = min(rect.width, rect.height) / 2 - 3 - radiusInset
         path.addArc(center: center, radius: radius,
                     startAngle: .degrees(135), endAngle: .degrees(405),
                     clockwise: false)
