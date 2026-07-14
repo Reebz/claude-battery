@@ -114,9 +114,9 @@ struct UsagePopoverView: View {
     // MARK: - Cards
 
     // Gauge cards (Session/Weekly) give the concentric dial and the run-out caption room (#31).
-    // Taller than the arc alone needs: the enlarged dial (frame height 74) plus the caption sit
-    // with ~20pt vertical slack so title/gauge/caption never clip.
-    private let gaugeCardHeight: CGFloat = 154
+    // Taller than the arc alone needs: the enlarged dial (frame height 80) plus the caption sit
+    // with vertical slack so title/gauge/caption never clip.
+    private let gaugeCardHeight: CGFloat = 160
     // Info cards (Resets/Models) take no fixed height: they size to their content and equalize to
     // each other in the grid (maxHeight at the call site), with content vertically centered. This
     // hugs the content (no excess bottom padding), keeps the two boxes symmetric, and never clips
@@ -165,9 +165,10 @@ struct UsagePopoverView: View {
                          innerColor: timeRemaining.map { gaugeColor(for: $0) } ?? .clear,
                          tickCount: tickCount)
                     // Height drives the arc radius (ArcShape uses min(width,height)); at ~114pt card
-                    // width the height binds, so 74 (was 58) grows the rings enough that the widest
-                    // "100%" readout clears the inner arc instead of colliding with it (#31 collision fix).
-                    .frame(height: 74)
+                    // width the height binds, so 80 (was 58) grows the rings enough that even the
+                    // widest 100%-over-100% readout (right after a window reset) clears the inner
+                    // arc with margin, while the inner inset (9) keeps the two rings visibly apart.
+                    .frame(height: 80)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(Self.gaugeAccessibilityLabel(name: title, usage: remaining,
                                                                      timeRemaining: timeRemaining, forecast: forecast))
