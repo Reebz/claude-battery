@@ -49,8 +49,8 @@ struct TextOnlyRenderer: IconRenderer {
     }
 
     func makeBatteryIcon(usage: UsageData, color: NSColor) -> NSImage {
-        makeTextIcon(session: "\(Int(usage.sessionRemaining))",
-                     weekly: "\(Int(usage.weeklyRemaining))",
+        makeTextIcon(session: "\(Int(usage.sessionDisplayRemaining.rounded(.toNearestOrEven)))",
+                     weekly: "\(Int(usage.weeklyRemaining.rounded(.toNearestOrEven)))",
                      color: color)
     }
 }

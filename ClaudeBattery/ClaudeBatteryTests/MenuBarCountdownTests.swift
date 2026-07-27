@@ -28,8 +28,59 @@ final class MenuBarCountdownTests: XCTestCase {
         decoder.dateDecodingStrategy = .iso8601
         let response = try decoder.decode(UsageResponse.self, from: Data(json.utf8))
         let usage = UsageData(from: response)
-        // Guard the fixture itself: the decode must yield the reset date the cases assume.
+        // Guard the fixture itself: the decode must yield the reset date the cases assume, and
+        // must NOT trip the weekly gate - with no weekly entry the decode falls back to the
+        // legacy tier and lands on 100 remaining, so the cases below see a plain countdown.
         XCTAssertEqual(usage.sessionResetDate, resetDate)
+        XCTAssertFalse(usage.isSessionWeeklyLimited)
+        return usage
+    }
+
+    /// Build a weekly-limited UsageData: session healthy (80 remaining) but weekly nearly gone
+    /// (5 remaining), so `sessionDisplayRemaining` - and therefore the session pill the countdown
+    /// cell sits beside - shows the WEEKLY number. `weekly_all` is the kind the production decode
+    /// reads for the weekly tier. Same `resets_at` as `makeUsage`, so a valid future session reset
+    /// exists and the weekly gate is the only thing that can explain an empty countdown.
+    private func makeWeeklyLimitedUsage() throws -> UsageData {
+        let json = """
+        {
+          "limits": [
+            { "kind": "session", "percent": 20, "resets_at": \(Int(resetEpoch)) },
+            { "kind": "weekly_all", "percent": 95, "resets_at": \(Int(resetEpoch)) }
+          ]
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(UsageResponse.self, from: Data(json.utf8))
+        let usage = UsageData(from: response)
+        // Assert the fixture really is weekly-limited, so the case cannot silently rot into
+        // testing nothing if the gate's threshold or shape moves.
+        XCTAssertEqual(usage.sessionResetDate, resetDate)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        return usage
+    }
+
+    /// The same two-limit shape with a HEALTHY weekly (90 remaining), so the gate stays shut.
+    /// The control for `makeWeeklyLimitedUsage`: proves the suppression is gated on the weekly
+    /// limit binding rather than on merely having a weekly limit in the response.
+    private func makeWeeklyHealthyUsage() throws -> UsageData {
+        let json = """
+        {
+          "limits": [
+            { "kind": "session", "percent": 20, "resets_at": \(Int(resetEpoch)) },
+            { "kind": "weekly_all", "percent": 10, "resets_at": \(Int(resetEpoch)) }
+          ]
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(UsageResponse.self, from: Data(json.utf8))
+        let usage = UsageData(from: response)
+        XCTAssertEqual(usage.sessionResetDate, resetDate)
+        XCTAssertFalse(usage.isSessionWeeklyLimited)
         return usage
     }
 
@@ -99,5 +150,36 @@ final class MenuBarCountdownTests: XCTestCase {
             usage: usage, enabled: true, now: now(secondsBeforeReset: -60)
         )
         XCTAssertEqual(title, "")
+    }
+
+    /// The countdown is deliberately NOT suppressed while the weekly limit binds. Suppressing it
+    /// was implemented and then reverted: it took the reset time away in the state where users
+    /// most want it. The known cost is locked here rather than left implicit - the pill beside
+    /// this cell shows the weekly quota, so this clock runs out without that number changing.
+    /// A future "consistency" change that empties the cell here has to overturn that decision.
+    func testEnabled_weeklyLimited_stillReturnsTheSessionCountdown() throws {
+        let usage = try makeWeeklyLimitedUsage()
+        let title = MenuBarController.countdownTitle(
+            usage: usage, enabled: true, now: now(secondsBeforeReset: 32 * 60)
+        )
+        XCTAssertEqual(title, "32m")
+    }
+
+    func testEnabled_weeklyHealthy_stillReturnsCountdown() throws {
+        let usage = try makeWeeklyHealthyUsage()
+        // The control: same two-limit shape with the gate shut. Together with the case above this
+        // pins that the cell is indifferent to the weekly gate, in both directions.
+        let title = MenuBarController.countdownTitle(
+            usage: usage, enabled: true, now: now(secondsBeforeReset: 32 * 60)
+        )
+        XCTAssertEqual(title, "32m")
+    }
+
+    func testDefaultFixture_withNoWeeklyLimit_isNotWeeklyLimited() throws {
+        let usage = try makeUsage()
+        // An absent weekly entry decodes to 100 remaining, which never binds. Keeps the two cases
+        // above honest: their difference really is the weekly gate and not the fixture shape.
+        XCTAssertEqual(usage.weeklyRemaining, 100)
+        XCTAssertFalse(usage.isSessionWeeklyLimited)
     }
 }

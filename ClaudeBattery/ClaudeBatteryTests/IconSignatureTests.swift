@@ -276,18 +276,20 @@ final class IconSignatureTests: XCTestCase {
         XCTAssertNotEqual(sigA, sigB)
     }
 
-    // The popover Session gauge caps its value to a low weekly (sessionGaugeRemaining), but the
-    // menu bar must key on RAW sessionRemaining. Two snapshots with the same low weekly but
-    // different session collapse to the same capped gauge value, yet must produce DIFFERENT
-    // signatures - proving the weekly cap never folded into UsageData.sessionRemaining and broke
-    // the menu-bar renderers (which show session and weekly side by side).
-    func testMenuBarKeysOnRawSession_notWeeklyCappedGaugeValue() {
+    // The stored `sessionRemaining` must stay RAW. The weekly cap lives only in the derived
+    // `sessionDisplayRemaining`, never folded back into the field, because the #31 run-out
+    // forecast and the Session pace still grade the true 5h window. Two snapshots with the same
+    // low weekly but different raw session collapse to the same displayed value, yet must still
+    // produce DIFFERENT signatures: the signature carries the whole UsageData, so it stays a
+    // superset of what gets drawn - it may redraw an identical image, but never misses a changed
+    // one. See IconStyleTests for the drawn-value side of the contract.
+    func testWeeklyCapIsDerived_rawSessionSurvivesInTheSignature() {
         let high = RenderStateTests.makeUsage(sessionUtilization: 20, weeklyUtilization: 95) // session 80, weekly 5
         let low = RenderStateTests.makeUsage(sessionUtilization: 92, weeklyUtilization: 95)  // session 8, weekly 5
 
         XCTAssertTrue(high.isSessionWeeklyLimited)
         XCTAssertTrue(low.isSessionWeeklyLimited)
-        XCTAssertEqual(high.sessionGaugeRemaining, low.sessionGaugeRemaining, accuracy: 0.01) // both -> 5
+        XCTAssertEqual(high.sessionDisplayRemaining, low.sessionDisplayRemaining, accuracy: 0.01) // both -> 5
         XCTAssertNotEqual(high.sessionRemaining, low.sessionRemaining, accuracy: 0.01)        // 80 vs 8
 
         let sigHigh = makeSignature(isAuthenticated: true, usage: high)

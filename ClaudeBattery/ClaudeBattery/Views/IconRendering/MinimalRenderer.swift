@@ -64,10 +64,10 @@ struct MinimalRenderer: IconRenderer {
     }
 
     func makeBatteryIcon(usage: UsageData, color: NSColor) -> NSImage {
-        let weeklyPercent = Int(usage.weeklyRemaining)
-        let sessionPercent = Int(usage.sessionRemaining)
-        let isSessionLow = sessionPercent < 20
-        let isWeeklyLow = weeklyPercent < 20
+        let weeklyPercent = Int(usage.weeklyRemaining.rounded(.toNearestOrEven))
+        let sessionPercent = Int(usage.sessionDisplayRemaining.rounded(.toNearestOrEven))
+        let isSessionLow = usage.sessionDisplayRemaining < 20
+        let isWeeklyLow = usage.weeklyRemaining < 20
 
         let fillInset: CGFloat = 1.5
         let dividerGap: CGFloat = 1.0

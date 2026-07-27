@@ -127,15 +127,15 @@ final class UsageDataTests: XCTestCase {
         // The reported bug: weekly nearly exhausted, session still high -> gauge must drop to weekly.
         let usage = makeUsage(session: 94, weekly: 2)
         XCTAssertTrue(usage.isSessionWeeklyLimited)
-        XCTAssertEqual(usage.sessionGaugeRemaining, 2, accuracy: 0.01)
-        // Raw session is untouched (menu bar + forecast keep the true 5h value).
+        XCTAssertEqual(usage.sessionDisplayRemaining, 2, accuracy: 0.01)
+        // Raw session is untouched (the #31 forecast and the pace keep the true 5h value).
         XCTAssertEqual(usage.sessionRemaining, 94, accuracy: 0.01)
     }
 
     func testGauge_weeklyExhausted_gaugeReadsZero() {
         let usage = makeUsage(session: 80, weekly: 0)
         XCTAssertTrue(usage.isSessionWeeklyLimited)
-        XCTAssertEqual(usage.sessionGaugeRemaining, 0, accuracy: 0.01)
+        XCTAssertEqual(usage.sessionDisplayRemaining, 0, accuracy: 0.01)
         XCTAssertEqual(usage.sessionRemaining, 80, accuracy: 0.01)
     }
 
@@ -145,7 +145,7 @@ final class UsageDataTests: XCTestCase {
         // min() would wrongly collapse the dial to 63% here.
         let usage = makeUsage(session: 94, weekly: 63)
         XCTAssertFalse(usage.isSessionWeeklyLimited)
-        XCTAssertEqual(usage.sessionGaugeRemaining, 94, accuracy: 0.01)
+        XCTAssertEqual(usage.sessionDisplayRemaining, 94, accuracy: 0.01)
     }
 
     func testGauge_sessionIsTighterLimit_showsSessionNotWeekly() {
@@ -153,7 +153,7 @@ final class UsageDataTests: XCTestCase {
         // limit, so the gauge shows the session and does NOT claim it is "weekly limited".
         let usage = makeUsage(session: 8, weekly: 15)
         XCTAssertFalse(usage.isSessionWeeklyLimited)
-        XCTAssertEqual(usage.sessionGaugeRemaining, 8, accuracy: 0.01)
+        XCTAssertEqual(usage.sessionDisplayRemaining, 8, accuracy: 0.01)
     }
 
     func testGauge_floorBoundary_isExclusiveAtTwenty() {
@@ -166,8 +166,8 @@ final class UsageDataTests: XCTestCase {
         // usage_limits_spend: session 94, weekly 63 -> healthy, gauge unchanged at 94.
         let usage = UsageData(from: try decodeFixture("usage_limits_spend"))
         XCTAssertFalse(usage.isSessionWeeklyLimited)
-        XCTAssertEqual(usage.sessionGaugeRemaining, usage.sessionRemaining, accuracy: 0.01)
-        XCTAssertEqual(usage.sessionGaugeRemaining, 94, accuracy: 0.01)
+        XCTAssertEqual(usage.sessionDisplayRemaining, usage.sessionRemaining, accuracy: 0.01)
+        XCTAssertEqual(usage.sessionDisplayRemaining, 94, accuracy: 0.01)
     }
 
     // MARK: - Helpers
