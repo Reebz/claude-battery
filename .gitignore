@@ -23,7 +23,9 @@ dist/
 
 # Local docs, todos, and compound-engineering run artifacts
 docs/
+CONCEPTS.md
 todos/
+.compound-engineering/
 .context/
 graphify-out/
 excalidraw.log
