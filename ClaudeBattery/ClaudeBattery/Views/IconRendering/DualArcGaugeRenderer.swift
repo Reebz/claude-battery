@@ -82,7 +82,7 @@ struct DualArcGaugeRenderer: IconRenderer {
 
     func makeBatteryIcon(usage: UsageData, color: NSColor) -> NSImage {
         let weeklyPercent = usage.weeklyRemaining
-        let sessionPercent = usage.sessionRemaining
+        let sessionPercent = usage.sessionDisplayRemaining
         let size = iconSize
         let baseColor = color
 

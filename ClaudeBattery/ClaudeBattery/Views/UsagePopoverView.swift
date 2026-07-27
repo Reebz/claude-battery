@@ -123,11 +123,12 @@ struct UsagePopoverView: View {
     // the 3-bar model case the way a fixed height would.
 
     private func sessionCard(usage: UsageData) -> some View {
-        // The gauge shows the weekly-capped value (sessionGaugeRemaining) so a nearly-exhausted
-        // weekly can't display a high, unreachable session number; the pace is graded
+        // The gauge shows the weekly-capped value (sessionDisplayRemaining) so a nearly-exhausted
+        // weekly can't display a high, unreachable session number. The menu-bar renderers read the
+        // same value, so the two surfaces never disagree about "Session". The pace is graded
         // separately from the RAW session (via sessionPace) so the cap never corrupts it.
         gaugeCard(title: "Session",
-                  remaining: usage.sessionGaugeRemaining,
+                  remaining: usage.sessionDisplayRemaining,
                   resetsAt: usage.sessionResetDate,
                   window: Self.sessionWindow,
                   tickCount: 5,
@@ -336,7 +337,7 @@ struct UsagePopoverView: View {
     /// the Session defers to it (`.weeklyLimited`) - UNLESS the RAW 5h session is itself in Danger,
     /// a nearer concrete wall that must not be hidden behind "Limited by weekly". The pace always
     /// grades the RAW `sessionRemaining` over the 5h window, never the capped gauge value
-    /// (`sessionGaugeRemaining`), which is a weekly percentage over a weekly clock and would
+    /// (`sessionDisplayRemaining`), which is a weekly percentage over a weekly clock and would
     /// fabricate a bogus pace on the session timeline.
     static func sessionPace(for usage: UsageData, now: Date = Date()) -> PaceStatus {
         let raw = paceStatus(remainingPercent: usage.sessionRemaining,

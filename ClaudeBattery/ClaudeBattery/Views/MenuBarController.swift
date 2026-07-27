@@ -384,6 +384,14 @@ class MenuBarController: NSObject {
     /// `compactCountdown` for the session reset when enabled and a positive countdown exists,
     /// else "" (the off/none state). `nonisolated static` so it is reachable from tests and
     /// free of controller state, mirroring `renderState`.
+    ///
+    /// The cell ALWAYS clocks the 5h session, including while the weekly limit binds. Accepted
+    /// consequence, decided deliberately: in that state the pill beside the cell shows
+    /// `sessionDisplayRemaining`, i.e. the weekly quota, so the clock reaches zero and the number
+    /// next to it does not move. Suppressing the cell there was tried and reverted - it removed
+    /// the reset time in the state where users most want it. The popover still hides the dial's
+    /// inner time arc for that same pairing (`suppressTimeArc:` in `UsagePopoverView.sessionCard`),
+    /// so the two surfaces differ here on purpose; do not "restore parity" without re-deciding this.
     nonisolated static func countdownTitle(usage: UsageData?, enabled: Bool, now: Date = Date()) -> String {
         guard enabled, let resetDate = usage?.sessionResetDate else { return "" }
         return CountdownFormat.compactCountdown(until: resetDate, now: now) ?? ""

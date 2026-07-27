@@ -56,9 +56,9 @@ struct StackedBarsRenderer: IconRenderer {
     }
 
     func makeBatteryIcon(usage: UsageData, color: NSColor) -> NSImage {
-        makeBarsIcon(sessionFraction: CGFloat(usage.sessionRemaining) / 100.0,
+        makeBarsIcon(sessionFraction: CGFloat(usage.sessionDisplayRemaining) / 100.0,
                      weeklyFraction: CGFloat(usage.weeklyRemaining) / 100.0,
-                     sessionLow: usage.sessionRemaining < 20,
+                     sessionLow: usage.sessionDisplayRemaining < 20,
                      weeklyLow: usage.weeklyRemaining < 20,
                      color: color)
     }

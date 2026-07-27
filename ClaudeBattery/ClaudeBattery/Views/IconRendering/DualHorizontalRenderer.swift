@@ -45,10 +45,14 @@ struct DualHorizontalRenderer: IconRenderer {
     }
 
     func makeBatteryIcon(usage: UsageData, color: NSColor) -> NSImage {
-        let weeklyPercent = Int(usage.weeklyRemaining)
-        let sessionPercent = Int(usage.sessionRemaining)
-        let isSessionLow = sessionPercent < 20
-        let isWeeklyLow = weeklyPercent < 20
+        // Round, don't truncate: the popover prints these numbers with "%.0f", so 15.6 must not
+        // draw "15" here and "16%" there. `.toNearestOrEven` because that is what "%.0f" does at
+        // exact halves - plain .rounded() goes half-away-from-zero and would draw 17 against the
+        // popover's 16. Low flags read the raw value, matching the popover's red.
+        let weeklyPercent = Int(usage.weeklyRemaining.rounded(.toNearestOrEven))
+        let sessionPercent = Int(usage.sessionDisplayRemaining.rounded(.toNearestOrEven))
+        let isSessionLow = usage.sessionDisplayRemaining < 20
+        let isWeeklyLow = usage.weeklyRemaining < 20
 
         let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .heavy)
         let smallNumberFont = NSFont.monospacedDigitSystemFont(ofSize: 8.5, weight: .heavy)

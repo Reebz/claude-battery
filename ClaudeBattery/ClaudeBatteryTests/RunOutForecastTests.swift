@@ -115,7 +115,7 @@ final class RunOutForecastTests: XCTestCase {
         // Discriminator: the capped gauge value (weekly=5) over the 5h window would grade Danger;
         // sessionPace must instead return .weeklyLimited (it grades the RAW session, which is ahead).
         let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
-        let wrong = UsagePopoverView.paceStatus(remainingPercent: usage.sessionGaugeRemaining,
+        let wrong = UsagePopoverView.paceStatus(remainingPercent: usage.sessionDisplayRemaining,
                                                 resetsAt: usage.sessionResetDate, window: s, now: now)
         XCTAssertEqual(wrong, .danger)
         XCTAssertEqual(UsagePopoverView.sessionPace(for: usage, now: now), .weeklyLimited)

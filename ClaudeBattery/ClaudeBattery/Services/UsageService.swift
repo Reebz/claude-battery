@@ -593,26 +593,26 @@ struct UsageData: Equatable {
 
     /// Weekly-remaining floor (percent) below which the weekly limit is treated as the
     /// near-term binding constraint. Matches the popover's red color line (batteryColor red
-    /// < 20) so a weekly in the red gates the Session gauge. See `sessionGaugeRemaining`.
+    /// < 20) so a weekly in the red gates the Session value. See `sessionDisplayRemaining`.
     static let weeklyGateFloor: Double = 20
 
     /// True when the weekly limit is BOTH lower than the session AND in its low/red zone, so
     /// the weekly - not the 5h session - is the wall the user hits next. Only then does the
-    /// popover Session gauge defer to the weekly remainder, fixing the case where a
+    /// displayed Session value defer to the weekly remainder, fixing the case where a
     /// nearly-exhausted weekly still showed a high, unreachable session number. Above the
     /// floor (a healthy week), or when the session is already the tighter limit, this is false
-    /// and the gauge shows the true session value - so normal weeks are never down-rated.
+    /// and the true session value is shown - so normal weeks are never down-rated.
     var isSessionWeeklyLimited: Bool {
         weeklyRemaining < sessionRemaining && weeklyRemaining < UsageData.weeklyGateFloor
     }
 
-    /// Value the popover Session gauge should DISPLAY: the true 5h-session remaining, but
-    /// capped to the weekly remainder when the weekly limit binds (`isSessionWeeklyLimited`)
-    /// so the dial never shows session headroom a near-exhausted weekly cannot support.
-    /// Display-only and popover-only: raw `sessionRemaining` is left untouched for the
-    /// menu-bar icons (which already show session and weekly side by side) and for the #31
-    /// session run-out forecast, both of which must keep the true 5h value.
-    var sessionGaugeRemaining: Double {
+    /// The Session value every surface DISPLAYS: the true 5h-session remaining, but capped to
+    /// the weekly remainder when the weekly limit binds (`isSessionWeeklyLimited`), so nothing
+    /// shows session headroom a near-exhausted weekly cannot support. Used by both the popover
+    /// dial and the menu-bar icons - they must never disagree about a number both label
+    /// "Session". Display-only: raw `sessionRemaining` stays untouched for the #31 session
+    /// run-out forecast and pace, which grade the real 5h window.
+    var sessionDisplayRemaining: Double {
         isSessionWeeklyLimited ? weeklyRemaining : sessionRemaining
     }
 
