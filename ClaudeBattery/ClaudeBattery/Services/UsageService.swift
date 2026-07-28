@@ -42,6 +42,14 @@ class UsageService: NSObject, ObservableObject {
     private var timer: Timer?
     private var isPolling = false
     private var currentPollTask: Task<Void, Never>?
+    /// True between `suspendPolling()` and `resumePolling()` (R11, issue #41). Bookkeeping only -
+    /// nothing gates on it, so an explicit `startPolling`/`switchAccount` during the window still
+    /// polls, which is what lets a sign-in that repaired the active account fetch immediately.
+    private var isSuspended = false
+    /// Whether `resumePolling` puts polling back. False when nothing was running at suspend time
+    /// (the active session had already gone authFailed and `onAuthFailure` stopped polling, or
+    /// there is no account yet), so a resume cannot start polling the app deliberately stopped.
+    private var resumeShouldRestart = false
 
     init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
         self.storage = storage
@@ -84,9 +92,49 @@ class UsageService: NSObject, ObservableObject {
         restartPolling()
     }
 
+    /// Pause polling for the network window of a sign-in (R11, issue #41). `AuthManager` calls this
+    /// through a callback and holds no reference to this service (KTD7).
+    ///
+    /// A usage request picks up its cookies from the shared jar when it goes OUT, not when it was
+    /// created, so a sign-in that re-primes that jar mid-flight can have an already-running poll
+    /// answered with the pasted account's credentials. The answer is a 403, which marks a healthy
+    /// account expired and stops polling - and on the sign-in route that fires no success callback,
+    /// nothing starts it again. Cancelling the in-flight poll here makes it return at its
+    /// `Task.isCancelled` check instead of reading that response as its own account's.
+    func suspendPolling() {
+        // Already suspended: keep the FIRST snapshot, which is the one describing what was running
+        // before the sign-in began.
+        guard !isSuspended else { return }
+        isSuspended = true
+        resumeShouldRestart = (timer != nil || currentPollTask != nil)
+        timer?.invalidate()
+        timer = nil
+        // Cancel but KEEP the handle, unlike `stopPolling`. `restartPolling` chains the next poll
+        // behind this task's `defer { isPolling = false }`, and it can only do that while the handle
+        // is still around - dropping it here would reintroduce the silently-dropped-poll race that
+        // `restartPolling` exists to prevent.
+        currentPollTask?.cancel()
+    }
+
+    /// Put polling back after `suspendPolling` (R11, issue #41). Every exit of a sign-in passes
+    /// through this, the failed ones included, so no path can leave polling dead.
+    func resumePolling() {
+        guard isSuspended else { return }
+        isSuspended = false
+        guard resumeShouldRestart else { return }
+        resumeShouldRestart = false
+        restartPolling()
+    }
+
     /// Chains a new poll after the previous task completes its `defer { isPolling = false }`,
     /// preventing the race where a new poll is silently dropped by the isPolling guard.
     private func restartPolling() {
+        // An explicit restart supersedes a pending resume. A sign-in that repaired the ACTIVE
+        // account fires its success callback (-> switchAccount -> here) BEFORE it resumes, and
+        // without this the resume that follows would cancel this very poll and chain a second one
+        // (R11, issue #41).
+        isSuspended = false
+        resumeShouldRestart = false
         let previousTask = currentPollTask
         stopPolling()
         currentPollTask = Task {

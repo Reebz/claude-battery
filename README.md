@@ -71,7 +71,7 @@ Right-click the menu bar icon for Settings, Notification customization, and to Q
 - Notification threshold adjustable from 5% to 50% in Settings (right-click)
 
 **Multi-Account**
-- Sign into up to 5 separate Claude.ai accounts (work, personal, side projects)
+- Sign into up to 10 separate Claude.ai accounts (work, personal, side projects)
 - Switch between accounts instantly from the popover
 - Custom nicknames per account
 

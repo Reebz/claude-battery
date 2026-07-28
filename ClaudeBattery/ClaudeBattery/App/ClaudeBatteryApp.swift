@@ -49,6 +49,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.usageService.switchAccount()
         }
 
+        // Pause polling across the network windows of a manual sign-in (R11, issue #41). Two narrow
+        // callbacks rather than handing AuthManager the polling service, which it has never held
+        // and does not need to know about (KTD7). A poll answered mid-sign-in picks up whichever
+        // cookies are in the shared jar when the request goes out, so it can be answered with the
+        // pasted account's credentials and 403 a healthy account into an expired state.
+        authManager.onSuspendPolling = { [weak self] in
+            self?.usageService.suspendPolling()
+        }
+        authManager.onResumePolling = { [weak self] in
+            self?.usageService.resumePolling()
+        }
+
+        // Say how many organizations a browser sign-in repaired (R6, issue #41). The manual paste
+        // path returns its confirmation and Settings prints it inline; this path closes its window
+        // and returns nothing, so an alert is the only place the count can land. Presented on the
+        // next main-actor turn so the sign-in window has finished closing first - the message is
+        // about a finished sign-in, not a step inside one.
+        authManager.onSignInConfirmation = { message in
+            Task { @MainActor in
+                // LSUIElement app: without this the alert can open behind whatever the user is
+                // looking at, the same reason every other window here activates first.
+                NSApp.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Sign-in complete"
+                alert.informativeText = message
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
+
         updateChecker = UpdateChecker()
         updateChecker.startChecking()
 

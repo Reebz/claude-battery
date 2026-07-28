@@ -653,7 +653,139 @@ final class UsageServicePollTests: XCTestCase {
         XCTAssertNil(service.latestUsage, "switchAccount should clear latestUsage")
     }
 
+    // MARK: - Issue #41 (R11): the polling pause across a sign-in's network window
+
+    @MainActor
+    func testSuspendPolling_inFlightPollIsNotAnsweredWithMidFlightCredentials() async {
+        // What R11 is actually for. A usage request picks up its cookies from the shared jar when
+        // it goes OUT, so a sign-in that re-primes that jar mid-flight can have this poll answered
+        // with the pasted account's credentials - a 403 that marks a healthy account expired and
+        // stops polling, on the one route that fires no success callback to start it again.
+        // GatedSession parks the request in flight so the sign-in's suspend lands in the middle of
+        // it, deterministically, instead of hoping two tasks interleave.
+        let gate = GatedSession(data: Data(), statusCode: 403)
+        let service = UsageService(storage: storage, accountStore: accountStore, session: gate)
+        var authFailures = 0
+        service.onAuthFailure = { authFailures += 1 }
+
+        service.startPolling()
+        let inFlight = await waitUntil { gate.started }
+        XCTAssertTrue(inFlight, "the poll must be in flight before the sign-in begins")
+
+        service.suspendPolling()
+        gate.release()
+        let answered = await waitUntil { gate.delivered }
+        XCTAssertTrue(answered, "the response really was handed back")
+
+        // Fails fast the moment the cancelled poll wrongly applies that response.
+        let leaked = await waitUntil(timeout: 0.5) { service.authFailed || authFailures > 0 }
+        XCTAssertFalse(leaked, "a poll cancelled by the sign-in must not read the response as its own account's")
+        XCTAssertEqual(service.consecutiveFailures, 0, "and it must not count as a failure either")
+    }
+
+    @MainActor
+    func testInFlightPoll_withoutTheSuspend_doesApplyTheResponse() async {
+        // The control for the test above. Same harness, no suspend: if this did not trip the flag,
+        // "nothing happened" over there would only mean the harness never delivered anything.
+        let gate = GatedSession(data: Data(), statusCode: 403)
+        let service = UsageService(storage: storage, accountStore: accountStore, session: gate)
+        var authFailures = 0
+        service.onAuthFailure = { authFailures += 1 }
+
+        service.startPolling()
+        let inFlight = await waitUntil { gate.started }
+        XCTAssertTrue(inFlight)
+        gate.release()
+
+        let tripped = await waitUntil { service.authFailed }
+        XCTAssertTrue(tripped, "an uncancelled poll does read the 403")
+        XCTAssertEqual(authFailures, 1)
+    }
+
+    @MainActor
+    func testSuspendThenResume_putsBackPollingThatWasRunning() async {
+        // Every exit of a sign-in resumes, the failed ones included, so this is the ordinary case:
+        // polling was running, a paste failed, and polling has to come back on its own.
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        let service = UsageService(storage: storage, accountStore: accountStore, session: mockSession)
+
+        service.startPolling()
+        let polled = await waitUntil { usageRequestCount() >= 1 }
+        XCTAssertTrue(polled, "the first poll ran")
+        let before = usageRequestCount()
+
+        service.suspendPolling()
+        service.resumePolling()
+
+        let polledAgain = await waitUntil { usageRequestCount() > before }
+        XCTAssertTrue(polledAgain,
+                      "resume puts back the poll the suspend cancelled, rather than leaving polling dead")
+    }
+
+    @MainActor
+    func testResume_doesNotStartPollingThatWasNotRunning() async {
+        // The app stops polling when the active session goes authFailed. A sign-in that failed must
+        // not turn that deliberate stop into a running poll against credentials still known bad.
+        let service = UsageService(storage: storage, accountStore: accountStore, session: mockSession)
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+
+        service.suspendPolling()
+        service.resumePolling()
+
+        let started = await waitUntil(timeout: 0.3) { usageRequestCount() > 0 }
+        XCTAssertFalse(started, "nothing was running when the sign-in began, so there is nothing to put back")
+    }
+
+    @MainActor
+    func testResumeAfterRepairOfTheActiveAccount_pollsAgain() async {
+        // The other half of R11: the pause must not be a one-way door. The active session goes
+        // authFailed, the app stops polling (its onAuthFailure wiring), the paste repairs that
+        // account, and the success callback -> switchAccount is what starts polling again. Resume
+        // has to leave that restart alone instead of cancelling it back into silence.
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 401
+        let service = UsageService(storage: storage, accountStore: accountStore, session: mockSession)
+
+        service.startPolling()
+        let expired = await waitUntil { service.authFailed }
+        XCTAssertTrue(expired, "precondition: the session is expired")
+        service.stopPolling()  // exactly what ClaudeBatteryApp wires onAuthFailure to
+
+        // The sign-in that repairs this account.
+        service.suspendPolling()
+        mockSession.responseData = fixtureData("usage_full")
+        mockSession.responseStatusCode = 200
+        service.switchAccount()  // what AuthManager.onAuthSuccess is wired to
+        service.resumePolling()
+
+        let fetched = await waitUntil { service.latestUsage != nil }
+        XCTAssertTrue(fetched,
+                      "a repaired active account fetches again without the user switching accounts by hand")
+        XCTAssertFalse(service.authFailed)
+    }
+
     // MARK: - Helpers
+
+    /// Usage requests only: `pollUsage` also fetches the prepaid-credits endpoint, so the raw
+    /// captured count would move for reasons the pause tests are not asking about.
+    @MainActor
+    private func usageRequestCount() -> Int {
+        mockSession.capturedRequests.filter { $0.url?.path.hasSuffix("/usage") ?? false }.count
+    }
+
+    /// Poll `condition` on the main actor until it is true or `timeout` elapses, returning whether
+    /// it was met. The negative assertions use it as a fail-fast wait: it returns the moment the
+    /// thing that must not happen happens.
+    @MainActor
+    private func waitUntil(timeout: TimeInterval = 5, _ condition: () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return condition()
+    }
 
     private func fixtureData(_ name: String) -> Data {
         let file = URL(fileURLWithPath: #file)
@@ -662,6 +794,62 @@ final class UsageServicePollTests: XCTestCase {
             .appendingPathComponent("Fixtures")
             .appendingPathComponent("\(name).json")
         return try! Data(contentsOf: url)
+    }
+}
+
+/// An `HTTPDataFetching` double that parks inside `data(for:)` until the test releases it, so a
+/// poll can be held IN FLIGHT while the test does something to the service. R11's failure is a
+/// race, and this is what makes it a fixed sequence instead of two tasks hoping to interleave.
+/// Kept out of MockHTTPSession: nothing else needs a request that stops halfway.
+///
+/// The park is a plain checked continuation, which is deliberately not cancellation-aware - the
+/// point is that cancelling the poll does NOT unblock the request, exactly as a real one in flight
+/// keeps going until the server answers.
+private final class GatedSession: HTTPDataFetching, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _started = false
+    private var _delivered = false
+    private var _released = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    private let responseData: Data
+    private let statusCode: Int
+
+    init(data: Data, statusCode: Int) {
+        self.responseData = data
+        self.statusCode = statusCode
+    }
+
+    /// The request has been received and is parked.
+    var started: Bool { lock.withLock { _started } }
+    /// The response has been handed back to the caller.
+    var delivered: Bool { lock.withLock { _delivered } }
+
+    func release() {
+        lock.lock()
+        _released = true
+        let waiter = self.waiter
+        self.waiter = nil
+        lock.unlock()
+        waiter?.resume()
+    }
+
+    func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        lock.lock()
+        _started = true
+        if _released {
+            lock.unlock()
+        } else {
+            // The lock is held until the continuation is stored, so a release() racing this cannot
+            // slip between the check and the park and leave the request stuck forever.
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                waiter = continuation
+                lock.unlock()
+            }
+        }
+        lock.withLock { _delivered = true }
+        let url = request.url ?? URL(string: "https://claude.ai")!
+        let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: "HTTP/1.1", headerFields: nil)!
+        return (responseData, response)
     }
 }
 

@@ -85,9 +85,12 @@ struct SettingsView: View {
                 }
             }
 
-            if accountStore.canAddAccount {
-                ManualSignInSection(authManager: authManager)
-            }
+            // No canAddAccount gate here, deliberately. A refresh consumes no entry slot, so hiding
+            // the paste box at the limit locked out the only repair route that still works there
+            // (R9, issue #41). It must also stay visible at zero accounts, where Google-federated
+            // and passkey users start: they cannot complete the embedded browser window at all, so
+            // narrowing this to "some account exists" would break their first sign-in instead.
+            ManualSignInSection(authManager: authManager)
 
             DiagnosticsSection()
 
@@ -129,7 +132,10 @@ struct SettingsView: View {
         // @State not visible to this calc. The 90% screen cap below is the backstop on small
         // displays. (The +110/+30 over the prior 570/440 is that headroom.)
         // +50 over the prior 680/470 covers the session-countdown toggle row + its caption.
-        let base: CGFloat = accountStore.canAddAccount ? 730 : 520
+        // Unconditional now. This used to be `canAddAccount ? 730 : 520`, and the 520 branch was
+        // small only because the manual sign-in section vanished at the entry limit. That section
+        // always renders (R9, issue #41), so the short branch would under-allocate it by ~210pt.
+        let base: CGFloat = 730
         // Each account row: ~40pt, plus ~45pt for threshold slider when notifications on
         let perAccount: CGFloat = notificationsEnabled ? 85 : 40
         let accountCount = CGFloat(max(accountStore.accounts.count, 1))
@@ -289,9 +295,15 @@ private struct ManualSignInSection: View {
 
     private func apply(_ result: ManualSignInResult) {
         switch result {
-        case .success(let name):
+        case .success(let name, let refreshedCount):
             statusIsError = false
-            statusText = "Signed in as \(name)."
+            // One pick can repair the picked org's stored siblings as well (R2, issue #41), so name
+            // the count rather than let that happen silently. Zero is a first add of an org the app
+            // had never stored, which repaired nothing and keeps the message it always had.
+            statusText = refreshedCount > 0
+                ? "Signed in as \(name). " + AuthManager.repairConfirmation(refreshedCount: refreshedCount,
+                                                                           viewedAccountRepaired: true)
+                : "Signed in as \(name)."
             pasted = ""
             orgChoices = []
         case .needsOrgChoice(let orgs):
@@ -299,9 +311,13 @@ private struct ManualSignInSection: View {
             selectedOrgIndex = 0
             statusIsError = false
             statusText = "Multiple organizations found. Choose one to finish."
-        case .alreadySignedInAllOrgs:
+        case .alreadySignedInAllOrgs(let refreshedCount, let activeAccountRefreshed):
+            // Not an error: the paste worked. But when the account being viewed was deliberately not
+            // among those repaired, the shared builder says so and names the next step, instead of a
+            // green count printed over a menu bar still showing the failure marker (R6, D6).
             statusIsError = false
-            statusText = "You're already signed in to all organizations on this account. Refreshed the session."
+            statusText = AuthManager.repairConfirmation(refreshedCount: refreshedCount,
+                                                        viewedAccountRepaired: activeAccountRefreshed)
             pasted = ""
             orgChoices = []
         case .invalidInput:

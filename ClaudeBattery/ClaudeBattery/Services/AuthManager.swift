@@ -29,13 +29,20 @@ enum LoginOverlayKind: Equatable {
 
 /// Outcome of the manual paste sign-in (U5). Drives the Settings UI's inline status.
 enum ManualSignInResult: Equatable {
-    /// Account added/reactivated; associated value is its display name.
-    case success(String)
+    /// Account added/reactivated. Carries its display name and how many ALREADY-STORED entries
+    /// this action wrote fresh credentials to. The count is here because the picker route repairs
+    /// the picked org's stored siblings in the same action (R2, issue #41), and a bare display name
+    /// would report none of that. Zero is a plain first add, with nothing to repair.
+    case success(String, refreshedCount: Int)
     /// Multiple orgs with no existing match — the user must pick one (pattern #6).
     case needsOrgChoice([Organization])
-    /// Every org on the account is already stored (any N >= 2); the matched session was refreshed
-    /// rather than a new account added (issue #32, KTD-3).
-    case alreadySignedInAllOrgs
+    /// Every org on the account is already stored (any N >= 2); the matched sessions were refreshed
+    /// rather than a new account added (issue #32, KTD-3). Carries how many entries were repaired
+    /// and whether the account currently being VIEWED was one of them. The second value exists
+    /// because this route deliberately leaves a non-matching active account alone: a bare count
+    /// there would be a false claim printed while the menu bar still shows the failure marker
+    /// (R6, D6, issue #41).
+    case alreadySignedInAllOrgs(refreshedCount: Int, activeAccountRefreshed: Bool)
     /// The paste did not contain a usable `sessionKey`.
     case invalidInput
     /// 401/403 from claude.ai. `suggestFullHeader` is true when only a bare key was pasted,
@@ -75,10 +82,17 @@ class AuthManager: NSObject, ObservableObject {
     /// Full Cookie header string built from every `.claude.ai` cookie in the login WebView.
     /// Passed to `ClaudeAPI` alongside `pendingSessionKey` so authenticated API calls during
     /// org discovery carry the full cookie set instead of `sessionKey` alone.
-    private var pendingCookieHeader: String?
+    // internal for @testable access in AuthManagerTests (the nil-header guard, KTD4/issue #41,
+    // has no other seam: the real value is written by the WebView cookie-store read)
+    var pendingCookieHeader: String?
     /// Context stashed between `manualSignIn` and `completeManualSignIn` when a paste resolves
     /// to multiple orgs and the user must pick one (U5, pattern #6).
-    private var pendingManualSignIn: (sessionKey: String, cookieHeader: String?, email: String)?
+    ///
+    /// `orgs` is the decoded response the picker was built from. It is carried here rather than
+    /// handed back through `completeManualSignIn`'s signature, because the completion is what
+    /// writes credentials and view state must not be the authority on which entries get written
+    /// (KTD5, issue #41). It is what lets the pick route repair the chosen org's stored siblings.
+    private var pendingManualSignIn: (sessionKey: String, cookieHeader: String?, email: String, orgs: [Organization])?
     /// Child WebView hosting OAuth popups spawned by `window.open()`. Added as a subview of
     /// the primary `loginWebView` so the OAuth provider's callback can `postMessage` back to
     /// the claude.ai page via `window.opener`. Torn down on `webViewDidClose` or login-window
@@ -90,6 +104,24 @@ class AuthManager: NSObject, ObservableObject {
     /// Hook the app wires to open Settings at the manual paste section (U5). Invoked by the
     /// sign-in error overlay's "Sign in manually" button so a stuck user reaches the floor.
     var onManualSignInRequested: (() -> Void)?
+    /// Hook the app wires to show the one-line repair confirmation after a WebView sign-in (R6,
+    /// issue #41). The manual paste path returns its confirmation in `ManualSignInResult` and
+    /// Settings prints it inline; the WebView path returns nothing and closes its window on success,
+    /// so the count has nowhere else to go. Left nil in tests, which assert the message instead of
+    /// presenting it.
+    var onSignInConfirmation: ((String) -> Void)?
+    /// Pause and un-pause polling for the network windows of a manual sign-in (R11, issue #41).
+    ///
+    /// A narrow pair of callbacks rather than a reference to `UsageService`: this class has never
+    /// held the polling service and does not need to start knowing what one is to say "not now"
+    /// (KTD7). The app wires them where it wires `onAuthSuccess`. Left nil in tests that do not
+    /// care, and recorded as a call sequence in the ones that do.
+    ///
+    /// They cover NETWORK WINDOWS ONLY, never user think-time (KTD8): the manual flow resumes when
+    /// it hands off to the org picker, which waits on a person and can sit open indefinitely, and
+    /// `completeManualSignIn` suspends again for its own writes.
+    var onSuspendPolling: (() -> Void)?
+    var onResumePolling: (() -> Void)?
 
     /// The overlay currently shown over the login WebView (U2).
     // internal for @testable access in AuthManagerTests
@@ -765,6 +797,67 @@ class AuthManager: NSObject, ObservableObject {
         return accountStore.accounts.first { acct in orgs.contains { $0.uuid == acct.organizationId } }
     }
 
+    /// Every stored account whose org appears in `orgs`, in stored order. This is the set of entries
+    /// one successful sign-in repairs: the credentials enumerate every org on the account, so they
+    /// are good for every stored entry among them, not only the one being viewed (R1, issue #41).
+    /// Shared by all three repair routes so the rule lives in one testable place.
+    ///
+    /// Deliberately NOT derived from `matchedAccount`, and do NOT "simplify" the callers to use the
+    /// first refreshed entry instead. The callers gate the jar restore and the success callback on
+    /// whether the ACTIVE entry was refreshed. Today that is equivalent to `matched.id ==
+    /// activeAccountId`, but only because `matchedAccount` prefers the active account when its org
+    /// is listed - an invariant that lives in a different function and that no test fails on if it
+    /// stops holding. Keying the gate on the ids this function returns removes that hidden
+    /// dependence (KTD1). `matchedAccount` stays as it is, because the WebView path still has to
+    /// pick ONE entry to switch to, under the active-preference rule issue #32 recorded as
+    /// mandatory.
+    ///
+    /// A repeated org uuid in `orgs` cannot yield a duplicate entry: the walk is over `accounts`.
+    ///
+    /// `nonisolated`: a pure rule over value types, same as `selectOrg`, so it is unit-testable
+    /// without an `AuthManager` and callable from any context.
+    nonisolated static func matchedAccounts(orgs: [Organization], accounts: [Account]) -> [Account] {
+        let orgIds = Set(orgs.map(\.uuid))
+        return accounts.filter { orgIds.contains($0.organizationId) }
+    }
+
+    /// The one-line confirmation for a sign-in that repaired stored entries (R6, issue #41). Shared
+    /// by all three repair routes - the manual all-already-stored branch, the manual picker, and the
+    /// WebView sign-in - so one event cannot end up described three different ways.
+    ///
+    /// `viewedAccountRepaired` is false only on the manual branch that deliberately leaves the
+    /// account being viewed untouched (D6). A bare count there would be a false claim printed while
+    /// the menu bar still shows the failure marker, so that message says so and names the next step
+    /// rather than stopping at a number the user cannot act on.
+    ///
+    /// `nonisolated`: pure string building over value types, unit-testable without an `AuthManager`,
+    /// the same shape as `selectOrg` and `matchedAccounts`.
+    nonisolated static func repairConfirmation(refreshedCount: Int, viewedAccountRepaired: Bool) -> String {
+        // Spelled out rather than interpolated, because one repaired entry reading
+        // "1 organizations" is the exact defect this branch exists to prevent.
+        let orgs = refreshedCount == 1 ? "1 organization" : "\(refreshedCount) organizations"
+        if viewedAccountRepaired {
+            return "Refreshed \(orgs)."
+        }
+        return "Refreshed \(orgs), but not the one you're viewing - switch to a refreshed one, or paste that account's cookie header."
+    }
+
+    /// Report a WebView sign-in's repair count to the app so it can show it (R6, issue #41).
+    ///
+    /// Fires only when the sign-in wrote fresh credentials to MORE than the org the user signed in
+    /// to. This route has no inline status line the way the manual paste section does, so the app
+    /// wires this to a one-line alert, and a modal for every ordinary single-org re-auth would charge
+    /// a click for news the user does not have. The manual path states the count even at one, because
+    /// writing another line into a status field it was already writing costs nothing.
+    ///
+    /// `viewedAccountRepaired` is always true here: every success route on this path ends in
+    /// `switchTo`, so the account being viewed afterwards is by construction one of those repaired,
+    /// and D6's branch cannot arise.
+    private func reportWebViewRepair(refreshedCount: Int) {
+        guard refreshedCount >= 2 else { return }
+        onSignInConfirmation?(Self.repairConfirmation(refreshedCount: refreshedCount, viewedAccountRepaired: true))
+    }
+
     // internal for @testable access in AuthManagerTests
     func fetchOrganizationId() async {
         guard let sessionKey = pendingSessionKey else {
@@ -822,6 +915,22 @@ class AuthManager: NSObject, ObservableObject {
                 return
             }
 
+            // Refuse to write anything when the login WebView produced no cookie header (KTD4,
+            // issue #41). A nil header means the request above carried no cookies of its own, so it
+            // was authenticated by whatever is already in the SHARED jar - the previously active
+            // account's cookies. The response then describes THAT account, every org of which is
+            // stored, so the flow would reach a repair route and repoint all of the old account's
+            // entries at the new key. The guard sits here, before the org-selection switch, so one
+            // check covers all three routes out of it (all-already-stored, the picker, and the
+            // single-org add); inside any one branch it would leave the other two open. Empty is
+            // treated as absent for the same reason it is at the capture site and in
+            // `AccountStore.updateSessionKey`: both mean no header was captured.
+            guard let capturedCookieHeader = pendingCookieHeader, !capturedCookieHeader.isEmpty else {
+                logger.error("Org discovery finished with no captured cookie header - refusing to write credentials")
+                handleOrgDiscoveryFailure("Sign-in could not be completed. Please try again.")
+                return
+            }
+
             // Determine which org to use via the pure, unit-tested `Self.selectOrg` (shared with
             // the manual-paste path). This site supplies the imperative shell: the NSAlert picker
             // and the login-window state machine.
@@ -831,20 +940,47 @@ class AuthManager: NSObject, ObservableObject {
                 chosenOrg = org
             case .allAlreadyAdded:
                 // Every org on this account is already stored. This is a foreground sign-in the
-                // user just completed, so refresh the matched account and switch to it (KTD-3
-                // WebView branch — unlike the manual path, switching is expected here). Log the
-                // non-PII account id only; displayName/org name can carry PII in off-device logs.
+                // user just completed, so refresh EVERY stored entry these credentials list, not
+                // only the one being viewed (R1, issue #41), and switch to the matched one (KTD-3
+                // WebView branch - unlike the manual path, which repairs without switching,
+                // switching is expected here; that divergence is deliberate and R3 keeps it). Log
+                // the non-PII account id only; displayName/org name can carry PII in off-device logs.
+                //
+                // `matchedAccount` is kept, and it chooses the SWITCH TARGET only. It prefers the
+                // active account when its org is listed, which is the active-preference rule issue
+                // #32 recorded as mandatory. Do NOT replace it with the loop's first entry: that is
+                // stored order, so it would switch to whichever org happens to sit first (KTD1).
                 guard let matched = matchedAccount(in: orgs) else {
                     handleOrgDiscoveryFailure("Account limit reached.")
                     return
                 }
-                accountStore.updateSessionKey(matched.id, sessionKey, cookieHeader: pendingCookieHeader)
+                // Accepted limit (D7): an entry is keyed only by org and labelled with whoever added
+                // it first, and there is deliberately no owner check here - see the
+                // all-orgs-already-stored branch in discoverAndAddManualAccount for why the stored
+                // email cannot serve as one.
+                var refreshedIds: Set<UUID> = []
+                for account in Self.matchedAccounts(orgs: orgs, accounts: accountStore.accounts) {
+                    accountStore.updateSessionKey(account.id, sessionKey, cookieHeader: capturedCookieHeader)
+                    refreshedIds.insert(account.id)
+                }
+                // `switchTo` stays the last jar-touching step (KTD3): every write above put the same
+                // fresh credentials in, so the jar ends up holding `matched`'s copy of them.
                 accountStore.switchTo(matched.id)
-                logger.info("Re-auth: all orgs already added, refreshed account \(matched.id.uuidString)")
+                // The manual path gates its success callback and its jar restore on whether the
+                // ACTIVE entry was among those repaired (KTD1). That gate collapses here rather than
+                // being dropped: `switchTo` has just made `matched` active, and `matched` is always a
+                // member of `refreshedIds` because `matchedAccount` returns an entry whose org is in
+                // `orgs`, which is exactly what `matchedAccounts` filters on. So there is no branch
+                // to take, and no jar restore to add either - this route ends active on freshly
+                // written credentials, and a restore would fight the switch.
+                logger.info("Re-auth: all orgs already added, refreshed \(refreshedIds.count) account(s), active is \(matched.id.uuidString)")
                 pendingSessionKey = nil
                 pendingCookieHeader = nil
                 loginState = .idle
                 stopLoginWindow()
+                // Say how many were repaired (R6). Reported after stopLoginWindow so the message is
+                // about a finished sign-in rather than arriving over the login window.
+                reportWebViewRepair(refreshedCount: refreshedIds.count)
                 onAuthSuccess?()
                 return
             case .needsChoice(let choices):
@@ -865,27 +1001,8 @@ class AuthManager: NSObject, ObservableObject {
             // Try to extract email from org response
             let email = extractEmail(from: orgs, rawData: data) ?? "Account \(accountStore.accounts.count + 1)"
 
-            let account = Account(
-                email: email,
-                sessionKey: sessionKey,
-                organizationId: chosenOrg.uuid,
-                organizationName: chosenOrg.sanitizedName,
-                allCookieHeader: pendingCookieHeader
-            )
-
-            if accountStore.addAccount(account) {
-                accountStore.switchTo(account.id)
-                // Non-PII id, not displayName (= email by default); os_log can be read off-device.
-                logger.info("Account added and activated: \(account.id.uuidString)")
-            } else if let existing = accountStore.accounts.first(where: { $0.organizationId == chosenOrg.uuid }) {
-                // Re-authentication: update session key AND the full cookie header so the next
-                // API call primes the jar with the fresh Cloudflare / CSRF cookies, not the stale
-                // pair that was paired with the previous sessionKey.
-                accountStore.updateSessionKey(existing.id, sessionKey, cookieHeader: pendingCookieHeader)
-                accountStore.switchTo(existing.id)
-                logger.info("Re-authenticated existing account: \(existing.id.uuidString)")
-            } else {
-                logger.warning("Failed to add account (limit reached)")
+            guard addOrReactivateWebViewAccount(org: chosenOrg, orgs: orgs, sessionKey: sessionKey,
+                                                cookieHeader: capturedCookieHeader, email: email) else {
                 handleOrgDiscoveryFailure("Account limit reached.")
                 return
             }
@@ -901,6 +1018,87 @@ class AuthManager: NSObject, ObservableObject {
             logger.error("Org discovery failed: \(error.localizedDescription)")
             handleOrgDiscoveryFailure("Connection error. Please try again.")
         }
+    }
+
+    /// The add-or-reactivate tail of a WebView sign-in, reached from the single-org route and from
+    /// the org picker. Returns false only when the entry limit refuses the add; on every other path
+    /// it has written credentials and switched by the time it returns.
+    ///
+    /// Split out of `fetchOrganizationId` rather than left inline so both of its routes are testable:
+    /// the picker runs through an NSAlert sheet, which needs a visible window and is unavailable
+    /// headless (the same reason the existing picker tests drive `orgPickerContinuation` directly).
+    // internal for @testable access in AuthManagerTests
+    func addOrReactivateWebViewAccount(org: Organization, orgs: [Organization], sessionKey: String,
+                                       cookieHeader: String, email: String) -> Bool {
+        // The same credentials that repair (or add) the chosen org are good for every OTHER stored
+        // org they enumerate, so repair those in the same sign-in instead of making the user sign in
+        // again per org (R1, R2, issue #41). The chosen org is skipped because the route calling this
+        // has already written it. On the single-org route this is a no-op by construction: `orgs`
+        // holds one entry and it is the chosen one.
+        //
+        // Called ONLY from the two success routes below, never before the limit-reached exit (KTD3):
+        // picking an un-stored org while at the entry limit must report the limit having rewritten
+        // nothing. Called just before `switchTo`, which keeps `switchTo` the last jar-touching step:
+        // `AccountStore.updateSessionKey` re-primes the shared jar only for the active entry, so a
+        // sibling write is jar-neutral unless the sibling is the outgoing active account, and that
+        // write puts in the same fresh credentials `switchTo` is about to.
+        //
+        // Unlike the manual path this route has no jar restore and needs none: every success route
+        // ends in `switchTo`, and the failure route returns without having written anything. Adding
+        // one would fight the switch.
+        //
+        // Accepted limit (D7): an entry is keyed only by org and labelled with whoever added it
+        // first, and there is deliberately no owner check here - see the all-orgs-already-stored
+        // branch in discoverAndAddManualAccount for why the stored email cannot serve as one.
+        //
+        // Returns how many siblings were repaired, so the caller can add the chosen org to that and
+        // report the total (R6).
+        func refreshSiblings() -> Int {
+            let siblings = Self.matchedAccounts(orgs: orgs, accounts: accountStore.accounts)
+                .filter { $0.organizationId != org.uuid }
+            for sibling in siblings {
+                accountStore.updateSessionKey(sibling.id, sessionKey, cookieHeader: cookieHeader)
+            }
+            if !siblings.isEmpty {
+                logger.info("Re-auth: refreshed \(siblings.count) sibling account(s) of the chosen org")
+            }
+            return siblings.count
+        }
+
+        let account = Account(
+            email: email,
+            sessionKey: sessionKey,
+            organizationId: org.uuid,
+            organizationName: org.sanitizedName,
+            allCookieHeader: cookieHeader
+        )
+
+        if accountStore.addAccount(account) {
+            // The chosen org is newly stored, so it is not part of the repaired count - only the
+            // siblings this sign-in rescued alongside it are (R6).
+            let repaired = refreshSiblings()
+            accountStore.switchTo(account.id)
+            // Non-PII id, not displayName (= email by default); os_log can be read off-device.
+            logger.info("Account added and activated: \(account.id.uuidString)")
+            reportWebViewRepair(refreshedCount: repaired)
+            return true
+        }
+
+        if let existing = accountStore.accounts.first(where: { $0.organizationId == org.uuid }) {
+            // Re-authentication: update session key AND the full cookie header so the next
+            // API call primes the jar with the fresh Cloudflare / CSRF cookies, not the stale
+            // pair that was paired with the previous sessionKey.
+            accountStore.updateSessionKey(existing.id, sessionKey, cookieHeader: cookieHeader)
+            // The chosen org WAS already stored, so it counts as repaired along with its siblings.
+            let repaired = refreshSiblings() + 1
+            accountStore.switchTo(existing.id)
+            logger.info("Re-authenticated existing account: \(existing.id.uuidString)")
+            reportWebViewRepair(refreshedCount: repaired)
+            return true
+        }
+
+        logger.warning("Failed to add account (limit reached)")
+        return false
     }
 
     private func handleOrgDiscoveryFailure(_ message: String) {
@@ -1006,9 +1204,55 @@ class AuthManager: NSObject, ObservableObject {
 
     /// Finish a manual sign-in after the user picks an org (the multi-org, no-existing-match case).
     func completeManualSignIn(org: Organization) -> ManualSignInResult {
+        // The second network window of the manual flow (R11, KTD8, issue #41).
+        // `discoverAndAddManualAccount` resumed polling when it handed off to the picker, because a
+        // picker waits on a person; the writes below - `addOrReactivateManualAccount` ends in
+        // `switchTo`, which re-primes the shared jar, and the sibling loop writes more entries -
+        // would otherwise run with polling live. A pause taken in the discovery function and
+        // resumed only there leaves this half unprotected.
+        //
+        // Above the pending-context guard, and paired with `defer`, so no exit here or added later
+        // can skip the resume. Suspending for the invalid-input return costs one immediately
+        // reversed pause; leaving a route un-resumed costs polling until the app restarts.
+        onSuspendPolling?()
+        defer { onResumePolling?() }
         guard let ctx = pendingManualSignIn else { return .invalidInput }
         pendingManualSignIn = nil
-        return addOrReactivateManualAccount(org: org, sessionKey: ctx.sessionKey, cookieHeader: ctx.cookieHeader, email: ctx.email)
+        // Read before the write, because afterwards every route below has an entry for this org and
+        // the two cases are indistinguishable. A picked org that was already stored is a repair and
+        // counts towards the confirmation; a newly added one is not (R6).
+        let pickedOrgWasStored = accountStore.accounts.contains { $0.organizationId == org.uuid }
+        let result = addOrReactivateManualAccount(org: org, sessionKey: ctx.sessionKey, cookieHeader: ctx.cookieHeader, email: ctx.email)
+        // The sibling refresh runs ONLY behind this success check (KTD3). Picking an un-stored org
+        // while at the entry limit returns .accountLimitReached, and repairing siblings first would
+        // report a limit error having already rewritten several entries' credentials.
+        guard case .success(let name, _) = result else { return result }
+        // The same credentials that just repaired (or added) the picked org are good for every other
+        // stored org they enumerate, so repair those too instead of making the user pick, paste, and
+        // repeat per org (R2, issue #41). The picked entry is skipped: addOrReactivateManualAccount
+        // already wrote it, and it is now the active one.
+        //
+        // Jar order (KTD3): addOrReactivateManualAccount ends in switchTo, which primed the jar with
+        // the picked account's fresh cookies. Every entry written below is non-active, and
+        // AccountStore.updateSessionKey re-primes the jar only for the active entry, so this loop is
+        // jar-neutral and switchTo stays the last jar-touching step. Unlike the all-already-stored
+        // branch this route DOES switch, which is pre-existing behaviour R3 preserves.
+        //
+        // Accepted limit (D7): an entry is keyed only by org and labelled with whoever added it
+        // first, and there is deliberately no owner check here - see the all-already-stored branch
+        // in discoverAndAddManualAccount for why the stored email cannot serve as one.
+        let siblings = Self.matchedAccounts(orgs: ctx.orgs, accounts: accountStore.accounts)
+            .filter { $0.organizationId != org.uuid }
+        for sibling in siblings {
+            accountStore.updateSessionKey(sibling.id, ctx.sessionKey, cookieHeader: ctx.cookieHeader)
+        }
+        if !siblings.isEmpty {
+            logger.info("Manual sign-in pick: refreshed \(siblings.count) sibling account(s) of the picked org")
+        }
+        // Re-report the success with the repaired total. Without this the picker route would confirm
+        // "Signed in as X" having also rescued X's siblings, which is the silent half of the same
+        // bug R6 exists to close (R6, issue #41).
+        return .success(name, refreshedCount: siblings.count + (pickedOrgWasStored ? 1 : 0))
     }
 
     /// Parse a pasted credential into a `sessionKey` and (when present) the full cookie header.
@@ -1044,18 +1288,42 @@ class AuthManager: NSObject, ObservableObject {
         // Drop any prior unfinished org-choice context so a stale credential is not retained.
         pendingManualSignIn = nil
 
-        // activateCookies mutates the SHARED jar that UsageService.pollUsage reads. Snapshot the
-        // active account first so any non-success outcome can restore it. Without this, a failed
+        // activateCookies mutates the SHARED jar that UsageService.pollUsage reads, so every
+        // non-success outcome has to put the active account's cookies back. Without this, a failed
         // attempt to ADD a new account would clobber the working account's cookies and its next
         // poll would 401 - silently breaking a healthy account (P1, review finding).
-        let previousActive = accountStore.activeAccount
+        //
+        // Read the store AT restore time rather than snapshotting before the network call (R10,
+        // issue #41). Account is a struct, so a pre-network capture is a frozen copy: if the user
+        // switches accounts or removes one while the paste is still waiting on the network, putting
+        // that copy back writes the old account's cookies over whichever account is active now -
+        // the same healthy-account breakage this helper exists to prevent, just aimed at a
+        // different account. A nil read means the entry that was active has been removed with
+        // nothing left to fall back to, so the jar is cleared rather than re-primed from a deleted
+        // account.
         func restoreActiveJar() {
-            if let previousActive {
-                ClaudeAPI.activateCookies(sessionKey: previousActive.sessionKey, cookieHeader: previousActive.allCookieHeader)
+            if let active = accountStore.activeAccount {
+                ClaudeAPI.activateCookies(sessionKey: active.sessionKey, cookieHeader: active.allCookieHeader)
             } else {
                 ClaudeAPI.clearClaudeCookies()
             }
         }
+
+        // Pause polling for this sign-in's network window (R11, KTD8, issue #41), immediately
+        // before the first jar prime and never after it. The line below rewrites the SHARED jar
+        // that `UsageService.pollUsage` reads, and URLSession writes a request's Cookie header when
+        // the request goes out rather than when it was created - so a poll already in flight can be
+        // answered with the pasted account's credentials. That answer is a 403, which marks a
+        // healthy account expired and stops polling, and Branch B below fires no success callback,
+        // so nothing would start it again.
+        //
+        // `defer` rather than a call on each route: this function has ten exits including a throw,
+        // and a missed one leaves polling dead until the app restarts - worse than the race being
+        // fixed. The pause covers the network window ONLY: the `.needsChoice` route returns here to
+        // show the SwiftUI picker, which waits on a person, so the resume fires and
+        // `completeManualSignIn` suspends again for its own writes (KTD8).
+        onSuspendPolling?()
+        defer { onResumePolling?() }
 
         ClaudeAPI.activateCookies(sessionKey: sessionKey, cookieHeader: cookieHeader)
 
@@ -1103,33 +1371,65 @@ class AuthManager: NSObject, ObservableObject {
                 // Restore the active account's jar while the picker is shown; completeManualSignIn
                 // re-primes the jar to the chosen account via switchTo.
                 restoreActiveJar()
-                pendingManualSignIn = (sessionKey, cookieHeader, email)
+                pendingManualSignIn = (sessionKey, cookieHeader, email, orgs)
                 return .needsOrgChoice(choices)
             case .allAlreadyAdded:
-                // Every org on this account is already stored. Refresh the matched account's
-                // session and report it (KTD-3). Early-return here so this bypasses the trailing
-                // `if case .success = result {} else { restoreActiveJar() }` guard below — Branch A
+                // Every org on this account is already stored. Refresh EVERY stored entry these
+                // credentials list, not only the one being viewed (R1, issue #41): before this, a
+                // user with two orgs on one email had to switch org in Settings and paste the same
+                // credentials a second time. Early-return here so this bypasses the trailing
+                // `if case .success = result {} else { restoreActiveJar() }` guard below - Branch A
                 // must NOT restore, or it would undo the refresh it just primed into the jar.
-                guard let matched = matchedAccount(in: orgs) else {
+                let toRefresh = Self.matchedAccounts(orgs: orgs, accounts: accountStore.accounts)
+                guard !toRefresh.isEmpty else {
+                    // Unreachable by construction: `.allAlreadyAdded` is returned only when every
+                    // org in `orgs` is already stored, and `orgs` is non-empty by the check above,
+                    // so at least one stored entry always matches. Kept as a defensive exit instead
+                    // of a force-unwrap; it is not a real terminal anyone is expected to hit.
                     restoreActiveJar()
                     return .accountLimitReached
                 }
-                accountStore.updateSessionKey(matched.id, sessionKey, cookieHeader: cookieHeader)
-                if matched.id == accountStore.activeAccountId {
-                    // Branch A — matched IS active: updateSessionKey already re-primed the jar to
-                    // the fresh cookies. Do not restore, do not switch. Fire onAuthSuccess so
-                    // polling restarts (recovers an active session that had gone authFailed).
-                    logger.info("Manual sign-in: all orgs already added, refreshed active account")
+                // Accepted limit (D7): an entry is keyed only by org and labelled with whoever added
+                // it first. If two claude.ai logins share one org and both are stored on this Mac,
+                // this write puts the second login's credentials onto an entry carrying the first's
+                // label, and that entry then reports the second person's usage. There is
+                // deliberately no owner check: the stored email is frequently the fallback text
+                // "Account 3", and it is read from the FIRST org in the response rather than
+                // per-org, so gating on it would refuse ordinary repairs and reintroduce the issue
+                // #32 bug. This already happened on the single refreshed entry; the loop widens it.
+                var refreshedIds: Set<UUID> = []
+                for account in toRefresh {
+                    accountStore.updateSessionKey(account.id, sessionKey, cookieHeader: cookieHeader)
+                    refreshedIds.insert(account.id)
+                }
+                // Gate on the refreshed SET, never on a single matched entry (KTD1). `matchedAccount`
+                // happens to prefer the active account when its org is listed, which made the old
+                // `matched.id == activeAccountId` check correct, but that invariant lives in another
+                // function and no test fails if it stops holding. Do NOT "simplify" this back to the
+                // first refreshed entry.
+                let activeAccountRefreshed = accountStore.activeAccountId.map { refreshedIds.contains($0) } ?? false
+                if activeAccountRefreshed {
+                    // Branch A - the active entry is among those repaired: updateSessionKey already
+                    // re-primed the jar to the fresh cookies. Do not restore, do not switch. Fire
+                    // onAuthSuccess so polling restarts (recovers an active session that had gone
+                    // authFailed) - once, after the loop, not per entry, because it clears the
+                    // cached usage and chains a restart (KTD2).
+                    logger.info("Manual sign-in: all orgs already added, refreshed \(refreshedIds.count) account(s) including the active one")
                     onAuthSuccess?()
                 } else {
-                    // Branch B — matched is NOT active: persist fresh creds on the sibling, then
-                    // restore the real active account's jar so it keeps serving its own cookies.
-                    // Do not switch (a paste must not silently switch the active account) and do
-                    // not fire onAuthSuccess (the active account was left untouched).
+                    // Branch B - the active entry is NOT among them: persist fresh creds on the
+                    // siblings, then restore the real active account's jar so it keeps serving its
+                    // own cookies. Do not switch (a paste must not silently switch the active
+                    // account) and do not fire onAuthSuccess (the active account was left untouched,
+                    // so it must stay stopped rather than restart on credentials that are not its).
                     restoreActiveJar()
-                    logger.info("Manual sign-in: all orgs already added, refreshed a background account")
+                    logger.info("Manual sign-in: all orgs already added, refreshed \(refreshedIds.count) background account(s)")
                 }
-                return .alreadySignedInAllOrgs
+                // Both numbers travel to the view, which is the only place a user-facing string is
+                // built. Branch B is why the flag is carried and not inferred: the confirmation there
+                // has to say the viewed account was deliberately left alone (R6, D6).
+                return .alreadySignedInAllOrgs(refreshedCount: refreshedIds.count,
+                                               activeAccountRefreshed: activeAccountRefreshed)
             }
 
             let result = addOrReactivateManualAccount(org: selectedOrg, sessionKey: sessionKey, cookieHeader: cookieHeader, email: email)
@@ -1151,13 +1451,18 @@ class AuthManager: NSObject, ObservableObject {
             logger.info("Manual sign-in added a new account")
             onAuthSuccess?()
             // Disambiguated so adding org B of a same-email account confirms which org (issue #32).
-            return .success(accountStore.disambiguatedName(for: account))
+            // A brand-new entry repairs nothing, so the count is zero and the confirmation stays the
+            // plain "Signed in as X" it always was (R6).
+            return .success(accountStore.disambiguatedName(for: account), refreshedCount: 0)
         } else if let existing = accountStore.accounts.first(where: { $0.organizationId == org.uuid }) {
             accountStore.updateSessionKey(existing.id, sessionKey, cookieHeader: cookieHeader)
             accountStore.switchTo(existing.id)
             logger.info("Manual sign-in reactivated an existing account")
             onAuthSuccess?()
-            return .success(accountStore.disambiguatedName(for: existing))
+            // An existing entry rewritten with fresh credentials IS a repair, so it counts as one.
+            // `completeManualSignIn` replaces this count with its own total once it has added the
+            // siblings the pick also rescued.
+            return .success(accountStore.disambiguatedName(for: existing), refreshedCount: 1)
         }
         return .accountLimitReached
     }

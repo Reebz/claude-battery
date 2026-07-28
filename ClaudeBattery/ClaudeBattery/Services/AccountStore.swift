@@ -9,7 +9,11 @@ class AccountStore: ObservableObject {
     @Published var accounts: [Account] = []
     @Published var activeAccountId: UUID?
 
-    static let maxAccounts = 5
+    /// One entry per organization, shared across every email. Raised from 5 to 10 so a two-email,
+    /// three-org user has room (D5, issue #41). Costs no API traffic: polling only ever runs against
+    /// the active entry. The limit message and the store tests both read this constant, so it is the
+    /// only place the number lives in code.
+    static let maxAccounts = 10
 
     var activeAccount: Account? {
         guard let id = activeAccountId else { return nil }
@@ -102,14 +106,49 @@ class AccountStore: ObservableObject {
     func updateSessionKey(_ id: UUID, _ sessionKey: String, cookieHeader: String? = nil) {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
         accounts[index].sessionKey = sessionKey
-        if let cookieHeader {
+        if let cookieHeader, !cookieHeader.isEmpty {
             accounts[index].allCookieHeader = cookieHeader
+        } else if let stored = accounts[index].allCookieHeader, !stored.isEmpty {
+            // A bare session-key paste (no cookie header) used to leave the stored header holding
+            // the DEAD key: `ClaudeAPI.activateCookies` prefers a non-empty header and ignores the
+            // sessionKey argument entirely, so the app reported a successful refresh and the next
+            // poll failed on the old key (R8, issue #41).
+            //
+            // Two ways out: clear the stored header so priming falls back to `sessionKey=<fresh>`,
+            // or swap the key pair inside the header and keep everything else. Swapping wins,
+            // because the cookies sitting next to the key are the Cloudflare ones (`__cf_bm`,
+            // `cf_clearance`) and the CSRF token, and a bare key without them is exactly the
+            // request shape that gets 403'd (issue #7). Clearing would trade a stale-key failure
+            // for a Cloudflare failure. Empty is treated as absent here for the same reason
+            // `activateCookies` does: both mean "no header was captured".
+            accounts[index].allCookieHeader = Self.headerReplacingSessionKey(in: stored, with: sessionKey)
         }
         persist()
         if activeAccountId == id {
             // Re-prime the cookie jar with the fresh credentials so the next API call uses them.
             ClaudeAPI.activateCookies(sessionKey: sessionKey, cookieHeader: accounts[index].allCookieHeader)
         }
+    }
+
+    /// Return `header` with its `sessionKey=` pair carrying `sessionKey`, every other cookie left
+    /// as it was. Appends the pair when the header has none, so the result always authenticates.
+    /// `nonisolated static` and pure so it is unit-testable without a store, the same shape as
+    /// `AuthManager.selectOrg`. Splits on ";" rather than "; " for the RFC 6265 reason spelled out
+    /// in `ClaudeAPI.injectCookies`: a bare semicolon is valid and must not swallow the next pair.
+    nonisolated static func headerReplacingSessionKey(in header: String, with sessionKey: String) -> String {
+        var pairs = header
+            .components(separatedBy: ";")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        var replaced = false
+        for i in pairs.indices where pairs[i].hasPrefix("sessionKey=") {
+            pairs[i] = "sessionKey=\(sessionKey)"
+            replaced = true
+        }
+        if !replaced {
+            pairs.append("sessionKey=\(sessionKey)")
+        }
+        return pairs.joined(separator: "; ")
     }
 
     func updateNickname(_ id: UUID, _ nickname: String) {
