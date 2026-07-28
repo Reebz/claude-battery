@@ -123,3 +123,43 @@ final class UsagePopoverViewBatteryColorTests: XCTestCase {
         XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 150), .green)
     }
 }
+
+/// Locks the pure show/hide rule and copy for the top update banner. The banner replaced the
+/// footer link, which was easy to miss; the tinted full-width row is SwiftUI, only the resolved
+/// content is unit-tested.
+final class UsagePopoverViewUpdateBannerTests: XCTestCase {
+    private let downloadURL = URL(string: "https://github.com/Reebz/claude-battery/releases/tag/v1.61")!
+
+    func testNoUpdate_bothNil_hidesBanner() {
+        XCTAssertNil(UsagePopoverView.updateBannerContent(availableVersion: nil, downloadURL: nil))
+    }
+
+    func testVersionWithoutURL_hidesBanner() {
+        XCTAssertNil(UsagePopoverView.updateBannerContent(availableVersion: "1.61", downloadURL: nil))
+    }
+
+    func testURLWithoutVersion_hidesBanner() {
+        XCTAssertNil(UsagePopoverView.updateBannerContent(availableVersion: nil, downloadURL: downloadURL))
+    }
+
+    func testUpdateAvailable_composesTitleAndCarriesURL() {
+        let banner = UsagePopoverView.updateBannerContent(availableVersion: "1.61", downloadURL: downloadURL)
+
+        XCTAssertEqual(banner?.title, "v1.61 available - Download")
+        // Keeps the visible "Download" so Voice Control still matches the word on the button.
+        XCTAssertEqual(banner?.spokenLabel, "Version 1.61 available, Download")
+        XCTAssertEqual(banner?.url, downloadURL)
+    }
+
+    func testTitle_addsVPrefixOnce_forThreeSegmentVersion() {
+        // UpdateChecker publishes the bare number (it strips any leading v), so the view adds it.
+        let banner = UsagePopoverView.updateBannerContent(availableVersion: "99.1.2", downloadURL: downloadURL)
+        XCTAssertEqual(banner?.title, "v99.1.2 available - Download")
+    }
+
+    func testTitle_usesHyphenNotEmDash() {
+        // The old footer string carried a real em dash; the banner copy must not reintroduce it.
+        let banner = UsagePopoverView.updateBannerContent(availableVersion: "1.61", downloadURL: downloadURL)
+        XCTAssertFalse(banner?.title.contains("\u{2014}") ?? true, "got `\(banner?.title ?? "nil")`")
+    }
+}
