@@ -135,7 +135,9 @@ struct SettingsView: View {
         // Unconditional now. This used to be `canAddAccount ? 730 : 520`, and the 520 branch was
         // small only because the manual sign-in section vanished at the entry limit. That section
         // always renders (R9, issue #41), so the short branch would under-allocate it by ~210pt.
-        let base: CGFloat = 730
+        // +30 over the prior 730 covers the two extra wrapped lines in the Diagnostics caption,
+        // which grew when it started naming the plan sample it now collects (R6).
+        let base: CGFloat = 760
         // Each account row: ~40pt, plus ~45pt for threshold slider when notifications on
         let perAccount: CGFloat = notificationsEnabled ? 85 : 40
         let accountCount = CGFloat(max(accountStore.accounts.count, 1))
@@ -355,7 +357,11 @@ private struct DiagnosticsSection: View {
 
     var body: some View {
         Section(header: Text("Diagnostics")) {
-            Text("Records sign-in events to help diagnose problems. No passwords, tokens, or emails are saved.")
+            // Says what is collected, not just what is not. The plan sample (R6) added a second
+            // kind of record here - which plan the account is on and how much of each limit is
+            // left, written every couple of minutes while logging is on - and a description that
+            // still said "sign-in events" would be understating what the user is agreeing to.
+            Text("Records sign-in events, which plan your account is on, and how much of your session and weekly limits is left, to help diagnose problems. No passwords, tokens, emails, or account names are saved.")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

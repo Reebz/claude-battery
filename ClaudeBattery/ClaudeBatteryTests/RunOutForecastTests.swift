@@ -70,12 +70,16 @@ final class RunOutForecastTests: XCTestCase {
     // MARK: - sessionPace (weekly-gated Session card, #31 must stay on RAW session)
 
     /// UsageData with session/weekly derived independently and a session reset `sessionResetsIn`
-    /// seconds from `now`.
-    private func makeUsage(session: Double, weekly: Double, sessionResetsIn: TimeInterval?) -> UsageData {
+    /// seconds from `now`. These cases all carry the Max 5x plan ratio, because the weekly can
+    /// only bind once it has been converted into session units - with no ratio there is nothing
+    /// to convert and `isSessionWeeklyLimited` is false by definition.
+    private func makeUsage(session: Double, weekly: Double, sessionResetsIn: TimeInterval?,
+                           planRatio: Double? = PlanRatio.max5x) -> UsageData {
         UsageData(from: UsageResponse(
             fiveHour: makeTier(utilization: 100 - session, resetsAt: sessionResetsIn.map(resetsIn)),
             sevenDay: makeTier(utilization: 100 - weekly),
-            sevenDayOpus: nil, sevenDaySonnet: nil, extraUsage: nil, limits: nil, spend: nil))
+            sevenDayOpus: nil, sevenDaySonnet: nil, extraUsage: nil, limits: nil, spend: nil),
+                  planRatio: planRatio)
     }
 
     private func makeTier(utilization: Double, resetsAt: Date? = nil) -> UsageTier {
@@ -92,8 +96,10 @@ final class RunOutForecastTests: XCTestCase {
     }
 
     func testSessionPace_weeklyBindsAndAhead_isWeeklyLimited() {
-        // Weekly nearly exhausted (5) with a high session (90) ahead of pace: defer to weekly.
+        // Weekly nearly exhausted (5, or 63.1% of a session once converted) with a high session
+        // (90) ahead of pace: defer to weekly.
         let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
         XCTAssertEqual(UsagePopoverView.sessionPace(for: usage, now: now), .weeklyLimited)
     }
 
@@ -104,17 +110,19 @@ final class RunOutForecastTests: XCTestCase {
     }
 
     func testSessionPace_weeklyBindsButSessionInDanger_showsDanger() {
-        // Weekly binds (14 < 15 and < 20), but RAW session (15%, 50% of the window) has delta +35
-        // -> Danger. That nearer, concrete wall must win over the "Limited by weekly" label.
-        let usage = makeUsage(session: 15, weekly: 14, sessionResetsIn: 9000)
+        // Weekly binds (1% of the week is 12.6% of a session, under the session's 15), but RAW
+        // session (15%, 50% of the window) has delta +35 -> Danger. That nearer, concrete wall
+        // must win over the "Limited by weekly" label.
+        let usage = makeUsage(session: 15, weekly: 1, sessionResetsIn: 9000)
         XCTAssertTrue(usage.isSessionWeeklyLimited)
         XCTAssertEqual(UsagePopoverView.sessionPace(for: usage, now: now), .danger)
     }
 
     func testSessionPace_neverGradesCappedValue() {
-        // Discriminator: the capped gauge value (weekly=5) over the 5h window would grade Danger;
-        // sessionPace must instead return .weeklyLimited (it grades the RAW session, which is ahead).
-        let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
+        // Discriminator: the capped gauge value (weekly 1 -> 12.6 in session units) over the 5h
+        // window would grade Danger; sessionPace must instead return .weeklyLimited (it grades the
+        // RAW session, which is ahead).
+        let usage = makeUsage(session: 90, weekly: 1, sessionResetsIn: 9000)
         let wrong = UsagePopoverView.paceStatus(remainingPercent: usage.sessionDisplayRemaining,
                                                 resetsAt: usage.sessionResetDate, window: s, now: now)
         XCTAssertEqual(wrong, .danger)

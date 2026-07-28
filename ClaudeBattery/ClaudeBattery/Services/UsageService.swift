@@ -249,7 +249,58 @@ class UsageService: NSObject, ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            latestUsage = UsageData(from: usage, prepaidCredits: prepaidCredits)
+            // The reading first, with no ratio attached: the measured ratio is derived from this
+            // reading's own numbers (R5), so the reading has to exist before the ratio does.
+            var reading = UsageData(from: usage, prepaidCredits: prepaidCredits)
+
+            // Fold this sample into the account's running measurement, and store it whether or not
+            // anything accumulated - a rollover still has to replace the previous sample, or the
+            // next poll would be differenced against a reading from the window before last (KTD4).
+            // Persisted rather than held in memory because the totals are built up over many polls
+            // and a version that restarted at every app launch would hand a user who quits the app
+            // daily a measurement that never gets anywhere.
+            let measurement = RatioMeasurement.updated(from: account.ratioMeasurement,
+                                                       sessionRemaining: reading.sessionRemaining,
+                                                       sessionResetsAt: reading.sessionResetDate,
+                                                       weeklyRemaining: reading.weeklyRemaining,
+                                                       weeklyResetsAt: reading.weeklyResetDate)
+            accountStore.updateRatioMeasurement(account.id, measurement)
+
+            // The plan ratio is what lets the Session dial state the weekly remainder on the
+            // session's own scale (R1, KTD3). Everything it is built from comes from `account`, the
+            // snapshot taken at the top of this poll, so the ratio and the measurement always belong
+            // to the same account whose credentials fetched this response - re-reading the store
+            // here would pair one account's usage with another's plan if the user switched
+            // mid-flight. Read per poll rather than cached, so a re-auth that rewrites the stored
+            // tier (`AccountStore.updatePlan`) and an account switch both take effect on the next
+            // poll with nothing to invalidate.
+            //
+            // The measurement wins whenever it has one to give (R5, D3): it comes from this
+            // account's own usage rather than from a third party's unvalidated table, and it needs
+            // no plan string at all, so it converts the dial even on a tier we do not recognise.
+            // The table is the fallback, and the table falls back to nil for an account added
+            // before this release or on a plan we cannot identify. Nil turns the conversion off
+            // entirely: the dial then shows the true session number rather than a figure derived
+            // from a guessed ratio (R3, D4).
+            reading.applyPlanRatio(measurement.ratio ?? PlanRatio.forTier(account.rateLimitTier))
+            latestUsage = reading
+
+            // Record what this plan reports, for the plans nobody here can see (R6). Emitted after
+            // the ratio is applied so the sample carries the number the dial actually used, and
+            // from the poll rather than from sign-in because the poll is the only thing guaranteed
+            // to run while a reporter has logging turned on - most of them will never sign in
+            // during the window they are recording. See `planSamplePayload` for what is and is not
+            // in it; `emitMilestone` is a no-op until the user opts in.
+            DiagnosticsLogger.shared.emitMilestone(
+                kind: Self.planSampleKind,
+                payload: Self.planSamplePayload(accountId: account.id,
+                                                rateLimitTier: account.rateLimitTier,
+                                                capabilities: account.capabilities,
+                                                billingType: account.billingType,
+                                                usage: reading,
+                                                measurement: measurement)
+            )
+
             lastSuccessfulFetch = Date()
             if consecutiveFailures != 0 { consecutiveFailures = 0 }
             if authFailed { authFailed = false }
@@ -603,6 +654,176 @@ struct UsageCreditsData: Equatable {
     }
 }
 
+/// How much of an account's WEEKLY capacity one 5-hour session window holds, per plan. The Session
+/// dial reads a session percentage, so a weekly percentage has to be divided by this number before
+/// the two can be compared at all: `weeklyRemaining / ratio` is "how much of a session the week's
+/// leftovers could still fill" (R1, KTD1). The reported bug was comparing them directly, which
+/// showed a user with a full 5h window and 6% of the week left a Session dial reading 6%.
+///
+/// WHERE THESE NUMBERS COME FROM, AND WHY THEY ARE NOT TRUSTED. They are read off a third-party
+/// reverse-engineering write-up at she-llac.com/claude-limits: Pro 550,000 / 5,000,000, Max 5x
+/// 3,300,000 / 41,666,700, Max 20x 11,000,000 / 83,333,300. Anthropic publishes none of this and
+/// we have not validated any of it. That same page contradicts itself - its prose claims about
+/// 9.1x for every tier while its own table implies 12.63x for Max 5x, so at most one of the two
+/// can be right. Read these as a starting value, never as confirmed capacities.
+///
+/// The correction path is measurement, not a better guess: once the ratio derived from the user's
+/// own observed usage clears its confidence bar it overrides this table (R5, D3).
+enum PlanRatio {
+    static let pro: Double = 0.1100          // 550,000 / 5,000,000
+    static let max5x: Double = 0.0792        // 3,300,000 / 41,666,700
+    static let max20x: Double = 0.1320       // 11,000,000 / 83,333,300
+
+    /// The ratio for a `rate_limit_tier` string, or nil when we cannot convert.
+    ///
+    /// Only these three strings map. Everything else is nil on purpose, and nil means the dial
+    /// shows the true session number with no conversion (R3, D4): Free because the source
+    /// publishes no Free capacities and inventing one would be the exact error this fixes (D2),
+    /// `auto_prepaid_tier_3` because it is an API billing tier rather than a plan, and any string
+    /// we have not seen because a guess would be a wrong number rather than a missing one. The
+    /// match is exact - a tier string that differs even in case is one we have not seen.
+    static func forTier(_ tier: String?) -> Double? {
+        switch tier {
+        case "default_claude_pro":     return pro
+        case "default_claude_max_5x":  return max5x
+        case "default_claude_max_20x": return max20x
+        default:                       return nil
+        }
+    }
+}
+
+/// A running measurement of one account's REAL 5h-over-weekly capacity ratio, taken from what that
+/// account actually consumes (R5, KTD4, KTD5, D3).
+///
+/// Why measure at all when `PlanRatio` already has a number: that table is a third party's reverse
+/// engineering, none of it is validated, and the page it came from contradicts itself. A wrong
+/// constant is silent forever - every account on that plan reads wrong and nothing ever says so.
+/// A ratio measured from the user's own account cannot fail that quietly: it either converges or
+/// it refuses to produce a number, and the refusal is itself the signal that something is wrong
+/// (D3). It also sidesteps plan detection completely, so an account whose `rate_limit_tier` string
+/// we have never seen can still get a converted dial once it has been watched for long enough.
+///
+/// THE MATHS. Both percentages are driven by the same spend, so over any stretch with no window
+/// reset, weekly points consumed divided by session points consumed IS the ratio. The two
+/// capacities cancel and neither ever has to be known.
+struct RatioMeasurement: Codable, Equatable {
+    /// The previous poll's reading, kept so the next one has something to difference against.
+    /// Percentages are REMAINING, matching `UsageData`, so consumption is previous minus current.
+    var lastSessionRemaining: Double
+    var lastSessionResetsAt: Date?
+    var lastWeeklyRemaining: Double
+    var lastWeeklyResetsAt: Date?
+    /// Percentage points consumed across every clean interval so far. These grow for the life of
+    /// the account and are never reset by a window rollover: a rollover invalidates the ONE
+    /// interval that straddles it, not the history in front of it (KTD4).
+    var sessionPointsConsumed: Double
+    var weeklyPointsConsumed: Double
+
+    /// Session points that must be accumulated before the measured ratio is allowed near the dial
+    /// (KTD5).
+    ///
+    /// THE ARITHMETIC, so this is a number someone can check rather than a number someone liked.
+    /// The API reports both percentages as whole integers, so a reading is a rounded value off by
+    /// up to half a point either way, uniformly: a standard deviation of 0.5 / sqrt(3) = 0.289
+    /// points. A consumed total is the difference of two such readings, so it carries
+    /// sqrt(2) x 0.289 = 0.41 points of error, and up to a full point at the extremes.
+    ///
+    /// The ratio is weekly-over-session. Error in the session total matters roughly eight times
+    /// less than error in the weekly total, because it enters scaled by the ratio itself (about
+    /// 0.12), so the error on the ratio is about 0.41 divided by the accumulated session points.
+    ///
+    /// What that error has to beat: the two CLOSEST published ratios are Pro at 0.1100 and Max 20x
+    /// at 0.1320. Telling those two apart needs the error inside half their gap.
+    ///
+    ///     gap       = 0.1320 - 0.1100 = 0.0220
+    ///     half gap  = 0.0110
+    ///     0.41 / S  < 0.0110   ->   S > 37.3
+    ///
+    /// So 38, the first whole number that clears it: 0.41 / 37 = 0.0111 still misses, 0.41 / 38 =
+    /// 0.0108 makes it. Below the bar the table value stands (AE9); at or above it the measurement
+    /// takes over (AE8).
+    ///
+    /// 38 is also reachable inside a single 5-hour window, which is what makes the arithmetic above
+    /// honest: consecutive clean intervals telescope to first reading minus last, so one unbroken
+    /// run really does carry only the two readings' worth of error the derivation assumes. A longer
+    /// run broken by rollovers pays that error once per unbroken stretch, so it is slightly noisier
+    /// than the bound - the plausible-range check below is what keeps that from reaching the dial.
+    static let confidenceBar: Double = 38
+
+    /// The band a measured ratio has to land in to be believed at all, easiest to read as how many
+    /// full 5-hour windows a week's capacity would hold: 0.5 is two windows a week, 0.01 is a
+    /// hundred. The published table sits between 7.6 windows (Max 20x) and 12.6 (Max 5x), so this
+    /// is deliberately loose. It is not a second opinion on the table - it is there to catch a
+    /// measurement that is not measuring anything.
+    ///
+    /// Two ways that happens. A3 may be false: if session and weekly weight models differently
+    /// there is no single ratio to find, and what comes out is arbitrary rather than merely
+    /// imprecise. Or the weekly simply never moved over the accumulated stretch, which yields a
+    /// ratio at or near zero and would divide the weekly remainder into an enormous number.
+    static let plausibleRange: ClosedRange<Double> = 0.01...0.5
+
+    /// The measured ratio, or nil while there is no reason to trust one. Nil is the normal state
+    /// for a long time after install, and the caller falls back to `PlanRatio` (D1).
+    var ratio: Double? {
+        guard sessionPointsConsumed >= Self.confidenceBar else { return nil }
+        let measured = weeklyPointsConsumed / sessionPointsConsumed
+        guard Self.plausibleRange.contains(measured) else { return nil }
+        return measured
+    }
+
+    /// Fold one poll's reading into the measurement and hand back the new state.
+    ///
+    /// The interval between two polls only counts when it is CLEAN: both windows are the same
+    /// windows as last time, judged by `resets_at`, and neither remainder has gone up. Anything
+    /// else replaces the stored sample and adds nothing (KTD4). A rollover recorded as consumption
+    /// would look like a whole window drained at once, and a rollover recorded as a negative would
+    /// subtract usage that really happened - both corrupt the totals permanently, which is why the
+    /// interval is discarded rather than repaired.
+    ///
+    /// Replacing the sample matters as much as not accumulating: without it the next poll would be
+    /// differenced against a reading from the window before last.
+    static func updated(from previous: RatioMeasurement?,
+                        sessionRemaining: Double,
+                        sessionResetsAt: Date?,
+                        weeklyRemaining: Double,
+                        weeklyResetsAt: Date?) -> RatioMeasurement {
+        let sample = RatioMeasurement(lastSessionRemaining: sessionRemaining,
+                                      lastSessionResetsAt: sessionResetsAt,
+                                      lastWeeklyRemaining: weeklyRemaining,
+                                      lastWeeklyResetsAt: weeklyResetsAt,
+                                      sessionPointsConsumed: previous?.sessionPointsConsumed ?? 0,
+                                      weeklyPointsConsumed: previous?.weeklyPointsConsumed ?? 0)
+
+        guard let previous,
+              sameWindow(previous.lastSessionResetsAt, sessionResetsAt),
+              sameWindow(previous.lastWeeklyResetsAt, weeklyResetsAt) else { return sample }
+
+        let sessionConsumed = previous.lastSessionRemaining - sessionRemaining
+        let weeklyConsumed = previous.lastWeeklyRemaining - weeklyRemaining
+        guard sessionConsumed >= 0, weeklyConsumed >= 0 else { return sample }
+
+        var accumulated = sample
+        accumulated.sessionPointsConsumed += sessionConsumed
+        accumulated.weeklyPointsConsumed += weeklyConsumed
+        return accumulated
+    }
+
+    /// Whether two reset times describe the same window.
+    ///
+    /// A missing time is never a match. That is the conservative reading and the necessary one:
+    /// with no `resets_at` there is no way to tell a rollover from ordinary use, so an account
+    /// whose API returns null reset times accumulates nothing at all and keeps the table value.
+    ///
+    /// Compared with a one-second tolerance rather than exact equality because the same instant
+    /// reaches us in four shapes (bare ISO, fractional ISO, epoch seconds, epoch milliseconds -
+    /// see `ResetDate`) and a sub-second difference between two of them is not a new window. A real
+    /// rollover moves this by hours, so the tolerance can never hide one.
+    private static func sameWindow(_ a: Date?, _ b: Date?) -> Bool {
+        guard let a, let b else { return false }
+        return abs(a.timeIntervalSince(b)) < 1
+    }
+}
+
 struct UsageData: Equatable {
     let weeklyRemaining: Double
     let weeklyResetDate: Date?
@@ -610,8 +831,13 @@ struct UsageData: Equatable {
     let sessionResetDate: Date?
     let modelUsages: [ModelUsage]
     let usageCredits: UsageCreditsData?
+    /// The active account's 5h-over-weekly capacity ratio, measured (`RatioMeasurement`) or off the
+    /// table (`PlanRatio`), or nil when the plan is unknown and nothing has been measured yet. Nil
+    /// disables the conversion entirely rather than substituting a guess (R3).
+    private(set) var planRatio: Double?
 
-    init(from response: UsageResponse, prepaidCredits: PrepaidCreditsResponse? = nil) {
+    init(from response: UsageResponse, prepaidCredits: PrepaidCreditsResponse? = nil, planRatio: Double? = nil) {
+        self.planRatio = planRatio
         let limits = response.limits
 
         // Session / weekly: prefer limits[] (newer shape), else the legacy per-field tiers.
@@ -650,29 +876,52 @@ struct UsageData: Equatable {
         usageCredits = UsageCreditsData.derive(spend: response.spend, prepaidCredits: prepaidCredits)
     }
 
-    /// Weekly-remaining floor (percent) below which the weekly limit is treated as the
-    /// near-term binding constraint. Matches the popover's red color line (batteryColor red
-    /// < 20) so a weekly in the red gates the Session value. See `sessionDisplayRemaining`.
-    static let weeklyGateFloor: Double = 20
-
-    /// True when the weekly limit is BOTH lower than the session AND in its low/red zone, so
-    /// the weekly - not the 5h session - is the wall the user hits next. Only then does the
-    /// displayed Session value defer to the weekly remainder, fixing the case where a
-    /// nearly-exhausted weekly still showed a high, unreachable session number. Above the
-    /// floor (a healthy week), or when the session is already the tighter limit, this is false
-    /// and the true session value is shown - so normal weeks are never down-rated.
-    var isSessionWeeklyLimited: Bool {
-        weeklyRemaining < sessionRemaining && weeklyRemaining < UsageData.weeklyGateFloor
+    /// Attach the ratio this reading will be displayed with, after the fact.
+    ///
+    /// Separate from `init` because the MEASURED ratio is derived from this very reading's own
+    /// numbers (R5): the reading has to exist before the ratio it gets shown with does. `init`
+    /// keeps its parameter for the table-only path and for tests that state a ratio outright.
+    mutating func applyPlanRatio(_ ratio: Double?) {
+        planRatio = ratio
     }
 
-    /// The Session value every surface DISPLAYS: the true 5h-session remaining, but capped to
-    /// the weekly remainder when the weekly limit binds (`isSessionWeeklyLimited`), so nothing
-    /// shows session headroom a near-exhausted weekly cannot support. Used by both the popover
-    /// dial and the menu-bar icons - they must never disagree about a number both label
-    /// "Session". Display-only: raw `sessionRemaining` stays untouched for the #31 session
-    /// run-out forecast and pace, which grade the real 5h window.
+    /// The weekly remainder expressed in SESSION units: how much of one 5-hour window the week's
+    /// leftovers could still fill, 0...100. nil when the plan ratio is unknown, because there is
+    /// then no honest way to state the weekly on the session's scale.
+    ///
+    /// This replaces a 20-point floor (`weeklyGateFloor`) that used to gate the old comparison.
+    /// Removing that floor is the point of this change, not a side effect: it only ever existed
+    /// because the old code compared a weekly PERCENTAGE against a session PERCENTAGE, which
+    /// means nothing, so it needed an arbitrary threshold to keep the nonsense contained. Once
+    /// both sides are in the same units the plain minimum is correct at every level and there is
+    /// nothing left for a threshold to protect against (R2).
+    var weeklyRemainingInSessionUnits: Double? {
+        // A non-positive ratio is not a ratio; guarding here also means a measured value that
+        // collapses to zero can never divide into an infinity that reaches the dial.
+        guard let planRatio, planRatio > 0 else { return nil }
+        return UsageData.clamp(weeklyRemaining / planRatio)
+    }
+
+    /// True when the converted weekly is the tighter of the two limits, so the weekly - not the
+    /// 5h session - is the wall the user hits next. The popover reads this for its "Limited by
+    /// weekly" caption and to suppress the session time arc.
+    ///
+    /// False whenever the plan ratio is unknown: with nothing to convert, claiming the weekly
+    /// binds would be a guess, and R3/D4 say show the true session number instead.
+    var isSessionWeeklyLimited: Bool {
+        guard let converted = weeklyRemainingInSessionUnits else { return false }
+        return converted < sessionRemaining
+    }
+
+    /// The Session value every surface DISPLAYS: the true 5h-session remaining, capped to what
+    /// the week's leftovers can actually fill, `min(sessionRemaining, weeklyRemaining / ratio)`
+    /// clamped to 0...100 (R1). With no ratio it is the raw session value, unconverted (R3).
+    /// Used by both the popover dial and the menu-bar icons - they must never disagree about a
+    /// number both label "Session". Display-only: raw `sessionRemaining` stays untouched for the
+    /// #31 session run-out forecast and pace, which grade the real 5h window.
     var sessionDisplayRemaining: Double {
-        isSessionWeeklyLimited ? weeklyRemaining : sessionRemaining
+        guard let converted = weeklyRemainingInSessionUnits else { return sessionRemaining }
+        return min(sessionRemaining, converted)
     }
 
     private static func clamp(_ value: Double) -> Double { max(0, min(100, value)) }
@@ -706,5 +955,94 @@ struct PrepaidCreditsResponse: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         amount = try? container.decode(Double.self, forKey: .amount)
         currency = try? container.decode(String.self, forKey: .currency)
+    }
+}
+
+// MARK: - Diagnostics: the plan sample
+
+extension UsageService {
+    /// The milestone kind for one poll's plan reading (R6).
+    ///
+    /// WHY THIS EXISTS. The only `rate_limit_tier` string anyone here has ever seen is
+    /// `default_claude_max_20x`, because that is the plan the developer is on. The Pro and Max 5x
+    /// strings in `PlanRatio.forTier` are copied from third-party code describing a DIFFERENT API,
+    /// and the ratios for those two plans are the least validated numbers in the app. A reporter on
+    /// one of those plans is the only way to confirm either: they turn on diagnostic logging, use
+    /// the app normally, export, and send back a file whose plan samples carry their real tier
+    /// string and enough readings to derive their real ratio.
+    ///
+    /// It rides the existing opt-in export and adds no second mechanism: `emitMilestone` does
+    /// nothing until the user turns diagnostic logging on, and every line it writes goes through
+    /// `SecretRedactor` before it is written or exported.
+    ///
+    /// `nonisolated` for the same reason as `planSamplePayload` below: a constant with nothing
+    /// behind it, read from tests that have no main actor.
+    nonisolated static let planSampleKind = "plan-sample"
+
+    /// One poll's reading, as the payload for `planSampleKind`.
+    ///
+    /// WHAT IS DELIBERATELY NOT HERE: the org name, the org uuid, and the account's address. The
+    /// question this answers is "what does this plan report and what is its real ratio", and none
+    /// of those three help answer it. The org name matters most: the organizations response returns
+    /// names shaped like "someone@gmail.com's Organization", so emitting it would put an address in
+    /// an exported file for every account that has never been renamed. `SecretRedactor` does catch
+    /// an address embedded mid-string - confirmed, and pinned by a test in `NoSecretsExportGateTests`
+    /// - but not emitting it at all is the guarantee, and the redactor is the backstop behind it.
+    ///
+    /// `account` is a one-way 8-character tag of the account's locally generated id, not the id
+    /// itself. Without something to tell readings apart, a user who switches between two accounts
+    /// exports one interleaved sequence and nobody can take a ratio from it. The tag identifies
+    /// nothing outside the install that wrote it: the id it hashes exists only in that install's
+    /// UserDefaults and is never sent anywhere.
+    ///
+    /// Both ratios are carried because they answer different questions. `applied_ratio` is what the
+    /// dial actually divided by, so a reporter's screenshot can be reproduced from the file.
+    /// `measured_ratio` is what this account's own usage says the ratio is, which is the number
+    /// that would correct the table (R5, D3), and it stays null until the measurement clears its
+    /// confidence bar.
+    ///
+    /// `nonisolated` because it reads nothing but its arguments, the same shape as
+    /// `AuthManager.selectOrg` and `isPlaceholderEmail`: a pure rule that can be tested without a
+    /// service, a store or a main actor behind it.
+    nonisolated static func planSamplePayload(accountId: UUID,
+                                              rateLimitTier: String?,
+                                              capabilities: [String]?,
+                                              billingType: String?,
+                                              usage: UsageData,
+                                              measurement: RatioMeasurement) -> [String: Any] {
+        // Reset times go out as ISO 8601 strings, which is how a reader spots the window rollovers
+        // that make an interval unusable (KTD4) - the same rule the measurement itself applies.
+        // Built here rather than shared as a static: `ISO8601DateFormatter` is not Sendable, this
+        // runs once every couple of minutes, and a local costs nothing next to the HTTP round trip
+        // that produced the reading.
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+        return [
+            "account": SecretRedactor.sha256Prefix(accountId.uuidString),
+            "rate_limit_tier": jsonOrNull(rateLimitTier),
+            "capabilities": jsonOrNull(capabilities),
+            "billing_type": jsonOrNull(billingType),
+            "session_remaining": usage.sessionRemaining,
+            "session_resets_at": jsonOrNull(usage.sessionResetDate.map(iso.string(from:))),
+            "weekly_remaining": usage.weeklyRemaining,
+            "weekly_resets_at": jsonOrNull(usage.weeklyResetDate.map(iso.string(from:))),
+            "session_points_consumed": measurement.sessionPointsConsumed,
+            "weekly_points_consumed": measurement.weeklyPointsConsumed,
+            "measured_ratio": jsonOrNull(measurement.ratio),
+            "applied_ratio": jsonOrNull(usage.planRatio)
+        ]
+    }
+
+    /// JSON `null` for an absent value, rather than leaving the key out.
+    ///
+    /// Absence has to be written down. A reader deriving a ratio from these lines needs to tell
+    /// "this account has no measured ratio yet" apart from "this build did not emit the field",
+    /// and a missing key cannot say which. `JSONSerialization` rejects a Swift nil and accepts
+    /// `NSNull`, and `DiagnosticsLogger.serialize` degrades the WHOLE line to `serialize-failed`
+    /// if any value in the payload is one it cannot encode - so a Date or a bare nil here would
+    /// silently throw away the sample rather than fail loudly.
+    nonisolated private static func jsonOrNull<T>(_ value: T?) -> Any {
+        if let value { return value }
+        return NSNull()
     }
 }

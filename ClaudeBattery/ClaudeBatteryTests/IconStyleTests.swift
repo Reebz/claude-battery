@@ -71,8 +71,13 @@ final class IconStyleTests: XCTestCase {
     /// their icons must come out identical. A renderer that slipped back to raw `sessionRemaining`
     /// re-opens the reported mismatch: 51 in the menu bar next to 15 in the popover.
     func testWeeklyLimited_allRenderersDrawTheCappedSession() {
-        let high = RenderStateTests.makeUsage(sessionUtilization: 20, weeklyUtilization: 95) // session 80, weekly 5
-        let low = RenderStateTests.makeUsage(sessionUtilization: 92, weeklyUtilization: 95)  // session 8,  weekly 5
+        // Weekly 5 on a Max 5x ratio is 63.1% of a session, so both sessions above it collapse
+        // onto that one displayed value. Without a plan ratio there is nothing to convert and no
+        // cap happens at all, which is why the fixtures carry one.
+        let high = RenderStateTests.makeUsage(sessionUtilization: 20, weeklyUtilization: 95,
+                                              planRatio: PlanRatio.max5x) // session 80, weekly 5
+        let low = RenderStateTests.makeUsage(sessionUtilization: 30, weeklyUtilization: 95,
+                                             planRatio: PlanRatio.max5x)  // session 70, weekly 5
 
         XCTAssertTrue(high.isSessionWeeklyLimited)
         XCTAssertTrue(low.isSessionWeeklyLimited)
@@ -100,9 +105,14 @@ final class IconStyleTests: XCTestCase {
     /// five styles draw the weekly into the same image, so a different weekly always changes the
     /// bytes even when the session is drawn correctly.
     func testHealthyWeekly_renderersStillShowTheRawSession() {
-        let high = RenderStateTests.makeUsage(sessionUtilization: 20, weeklyUtilization: 40) // session 80, weekly 60
-        let low = RenderStateTests.makeUsage(sessionUtilization: 92, weeklyUtilization: 40)  // session 8,  weekly 60
-        let aboveWeekly = RenderStateTests.makeUsage(sessionUtilization: 39, weeklyUtilization: 40) // session 61, weekly 60
+        // All three carry a plan ratio, so the cap is live and genuinely declines to fire: 60% of
+        // a Max 5x week is more than a full session, so it caps nothing.
+        let high = RenderStateTests.makeUsage(sessionUtilization: 20, weeklyUtilization: 40,
+                                              planRatio: PlanRatio.max5x) // session 80, weekly 60
+        let low = RenderStateTests.makeUsage(sessionUtilization: 92, weeklyUtilization: 40,
+                                             planRatio: PlanRatio.max5x)  // session 8,  weekly 60
+        let aboveWeekly = RenderStateTests.makeUsage(sessionUtilization: 39, weeklyUtilization: 40,
+                                                     planRatio: PlanRatio.max5x) // session 61, weekly 60
 
         XCTAssertFalse(high.isSessionWeeklyLimited)
         XCTAssertFalse(low.isSessionWeeklyLimited)

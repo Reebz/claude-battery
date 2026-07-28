@@ -408,4 +408,93 @@ final class AccountStoreTests: XCTestCase {
         XCTAssertNil(account.organizationName, "a missing organizationName key decodes as nil")
         XCTAssertEqual(account.displayName, "old@x.com", "legacy account still renders by email")
     }
+
+    // MARK: - Codable migration: stored Account JSON without the plan fields (S1, R4, AE7)
+
+    func testAccountDecodesStoredJSONWithoutPlanFields() throws {
+        // Everyone upgrading to this release has accounts on disk written before the plan fields
+        // existed. They must load, not throw, and read as "plan unknown" so the dial falls back to
+        // the true session number instead of converting on something invented (R3).
+        let stored = """
+        {"id":"\(UUID().uuidString)","email":"old@x.com","sessionKey":"sk","organizationId":"org-1","addedDate":0,"notificationThreshold":20,"didNotifyBelowThreshold":false}
+        """.data(using: .utf8)!
+        let account = try JSONDecoder().decode(Account.self, from: stored)
+        XCTAssertNil(account.rateLimitTier, "a missing rateLimitTier key decodes as nil")
+        XCTAssertNil(account.capabilities, "a missing capabilities key decodes as nil")
+    }
+
+    func testAccountPlanFieldsSurviveAStorageRoundTrip() {
+        let storage = makeStorage()
+        let account = Account(email: "me@x.com", sessionKey: "sk", organizationId: "org-1",
+                              rateLimitTier: "default_claude_max_20x", capabilities: ["claude_max", "chat"])
+
+        storage.saveAccounts([account])
+
+        let read = storage.readAccounts()
+        XCTAssertEqual(read.first?.rateLimitTier, "default_claude_max_20x",
+                       "the plan has to survive a relaunch, or the dial converts only until the app quits")
+        XCTAssertEqual(read.first?.capabilities, ["claude_max", "chat"])
+    }
+
+    // MARK: - updatePlan (S1, R4)
+
+    @MainActor
+    func testUpdatePlanWritesAndPersistsTheNewPlan() {
+        let storage = makeStorage()
+        let store = AccountStore(storage: storage)
+        let account = makeAccount()
+        _ = store.addAccount(account)
+
+        store.updatePlan(account.id, rateLimitTier: "default_claude_max_5x", capabilities: ["claude_max"])
+
+        XCTAssertEqual(store.accounts.first?.rateLimitTier, "default_claude_max_5x")
+        XCTAssertEqual(storage.readAccounts().first?.rateLimitTier, "default_claude_max_5x",
+                       "written through to storage, not only to the in-memory copy")
+    }
+
+    @MainActor
+    func testUpdatePlanWithNilClearsAStoredPlan() {
+        // D4: absence is information. A tier we can no longer see must stop converting the dial
+        // rather than leave the last known plan in place.
+        let storage = makeStorage()
+        let store = AccountStore(storage: storage)
+        let account = Account(email: "me@x.com", sessionKey: "sk", organizationId: "org-1",
+                              rateLimitTier: "default_claude_max_20x", capabilities: ["claude_max"])
+        _ = store.addAccount(account)
+
+        store.updatePlan(account.id, rateLimitTier: nil, capabilities: nil)
+
+        XCTAssertNil(store.accounts.first?.rateLimitTier, "nil overwrites; it is not read as no news")
+        XCTAssertNil(store.accounts.first?.capabilities)
+    }
+
+    @MainActor
+    func testUpdatePlanForAnUnknownIdChangesNothing() {
+        let storage = makeStorage()
+        let store = AccountStore(storage: storage)
+        let account = Account(email: "me@x.com", sessionKey: "sk", organizationId: "org-1",
+                              rateLimitTier: "default_claude_pro")
+        _ = store.addAccount(account)
+
+        store.updatePlan(UUID(), rateLimitTier: "default_claude_max_20x", capabilities: nil)
+
+        XCTAssertEqual(store.accounts.count, 1)
+        XCTAssertEqual(store.accounts.first?.rateLimitTier, "default_claude_pro",
+                       "a write aimed at an account that is not stored must not land on another one")
+    }
+
+    @MainActor
+    func testUpdatePlanLeavesCredentialsAlone() {
+        let storage = makeStorage()
+        let store = AccountStore(storage: storage)
+        let account = Account(email: "me@x.com", sessionKey: "sk-real", organizationId: "org-1",
+                              allCookieHeader: "sessionKey=sk-real; __cf_bm=cf")
+        _ = store.addAccount(account)
+
+        store.updatePlan(account.id, rateLimitTier: "default_claude_max_20x", capabilities: ["claude_max"])
+
+        XCTAssertEqual(store.accounts.first?.sessionKey, "sk-real")
+        XCTAssertEqual(store.accounts.first?.allCookieHeader, "sessionKey=sk-real; __cf_bm=cf",
+                       "a plan write touches two display fields and no credentials")
+    }
 }

@@ -151,6 +151,57 @@ class AccountStore: ObservableObject {
         return pairs.joined(separator: "; ")
     }
 
+    /// Rewrite an account's stored plan from a fresh organizations response. Called on every
+    /// re-auth route and not only at add time, because a user can change plan between two sign-ins
+    /// and a stale tier would convert the Session dial against capacities the account no longer has
+    /// (R4).
+    ///
+    /// A nil OVERWRITES a stored value rather than being skipped as "no news". Absence is real
+    /// information - the plan no longer maps, or the field has gone from the response - and a nil
+    /// tier makes the dial show the true session number with no conversion, which is the deliberate
+    /// answer whenever the app is unsure (D4). Keeping the old string would keep converting on a
+    /// plan we can no longer see.
+    ///
+    /// No cookie-jar work here, unlike `updateSessionKey`: this writes three display fields and
+    /// touches no credentials, so it is safe to call in either order around a jar-priming write.
+    ///
+    /// `billingType` is defaulted because nothing reads it for the dial - it exists so the
+    /// diagnostics export can carry it (R6) - and a caller with no organizations response in hand
+    /// has no honest value to pass. Every sign-in route has the org and passes it.
+    func updatePlan(_ id: UUID, rateLimitTier: String?, capabilities: [String]?, billingType: String? = nil) {
+        guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
+        accounts[index].rateLimitTier = rateLimitTier
+        accounts[index].capabilities = capabilities
+        accounts[index].billingType = billingType
+        persist()
+    }
+
+    /// Store the account's running capacity measurement (R5). Written on every successful poll,
+    /// because the totals are built up over many polls and have to survive a relaunch: a version
+    /// that started from nothing each time the app quit would hand a user who quits daily a
+    /// measurement that never gets anywhere. That is one small UserDefaults write every two
+    /// minutes, the same shape of write `updateDidNotify` already makes from a poll.
+    ///
+    /// Takes the whole value rather than a delta so the accumulation rules all live in one pure
+    /// function (`RatioMeasurement.updated`) that can be tested without a store behind it.
+    func updateRatioMeasurement(_ id: UUID, _ measurement: RatioMeasurement) {
+        guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
+        accounts[index].ratioMeasurement = measurement
+        persist()
+    }
+
+    /// Rewrite a stored entry's email label. The plain setter, matching `updatePlan` and
+    /// `updateNickname`; the rule about WHICH labels may be rewritten lives in
+    /// `AuthManager.repairPlaceholderEmail`, because it needs the sign-in that found the address.
+    ///
+    /// Leaves `nickname` alone. `Account.displayName` is `nickname ?? email`, so an account the user
+    /// has renamed keeps showing that name and only the label underneath it changes.
+    func updateEmail(_ id: UUID, _ email: String) {
+        guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
+        accounts[index].email = email
+        persist()
+    }
+
     func updateNickname(_ id: UUID, _ nickname: String) {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
         let trimmed = String(nickname.trimmingCharacters(in: .whitespaces).prefix(30))

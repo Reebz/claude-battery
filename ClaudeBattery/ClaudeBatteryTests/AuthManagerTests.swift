@@ -2829,6 +2829,571 @@ final class AuthManagerTests: XCTestCase {
                        "and the prime really did happen afterwards, so the assertion above is not vacuous")
     }
 
+    // MARK: - Plan tier: decoding the organizations response (S1, R4)
+    // `rate_limit_tier` is the only field on this response that names a plan, and the decoder that
+    // reads it is a plain JSONDecoder with no snake-case strategy, so these tests are what stands
+    // between a hand-written CodingKey and a field that silently decodes as nil forever.
+
+    func testOrganization_decodesPlanTierAndCapabilities() throws {
+        let json = #"""
+        {"uuid":"org-1","rate_limit_tier":"default_claude_max_20x","capabilities":["claude_max","chat"]}
+        """#.data(using: .utf8)!
+
+        let org = try JSONDecoder().decode(Organization.self, from: json)
+
+        XCTAssertEqual(org.rateLimitTier, "default_claude_max_20x",
+                       "the wire key is snake_case and this decoder does not convert it, so it must be mapped by hand")
+        XCTAssertEqual(org.capabilities, ["claude_max", "chat"])
+    }
+
+    func testOrganization_decodesPrepaidApiOrgShape() throws {
+        // The second shape seen live: an API org pays per-use and has no chat plan at all.
+        let json = #"""
+        {"uuid":"org-2","rate_limit_tier":"auto_prepaid_tier_3","capabilities":["api"],"billing_type":"prepaid"}
+        """#.data(using: .utf8)!
+
+        let org = try JSONDecoder().decode(Organization.self, from: json)
+
+        XCTAssertEqual(org.rateLimitTier, "auto_prepaid_tier_3")
+        XCTAssertEqual(org.capabilities, ["api"])
+        XCTAssertEqual(org.billingType, "prepaid",
+                       "billing_type still decodes; it is the payment method, which is why it cannot name the plan")
+    }
+
+    func testOrganization_missingPlanFieldsDecodeAsNilNotAThrow() throws {
+        // A Free org carries neither claude_pro nor claude_max, and every existing test fixture in
+        // this file omits both fields entirely. Neither may be treated as required.
+        let json = #"{"uuid":"org-3"}"#.data(using: .utf8)!
+
+        let org = try JSONDecoder().decode(Organization.self, from: json)
+
+        XCTAssertNil(org.rateLimitTier, "an absent tier is a plan we cannot see, not a decode failure")
+        XCTAssertNil(org.capabilities)
+    }
+
+    // MARK: - Plan tier: both sign-in routes persist it (S1, R4)
+
+    @MainActor
+    func testManualSignIn_singleOrgStoresPlanTier() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = #"""
+        [{"uuid":"org-manual-1","rate_limit_tier":"default_claude_max_20x","capabilities":["claude_max","chat"]}]
+        """#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        _ = await auth.manualSignIn("sessionKey=sk-manual; __cf_bm=cf-xyz")
+
+        XCTAssertEqual(auth.accountStore.accounts.first?.rateLimitTier, "default_claude_max_20x",
+                       "the paste route must store the plan, or the dial has nothing to convert with")
+        XCTAssertEqual(auth.accountStore.accounts.first?.capabilities, ["claude_max", "chat"])
+    }
+
+    @MainActor
+    func testFetchOrganizationId_singleOrgStoresPlanTier() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = #"""
+        [{"uuid":"org-browser-1","rate_limit_tier":"default_claude_max_5x","capabilities":["claude_max","chat"]}]
+        """#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        auth.pendingSessionKey = "sk-browser"
+        auth.pendingCookieHeader = "sessionKey=sk-browser; __cf_bm=cf-1"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertEqual(auth.accountStore.accounts.first?.rateLimitTier, "default_claude_max_5x",
+                       "the browser route must store the plan too; the two routes cannot disagree")
+        XCTAssertEqual(auth.accountStore.accounts.first?.capabilities, ["claude_max", "chat"])
+    }
+
+    @MainActor
+    func testManualSignIn_addingAnOrgWithNoTierStoresNil() async {
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org-free-1"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        _ = await auth.manualSignIn("sessionKey=sk-free; __cf_bm=cf")
+
+        XCTAssertEqual(auth.accountStore.accounts.count, 1, "a plan-less org still signs in")
+        XCTAssertNil(auth.accountStore.accounts.first?.rateLimitTier,
+                     "no tier on the response means no tier stored, and the dial falls back (R3)")
+    }
+
+    // MARK: - Plan tier: re-auth refreshes it (S1, R4)
+    // A user can change plan between sign-ins, so a stored tier is only as good as the last one.
+
+    @MainActor
+    func testManualSignIn_reAuthUpdatesAChangedPlanTier() async {
+        let auth = makeAuthManager()
+        let existing = Account(email: "me@x.com", sessionKey: "sk-old", organizationId: "org-a",
+                               rateLimitTier: "default_claude_pro", capabilities: ["claude_pro", "chat"],
+                               allCookieHeader: "sessionKey=sk-old; __cf_bm=cf-a")
+        XCTAssertTrue(auth.accountStore.addAccount(existing))
+        mockSession.responseData = #"""
+        [{"uuid":"org-a","rate_limit_tier":"default_claude_max_5x","capabilities":["claude_max","chat"]}]
+        """#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        _ = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
+
+        XCTAssertEqual(auth.accountStore.accounts.count, 1, "a re-auth adds no entry")
+        XCTAssertEqual(auth.accountStore.accounts.first?.rateLimitTier, "default_claude_max_5x",
+                       "an upgrade must land on re-auth, not wait for a remove-and-re-add")
+        XCTAssertEqual(auth.accountStore.accounts.first?.capabilities, ["claude_max", "chat"])
+    }
+
+    @MainActor
+    func testFetchOrganizationId_reAuthUpdatesAChangedPlanTier() async {
+        let auth = makeAuthManager()
+        let existing = Account(email: "me@x.com", sessionKey: "sk-old", organizationId: "org-a",
+                               rateLimitTier: "default_claude_pro",
+                               allCookieHeader: "sessionKey=sk-old; __cf_bm=cf-a")
+        XCTAssertTrue(auth.accountStore.addAccount(existing))
+        mockSession.responseData = #"""
+        [{"uuid":"org-a","rate_limit_tier":"default_claude_max_20x","capabilities":["claude_max","chat"]}]
+        """#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        auth.pendingSessionKey = "sk-fresh"
+        auth.pendingCookieHeader = "sessionKey=sk-fresh; __cf_bm=cf-fresh"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertEqual(auth.accountStore.accounts.count, 1)
+        XCTAssertEqual(auth.accountStore.accounts.first?.rateLimitTier, "default_claude_max_20x",
+                       "the browser re-auth branch refreshes the plan alongside the credentials")
+    }
+
+    @MainActor
+    func testManualSignIn_reAuthWithNoTierClearsAStoredOne() async {
+        // D4 in storage: a response that no longer names a plan must not leave the old string in
+        // place. Keeping it would keep converting the dial against capacities the account may have
+        // lost; clearing it falls back to the true session number, which is the safe direction.
+        let auth = makeAuthManager()
+        let existing = Account(email: "me@x.com", sessionKey: "sk-old", organizationId: "org-a",
+                               rateLimitTier: "default_claude_max_20x", capabilities: ["claude_max"],
+                               allCookieHeader: "sessionKey=sk-old; __cf_bm=cf-a")
+        XCTAssertTrue(auth.accountStore.addAccount(existing))
+        mockSession.responseData = #"[{"uuid":"org-a"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        _ = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
+
+        XCTAssertNil(auth.accountStore.accounts.first?.rateLimitTier,
+                     "a tier that is no longer reported must be dropped, not kept")
+        XCTAssertNil(auth.accountStore.accounts.first?.capabilities)
+    }
+
+    @MainActor
+    func testFetchOrganizationId_allStored_refreshesEveryEntrysPlanTier() async {
+        // The multi-org repair route writes several entries in one sign-in, and each one takes ITS
+        // OWN org's tier - not the first org's, which is the mistake a shared loop invites.
+        let auth = makeAuthManager()
+        for uuid in ["org-a", "org-b"] {
+            let acct = Account(email: "me@x.com", sessionKey: "sk-\(uuid)-old", organizationId: uuid,
+                               rateLimitTier: "default_claude_pro",
+                               allCookieHeader: "sessionKey=sk-\(uuid)-old; __cf_bm=cf-\(uuid)")
+            XCTAssertTrue(auth.accountStore.addAccount(acct))
+        }
+        mockSession.responseData = #"""
+        [{"uuid":"org-a","rate_limit_tier":"default_claude_max_5x"},
+         {"uuid":"org-b","rate_limit_tier":"default_claude_max_20x"}]
+        """#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        auth.pendingSessionKey = "sk-fresh"
+        auth.pendingCookieHeader = "sessionKey=sk-fresh; __cf_bm=cf-fresh"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.organizationId == "org-a" }?.rateLimitTier,
+                       "default_claude_max_5x")
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.organizationId == "org-b" }?.rateLimitTier,
+                       "default_claude_max_20x",
+                       "each entry takes its own org's tier, not whichever org came first")
+    }
+
+    @MainActor
+    func testAddOrReactivateWebViewAccount_siblingRepairAlsoRefreshesItsPlanTier() async {
+        // The browser picker's tail: repairing a sibling's credentials without its plan would leave
+        // a refreshed account converting on a stale tier.
+        let auth = makeAuthManager()
+        let a = Account(email: "me@x.com", sessionKey: "sk-a-old", organizationId: "org-a",
+                        rateLimitTier: "default_claude_pro",
+                        allCookieHeader: "sessionKey=sk-a-old; __cf_bm=cf-a")
+        _ = auth.accountStore.addAccount(a)
+        let b = Account(email: "me@x.com", sessionKey: "sk-b-old", organizationId: "org-b",
+                        rateLimitTier: "default_claude_pro",
+                        allCookieHeader: "sessionKey=sk-b-old; __cf_bm=cf-b")
+        _ = auth.accountStore.addAccount(b)
+        let orgs = [
+            Organization(uuid: "org-a", name: nil, billingType: nil, emailAddress: nil,
+                         rateLimitTier: "default_claude_max_5x", capabilities: ["claude_max"]),
+            Organization(uuid: "org-b", name: nil, billingType: nil, emailAddress: nil,
+                         rateLimitTier: "default_claude_max_20x", capabilities: ["claude_max"])
+        ]
+
+        let wrote = auth.addOrReactivateWebViewAccount(org: orgs[0], orgs: orgs, sessionKey: "sk-fresh",
+                                                       cookieHeader: "sessionKey=sk-fresh; __cf_bm=cf-fresh",
+                                                       email: "me@x.com")
+
+        XCTAssertTrue(wrote)
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.id == a.id }?.rateLimitTier,
+                       "default_claude_max_5x", "the picked entry's plan is refreshed")
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.id == b.id }?.rateLimitTier,
+                       "default_claude_max_20x", "and so is the sibling's, from the sibling's own org")
+    }
+
+    @MainActor
+    func testCompleteManualSignIn_pickingStoredOrg_refreshesSiblingPlanTier() async {
+        // The paste-box picker's tail, the manual twin of the test above.
+        let auth = makeAuthManager()
+        for uuid in ["org-a", "org-b"] {
+            let acct = Account(email: "me@x.com", sessionKey: "sk-\(uuid)-old", organizationId: uuid,
+                               rateLimitTier: "default_claude_pro",
+                               allCookieHeader: "sessionKey=sk-\(uuid)-old; __cf_bm=cf-\(uuid)")
+            XCTAssertTrue(auth.accountStore.addAccount(acct))
+        }
+        // Three orgs with one un-stored, so the route needs a pick rather than reporting all-stored.
+        mockSession.responseData = #"""
+        [{"uuid":"org-a","rate_limit_tier":"default_claude_max_5x"},
+         {"uuid":"org-b","rate_limit_tier":"default_claude_max_20x"},
+         {"uuid":"org-c","rate_limit_tier":"default_claude_pro"}]
+        """#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        guard case .needsOrgChoice(let choices) = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh") else {
+            return XCTFail("three orgs with one un-stored must ask the user to choose")
+        }
+
+        _ = auth.completeManualSignIn(org: choices[0])
+
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.organizationId == "org-a" }?.rateLimitTier,
+                       "default_claude_max_5x", "the picked entry's plan is refreshed")
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.organizationId == "org-b" }?.rateLimitTier,
+                       "default_claude_max_20x", "and the sibling repaired by the same pick takes its own")
+    }
+
+    @MainActor
+    func testManualSignIn_allOrgsStored_refreshesEveryEntrysPlanTier() async {
+        // The manual all-already-stored branch, the fourth and last repair route.
+        let auth = makeAuthManager()
+        for uuid in ["org-a", "org-b"] {
+            let acct = Account(email: "me@x.com", sessionKey: "sk-\(uuid)-old", organizationId: uuid,
+                               rateLimitTier: "default_claude_pro",
+                               allCookieHeader: "sessionKey=sk-\(uuid)-old; __cf_bm=cf-\(uuid)")
+            XCTAssertTrue(auth.accountStore.addAccount(acct))
+        }
+        mockSession.responseData = #"""
+        [{"uuid":"org-a","rate_limit_tier":"default_claude_max_5x"},
+         {"uuid":"org-b","rate_limit_tier":"default_claude_max_20x"}]
+        """#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        _ = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
+
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.organizationId == "org-a" }?.rateLimitTier,
+                       "default_claude_max_5x")
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.organizationId == "org-b" }?.rateLimitTier,
+                       "default_claude_max_20x")
+    }
+
+    // MARK: - Real account names (S6, R7)
+    // `email_address` is absent from the organizations response entirely - two live probes - so every
+    // branch of `extractEmail` returned nil and every account on every install was labelled
+    // "Account 1", "Account 2". The address comes from `GET /api/account` now, on both sign-in
+    // routes, and a re-auth replaces the placeholder an existing user is already carrying.
+
+    /// Stub the `/api/account` body without disturbing the organizations response the test set.
+    /// `MockHTTPSession` matches an override by substring and no other path the app calls contains
+    /// this one. `email: nil` gives a well-formed body with the field missing, which is a different
+    /// case from a non-200 and is worth being able to write on its own.
+    private func stubAccountEndpoint(email: String?, statusCode: Int = 200) {
+        let body = email.map { #"{"uuid":"acct-1","email_address":"\#($0)"}"# } ?? #"{"uuid":"acct-1"}"#
+        mockSession.urlOverrides["/api/account"] = (body.data(using: .utf8)!, statusCode)
+    }
+
+    func testIsPlaceholderEmail_matchesOnlyTheAppsOwnLabels() {
+        // The whole safety rule behind the repair: match what the app itself writes, nothing else.
+        XCTAssertTrue(AuthManager.isPlaceholderEmail("Account 1"))
+        XCTAssertTrue(AuthManager.isPlaceholderEmail("Account 12"), "the count is not capped at one digit")
+        XCTAssertTrue(AuthManager.isPlaceholderEmail(""), "an empty label renders as nothing at all")
+        XCTAssertTrue(AuthManager.isPlaceholderEmail("  "))
+        XCTAssertFalse(AuthManager.isPlaceholderEmail("me@x.com"), "a real address is never overwritten")
+        XCTAssertFalse(AuthManager.isPlaceholderEmail("account 1"), "the app writes a capital A")
+        XCTAssertFalse(AuthManager.isPlaceholderEmail("Account"), "no number is not the app's label")
+        XCTAssertFalse(AuthManager.isPlaceholderEmail("Account x"))
+        XCTAssertFalse(AuthManager.isPlaceholderEmail("Accountant 2"))
+        XCTAssertFalse(AuthManager.isPlaceholderEmail("Account 1 (work)"),
+                       "anything a user could have typed stays theirs")
+    }
+
+    @MainActor
+    func testManualSignIn_labelsANewAccountWithTheAddressFromTheAccountEndpoint() async {
+        // AE11 on the paste route. The org body carries no address, which is what production looks
+        // like, so before this change the account was stored as "Account 1".
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org-new"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: "real@example.com")
+
+        _ = await auth.manualSignIn("sessionKey=sk-paste; __cf_bm=cf")
+
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "real@example.com",
+                       "the stored label is the real address, not the positional placeholder")
+        XCTAssertEqual(auth.accountStore.accounts.first?.displayName, "real@example.com")
+        let accountRequests = mockSession.capturedRequests.filter { $0.url?.path == "/api/account" }
+        XCTAssertEqual(accountRequests.count, 1,
+                       "exactly one extra request per sign-in, and it never runs on the poll (KTD7)")
+    }
+
+    @MainActor
+    func testFetchOrganizationId_labelsANewAccountWithTheAddressFromTheAccountEndpoint() async {
+        // AE11 on the browser route. The two routes cannot disagree about what an account is called.
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org-new"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: "browser@example.com")
+        auth.pendingSessionKey = "sk-browser"
+        auth.pendingCookieHeader = "sessionKey=sk-browser; __cf_bm=cf-1"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "browser@example.com")
+        XCTAssertEqual(auth.loginState, .idle, "and the sign-in finished normally")
+    }
+
+    @MainActor
+    func testManualSignIn_accountEndpointWinsOverTheOrgBody() async {
+        // Order matters: `/api/account` is the field that actually exists today, so it is asked
+        // first and the org-body scan is only the fallback underneath it.
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org-1","email_address":"from-org@example.com"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: "from-account@example.com")
+
+        _ = await auth.manualSignIn("sessionKey=sk-x; __cf_bm=cf")
+
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "from-account@example.com")
+    }
+
+    @MainActor
+    func testManualSignIn_accountEndpointFailureFallsBackToTheOrgBody() async {
+        // The fallback is kept rather than deleted with the bug it failed to catch: if `/api/account`
+        // ever changes shape, an org body that does carry an address must still be used.
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org-1","email_address":"from-org@example.com"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: nil, statusCode: 500)
+
+        _ = await auth.manualSignIn("sessionKey=sk-x; __cf_bm=cf")
+
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "from-org@example.com")
+    }
+
+    @MainActor
+    func testManualSignIn_accountEndpointFailureStillSignsIn() async {
+        // The lookup decides a label and nothing else, so its failure must cost the label and not
+        // the sign-in.
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org-1"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: nil, statusCode: 403)
+
+        let result = await auth.manualSignIn("sessionKey=sk-x; __cf_bm=cf")
+
+        XCTAssertEqual(result, .success("Account 1", refreshedCount: 0),
+                       "a cosmetic lookup failing must not turn a good paste into an error")
+        XCTAssertEqual(auth.accountStore.accounts.count, 1)
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "Account 1",
+                       "and it falls back to the placeholder it always used")
+    }
+
+    @MainActor
+    func testFetchOrganizationId_accountEndpointFailureStillSignsIn() async {
+        // The browser twin. A 403 here is one endpoint refusing, not the credentials being bad, and
+        // the sign-in that just succeeded must not be reported as failed.
+        let auth = makeAuthManager()
+        mockSession.responseData = #"[{"uuid":"org-1"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: nil, statusCode: 403)
+        auth.pendingSessionKey = "sk-browser"
+        auth.pendingCookieHeader = "sessionKey=sk-browser; __cf_bm=cf-1"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertEqual(auth.accountStore.accounts.count, 1)
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "Account 1")
+        XCTAssertEqual(auth.loginState, .idle, "no error state from a failed name lookup")
+    }
+
+    @MainActor
+    func testManualSignIn_reAuthRepairsAStoredPlaceholder() async {
+        // AE12 on the paste route. This is what makes the fix reach people who already signed in:
+        // without it, only accounts added after this release would ever get a real name.
+        let auth = makeAuthManager()
+        let existing = Account(email: "Account 2", sessionKey: "sk-old", organizationId: "org-a",
+                               allCookieHeader: "sessionKey=sk-old; __cf_bm=cf-a")
+        XCTAssertTrue(auth.accountStore.addAccount(existing))
+        mockSession.responseData = #"[{"uuid":"org-a"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: "repaired@example.com")
+
+        let result = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
+
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "repaired@example.com",
+                       "re-authenticating an account named Account 2 replaces the placeholder")
+        XCTAssertEqual(auth.accountStore.accounts.count, 1, "a repair adds no entry")
+        XCTAssertEqual(result, .success("repaired@example.com", refreshedCount: 1),
+                       "the confirmation prints the repaired label, not the placeholder it just replaced")
+    }
+
+    @MainActor
+    func testFetchOrganizationId_reAuthRepairsAStoredPlaceholder() async {
+        // AE12 on the browser route.
+        let auth = makeAuthManager()
+        let existing = Account(email: "Account 1", sessionKey: "sk-old", organizationId: "org-a",
+                               allCookieHeader: "sessionKey=sk-old; __cf_bm=cf-a")
+        XCTAssertTrue(auth.accountStore.addAccount(existing))
+        mockSession.responseData = #"[{"uuid":"org-a"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: "repaired@example.com")
+        auth.pendingSessionKey = "sk-fresh"
+        auth.pendingCookieHeader = "sessionKey=sk-fresh; __cf_bm=cf-fresh"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "repaired@example.com")
+        XCTAssertEqual(auth.accountStore.accounts.first?.sessionKey, "sk-fresh",
+                       "the credential refresh this route always did is untouched")
+    }
+
+    @MainActor
+    func testFetchOrganizationId_allStored_repairsEveryPlaceholderLabel() async {
+        // The all-already-stored branch is the route a multi-org existing user actually takes, and
+        // it returns before the add path, so it needs the repair of its own.
+        let auth = makeAuthManager()
+        for (index, uuid) in ["org-a", "org-b"].enumerated() {
+            let acct = Account(email: "Account \(index + 1)", sessionKey: "sk-\(uuid)-old", organizationId: uuid,
+                               allCookieHeader: "sessionKey=sk-\(uuid)-old; __cf_bm=cf-\(uuid)")
+            XCTAssertTrue(auth.accountStore.addAccount(acct))
+        }
+        mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-b"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: "me@example.com")
+        auth.pendingSessionKey = "sk-fresh"
+        auth.pendingCookieHeader = "sessionKey=sk-fresh; __cf_bm=cf-fresh"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertEqual(auth.accountStore.accounts.map(\.email), ["me@example.com", "me@example.com"],
+                       "both entries belong to the one login these credentials enumerate, so both take its address")
+    }
+
+    @MainActor
+    func testManualSignIn_allStored_repairsEveryPlaceholderLabel() async {
+        // The paste twin of the branch above.
+        let auth = makeAuthManager()
+        for (index, uuid) in ["org-a", "org-b"].enumerated() {
+            let acct = Account(email: "Account \(index + 1)", sessionKey: "sk-\(uuid)-old", organizationId: uuid,
+                               allCookieHeader: "sessionKey=sk-\(uuid)-old; __cf_bm=cf-\(uuid)")
+            XCTAssertTrue(auth.accountStore.addAccount(acct))
+        }
+        mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-b"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: "me@example.com")
+
+        _ = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
+
+        XCTAssertEqual(auth.accountStore.accounts.map(\.email), ["me@example.com", "me@example.com"])
+    }
+
+    @MainActor
+    func testCompleteManualSignIn_pickRepairsThePickedOrgAndItsSiblings() async {
+        // The fourth repair route: picking one org also rewrites its stored siblings, so the labels
+        // have to travel with the credentials.
+        let auth = makeAuthManager()
+        let a = Account(email: "Account 1", sessionKey: "sk-a-old", organizationId: "org-a",
+                        allCookieHeader: "sessionKey=sk-a-old; __cf_bm=cf-a")
+        _ = auth.accountStore.addAccount(a)
+        let b = Account(email: "Account 2", sessionKey: "sk-b-old", organizationId: "org-b",
+                        allCookieHeader: "sessionKey=sk-b-old; __cf_bm=cf-b")
+        _ = auth.accountStore.addAccount(b)
+        mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-b"},{"uuid":"org-c"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: "me@example.com")
+
+        let result = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
+        guard case .needsOrgChoice(let orgs) = result else {
+            return XCTFail("an addable org must still show the picker, got \(result)")
+        }
+        _ = auth.completeManualSignIn(org: orgs[0])
+
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.id == a.id }?.email, "me@example.com",
+                       "the picked entry is repaired")
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.id == b.id }?.email, "me@example.com",
+                       "and so is the sibling the same pick rescued")
+    }
+
+    @MainActor
+    func testManualSignIn_reAuthDoesNotOverwriteARealAddress() async {
+        // An entry is labelled with whoever added it first (D7) and two claude.ai logins can share
+        // one org, so a real label is never rewritten - and the nickname on top of it is a separate
+        // field this code does not touch at all.
+        let auth = makeAuthManager()
+        let existing = Account(email: "first-owner@example.com", sessionKey: "sk-old", organizationId: "org-a",
+                               nickname: "Work", allCookieHeader: "sessionKey=sk-old; __cf_bm=cf-a")
+        XCTAssertTrue(auth.accountStore.addAccount(existing))
+        mockSession.responseData = #"[{"uuid":"org-a"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: "someone-else@example.com")
+
+        _ = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
+
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "first-owner@example.com",
+                       "a real stored address survives a re-auth by a different login")
+        XCTAssertEqual(auth.accountStore.accounts.first?.nickname, "Work")
+        XCTAssertEqual(auth.accountStore.accounts.first?.displayName, "Work",
+                       "and the name the user chose is still what the app shows")
+    }
+
+    @MainActor
+    func testManualSignIn_repairLeavesTheNicknameAlone() async {
+        // The other half of the nickname rule: a placeholder underneath a nickname is still worth
+        // repairing (it is what disambiguates two orgs of one login), and doing so must not disturb
+        // the name on top of it.
+        let auth = makeAuthManager()
+        let existing = Account(email: "Account 3", sessionKey: "sk-old", organizationId: "org-a",
+                               nickname: "Personal", allCookieHeader: "sessionKey=sk-old; __cf_bm=cf-a")
+        XCTAssertTrue(auth.accountStore.addAccount(existing))
+        mockSession.responseData = #"[{"uuid":"org-a"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: "repaired@example.com")
+
+        _ = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
+
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "repaired@example.com")
+        XCTAssertEqual(auth.accountStore.accounts.first?.nickname, "Personal")
+        XCTAssertEqual(auth.accountStore.accounts.first?.displayName, "Personal",
+                       "displayName is nickname ?? email, so a renamed account looks unchanged")
+    }
+
+    @MainActor
+    func testManualSignIn_reAuthWithNoAddressLeavesThePlaceholderAlone() async {
+        // A failed lookup writes nothing rather than swapping one placeholder for another - the
+        // positional count is computed from the store, so a blind rewrite could renumber an entry.
+        let auth = makeAuthManager()
+        let existing = Account(email: "Account 2", sessionKey: "sk-old", organizationId: "org-a",
+                               allCookieHeader: "sessionKey=sk-old; __cf_bm=cf-a")
+        XCTAssertTrue(auth.accountStore.addAccount(existing))
+        mockSession.responseData = #"[{"uuid":"org-a"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        stubAccountEndpoint(email: nil, statusCode: 500)
+
+        _ = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
+
+        XCTAssertEqual(auth.accountStore.accounts.first?.email, "Account 2",
+                       "the stored label is left exactly as it was")
+        XCTAssertEqual(auth.accountStore.accounts.first?.sessionKey, "sk-fresh",
+                       "and the credential repair still happened")
+    }
+
     // MARK: - LoginState equality
 
     func testLoginStateEquality() {

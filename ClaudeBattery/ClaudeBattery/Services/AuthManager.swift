@@ -821,6 +821,21 @@ class AuthManager: NSObject, ObservableObject {
         return accounts.filter { orgIds.contains($0.organizationId) }
     }
 
+    /// Copy the plan fields off the freshly fetched org onto a stored entry. Every repair route
+    /// calls this next to its `updateSessionKey`, because a sign-in is the only moment the app sees
+    /// the organizations response, and a user who upgraded or downgraded since the last one would
+    /// otherwise keep the old plan until they removed and re-added the account (R4).
+    ///
+    /// Does nothing when the entry's org is not in `orgs`. That cannot happen on the routes calling
+    /// it - all of them walk `matchedAccounts`, whose entries are listed by definition - but it is
+    /// the right answer if that ever stops holding: no org in hand is no evidence of a plan, and
+    /// writing one anyway is the class of guess this whole change exists to remove.
+    private func refreshStoredPlan(for account: Account, from orgs: [Organization]) {
+        guard let org = orgs.first(where: { $0.uuid == account.organizationId }) else { return }
+        accountStore.updatePlan(account.id, rateLimitTier: org.rateLimitTier,
+                                capabilities: org.capabilities, billingType: org.billingType)
+    }
+
     /// The one-line confirmation for a sign-in that repaired stored entries (R6, issue #41). Shared
     /// by all three repair routes - the manual all-already-stored branch, the manual picker, and the
     /// WebView sign-in - so one event cannot end up described three different ways.
@@ -1028,6 +1043,16 @@ class AuthManager: NSObject, ObservableObject {
                 return
             }
 
+            // The real address to label accounts with (R7). Resolved HERE, above the org-selection
+            // switch, rather than at the add site below: the all-already-stored branch returns
+            // without ever reaching that line, and that branch is exactly where an existing user's
+            // placeholder gets repaired. One extra request per sign-in, never on the poll (KTD7).
+            let resolvedEmail = await resolveEmail(sessionKey: sessionKey, orgs: orgs, rawData: data)
+            // Another suspension point, so another cancellation check before anything is written:
+            // the login timeout and the window-close teardown both cancel this task, and a write
+            // past either of them is a write on behalf of a sign-in the user has already left.
+            guard !Task.isCancelled else { return }
+
             // Determine which org to use via the pure, unit-tested `Self.selectOrg` (shared with
             // the manual-paste path). This site supplies the imperative shell: the NSAlert picker
             // and the login-window state machine.
@@ -1058,6 +1083,11 @@ class AuthManager: NSObject, ObservableObject {
                 var refreshedIds: Set<UUID> = []
                 for account in Self.matchedAccounts(orgs: orgs, accounts: accountStore.accounts) {
                     accountStore.updateSessionKey(account.id, sessionKey, cookieHeader: capturedCookieHeader)
+                    refreshStoredPlan(for: account, from: orgs)
+                    // This is the route an existing user takes: their orgs are all stored already,
+                    // so the add path below never runs and a placeholder label would survive every
+                    // future sign-in without this (R7).
+                    repairPlaceholderEmail(for: account, with: resolvedEmail)
                     refreshedIds.insert(account.id)
                 }
                 // `switchTo` stays the last jar-touching step (KTD3): every write above put the same
@@ -1115,8 +1145,10 @@ class AuthManager: NSObject, ObservableObject {
 
             guard !Task.isCancelled else { return }
 
-            // Try to extract email from org response
-            let email = extractEmail(from: orgs, rawData: data) ?? "Account \(accountStore.accounts.count + 1)"
+            // Positional placeholder only when neither `/api/account` nor the org body produced an
+            // address (R7). It is the label the user sees, so it is also what the repair routes test
+            // against - see `isPlaceholderEmail`.
+            let email = resolvedEmail ?? "Account \(accountStore.accounts.count + 1)"
 
             guard addOrReactivateWebViewAccount(org: chosenOrg, orgs: orgs, sessionKey: sessionKey,
                                                 cookieHeader: capturedCookieHeader, email: email) else {
@@ -1185,6 +1217,11 @@ class AuthManager: NSObject, ObservableObject {
                 .filter { $0.organizationId != org.uuid }
             for sibling in siblings {
                 accountStore.updateSessionKey(sibling.id, sessionKey, cookieHeader: cookieHeader)
+                refreshStoredPlan(for: sibling, from: orgs)
+                // The siblings belong to the same claude.ai login as the org being signed in to -
+                // that is what `matchedAccounts` means - so this sign-in's address labels them too
+                // wherever they are still carrying a placeholder (R7).
+                repairPlaceholderEmail(for: sibling, with: email)
             }
             if !siblings.isEmpty {
                 logger.info("Re-auth: refreshed \(siblings.count) sibling account(s) of the chosen org")
@@ -1197,6 +1234,9 @@ class AuthManager: NSObject, ObservableObject {
             sessionKey: sessionKey,
             organizationId: org.uuid,
             organizationName: org.sanitizedName,
+            rateLimitTier: org.rateLimitTier,
+            capabilities: org.capabilities,
+            billingType: org.billingType,
             allCookieHeader: cookieHeader
         )
 
@@ -1218,6 +1258,12 @@ class AuthManager: NSObject, ObservableObject {
             // API call primes the jar with the fresh Cloudflare / CSRF cookies, not the stale
             // pair that was paired with the previous sessionKey.
             accountStore.updateSessionKey(existing.id, sessionKey, cookieHeader: cookieHeader)
+            // Re-auth is also when a changed plan shows up, so refresh it here and not only on the
+            // add path above (R4).
+            accountStore.updatePlan(existing.id, rateLimitTier: org.rateLimitTier,
+                                    capabilities: org.capabilities, billingType: org.billingType)
+            // And it is when a placeholder label can finally be replaced with the real address (R7).
+            repairPlaceholderEmail(for: existing, with: email)
             // The chosen org WAS already stored, so it counts as repaired along with its siblings.
             let siblings = refreshSiblings()
             accountStore.switchTo(existing.id)
@@ -1293,6 +1339,106 @@ class AuthManager: NSObject, ObservableObject {
         guard let continuation = orgPickerContinuation else { return }
         orgPickerContinuation = nil
         continuation.resume(returning: org)
+    }
+
+    /// The address to label a stored account with: `/api/account` first, the organizations body
+    /// second (R7, KTD7).
+    ///
+    /// Nil when neither produces one, which is what makes the caller fall back to the positional
+    /// "Account N" placeholder. That fallback used to be the ONLY outcome: `email_address` is absent
+    /// from the organizations response entirely, so every branch of `extractEmail` was dead and every
+    /// account on every install was named "Account 1", "Account 2".
+    ///
+    /// `extractEmail` is kept underneath rather than deleted with the bug it failed to catch. It
+    /// costs one pass over data already in hand, it is the only thing standing between a future
+    /// `/api/account` change and the placeholder coming back, and its branches are pinned by tests.
+    private func resolveEmail(sessionKey: String, orgs: [Organization], rawData: Data) async -> String? {
+        if let email = await fetchAccountEmail(sessionKey: sessionKey) {
+            return email
+        }
+        return extractEmail(from: orgs, rawData: rawData)
+    }
+
+    /// The signed-in person's address from `GET /api/account`, or nil when the lookup does not
+    /// produce one (R7, KTD7).
+    ///
+    /// Every failure route returns nil rather than throwing, and the callers fall back. This request
+    /// decides a label and nothing else, so a sign-in must never fail because a cosmetic lookup did.
+    ///
+    /// `/api/account` and not `/api/bootstrap`: both carry `email_address` and bootstrap is about
+    /// 15x the bytes for it. It runs on the two sign-in routes only, never on the two-minute poll.
+    ///
+    /// No `cookieHeader` is passed to `makeRequest`, deliberately. Both callers have just primed the
+    /// shared jar for this sign-in - the browser path through `makeRequest`, the paste path through
+    /// `activateCookies` - and handing a header in again would re-prime it, throwing away whatever
+    /// Cloudflare cookie the organizations response rotated in. Nil means "use the jar as it stands",
+    /// which is what `UsageService.pollUsage` does too.
+    // internal for @testable access in AuthManagerTests
+    func fetchAccountEmail(sessionKey: String) async -> String? {
+        guard let request = ClaudeAPI.makeRequest(path: "/api/account", sessionKey: sessionKey) else {
+            return nil
+        }
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+                // Status only. The body of this endpoint is the account record itself, so it never
+                // goes to os_log, which can be read off-device.
+                let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+                logger.info("Account email lookup returned HTTP \(status) - falling back to the org body")
+                return nil
+            }
+            let profile = try JSONDecoder().decode(AccountProfile.self, from: data)
+            guard let email = profile.emailAddress?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !email.isEmpty else {
+                logger.info("Account email lookup carried no address - falling back to the org body")
+                return nil
+            }
+            return email
+        } catch {
+            logger.info("Account email lookup failed - falling back to the org body")
+            return nil
+        }
+    }
+
+    /// Whether a stored label is one of the app's own "Account N" placeholders rather than a real
+    /// address. Those are written by both sign-in routes when no address could be found, and by the
+    /// single-account migration in `StorageService`.
+    ///
+    /// This is the whole safety rule behind `repairPlaceholderEmail`: an entry is keyed by org and
+    /// labelled with whoever added it first (D7), and two claude.ai logins can share one org, so
+    /// overwriting a REAL label with a fresh sign-in's address would rename someone else's entry.
+    /// An empty label counts as a placeholder because it renders as nothing at all.
+    ///
+    /// `nonisolated`: a pure rule over a string, unit-testable without an `AuthManager`, the same
+    /// shape as `selectOrg` and `repairConfirmation`.
+    nonisolated static func isPlaceholderEmail(_ email: String) -> Bool {
+        let trimmed = email.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty { return true }
+        guard trimmed.hasPrefix("Account ") else { return false }
+        let digits = trimmed.dropFirst("Account ".count)
+        // ASCII digits only: `Character.isNumber` also accepts Eastern Arabic and other numerals,
+        // and this is matching text the app itself wrote, which is always plain ASCII.
+        return !digits.isEmpty && digits.allSatisfy { $0.isASCII && $0.isNumber }
+    }
+
+    /// Replace an "Account N" placeholder on a stored entry with the real address this sign-in found
+    /// (R7). Every re-auth route calls this next to its `updateSessionKey`, because everyone who
+    /// signed in before this release has a placeholder on every entry and nothing else would ever
+    /// repair it: without this, only newly added accounts get real names and every existing user
+    /// stays broken.
+    ///
+    /// Three things it deliberately does not do. It does not touch a real stored address, for the
+    /// reason spelled out in `isPlaceholderEmail`. It writes nothing when this sign-in's own lookup
+    /// came back empty, so one placeholder is never swapped for another. And it leaves `nickname`
+    /// alone: `Account.displayName` is `nickname ?? email`, so an account the user has renamed keeps
+    /// showing that name and only the label underneath it is corrected.
+    private func repairPlaceholderEmail(for account: Account, with email: String?) {
+        guard let email,
+              !Self.isPlaceholderEmail(email),
+              Self.isPlaceholderEmail(account.email) else { return }
+        accountStore.updateEmail(account.id, email)
+        // Non-PII id, never the address itself: os_log can be read off-device.
+        logger.info("Repaired placeholder label on account \(account.id.uuidString)")
     }
 
     private func extractEmail(from orgs: [Organization], rawData: Data) -> String? {
@@ -1374,6 +1520,10 @@ class AuthManager: NSObject, ObservableObject {
             .filter { $0.organizationId != org.uuid }
         for sibling in siblings {
             accountStore.updateSessionKey(sibling.id, ctx.sessionKey, cookieHeader: ctx.cookieHeader)
+            refreshStoredPlan(for: sibling, from: ctx.orgs)
+            // `ctx.email` is the label the discovery step resolved, so the pick route repairs the
+            // picked org's stored siblings with the same address the add site used (R7).
+            repairPlaceholderEmail(for: sibling, with: ctx.email)
         }
         if !siblings.isEmpty {
             logger.info("Manual sign-in pick: refreshed \(siblings.count) sibling account(s) of the picked org")
@@ -1472,7 +1622,10 @@ class AuthManager: NSObject, ObservableObject {
                 return .noOrganizations
             }
 
-            let email = extractEmail(from: orgs, rawData: data) ?? "Account \(accountStore.accounts.count + 1)"
+            // Same lookup and same fallback as the browser path (R7, KTD7): `/api/account` answers
+            // 200 under a bare `sessionKey` cookie, so a paste with no full header still gets a real
+            // address rather than "Account N".
+            let email = await resolveEmail(sessionKey: sessionKey, orgs: orgs, rawData: data) ?? "Account \(accountStore.accounts.count + 1)"
 
             // Org choice via the same pure `Self.selectOrg` rule as the WebView path; this site
             // returns a ManualSignInResult for the SwiftUI picker instead of driving an NSAlert.
@@ -1513,6 +1666,10 @@ class AuthManager: NSObject, ObservableObject {
                 var refreshedIds: Set<UUID> = []
                 for account in toRefresh {
                     accountStore.updateSessionKey(account.id, sessionKey, cookieHeader: cookieHeader)
+                    refreshStoredPlan(for: account, from: orgs)
+                    // The paste twin of the browser all-stored repair: this is the route an existing
+                    // user reaches, so it is where their placeholder labels get corrected (R7).
+                    repairPlaceholderEmail(for: account, with: email)
                     refreshedIds.insert(account.id)
                 }
                 // Gate on the refreshed SET, never on a single matched entry (KTD1). `matchedAccount`
@@ -1558,7 +1715,10 @@ class AuthManager: NSObject, ObservableObject {
     }
 
     private func addOrReactivateManualAccount(org: Organization, sessionKey: String, cookieHeader: String?, email: String) -> ManualSignInResult {
-        let account = Account(email: email, sessionKey: sessionKey, organizationId: org.uuid, organizationName: org.sanitizedName, allCookieHeader: cookieHeader)
+        let account = Account(email: email, sessionKey: sessionKey, organizationId: org.uuid,
+                              organizationName: org.sanitizedName, rateLimitTier: org.rateLimitTier,
+                              capabilities: org.capabilities, billingType: org.billingType,
+                              allCookieHeader: cookieHeader)
         if accountStore.addAccount(account) {
             accountStore.switchTo(account.id)
             logger.info("Manual sign-in added a new account")
@@ -1569,13 +1729,24 @@ class AuthManager: NSObject, ObservableObject {
             return .success(accountStore.disambiguatedName(for: account), refreshedCount: 0)
         } else if let existing = accountStore.accounts.first(where: { $0.organizationId == org.uuid }) {
             accountStore.updateSessionKey(existing.id, sessionKey, cookieHeader: cookieHeader)
+            // Same reason as the browser twin: a re-auth is when a changed plan becomes visible (R4).
+            accountStore.updatePlan(existing.id, rateLimitTier: org.rateLimitTier,
+                                    capabilities: org.capabilities, billingType: org.billingType)
+            // Same as the browser twin: a re-auth is when a placeholder label can be replaced (R7).
+            repairPlaceholderEmail(for: existing, with: email)
             accountStore.switchTo(existing.id)
             logger.info("Manual sign-in reactivated an existing account")
             onAuthSuccess?()
             // An existing entry rewritten with fresh credentials IS a repair, so it counts as one.
             // `completeManualSignIn` replaces this count with its own total once it has added the
             // siblings the pick also rescued.
-            return .success(accountStore.disambiguatedName(for: existing), refreshedCount: 1)
+            //
+            // Re-read the entry for the confirmation instead of naming `existing`: `Account` is a
+            // struct, so that copy still carries the label the repair above has just replaced, and
+            // the paste box would confirm "Signed in as Account 2" in the one moment it finally has
+            // the real address to print.
+            let relabelled = accountStore.accounts.first { $0.id == existing.id } ?? existing
+            return .success(accountStore.disambiguatedName(for: relabelled), refreshedCount: 1)
         }
         return .accountLimitReached
     }
@@ -1937,11 +2108,53 @@ extension AuthManager: NSWindowDelegate {
 
 // MARK: - Models
 
+/// The one field the app reads from `GET /api/account`: the signed-in person's address (R7).
+///
+/// It is here because `email_address` is absent from the organizations response entirely - confirmed
+/// against two live accounts - so `extractEmail`'s every branch returned nil and every account was
+/// stored as "Account 1", "Account 2". This endpoint carries the address at the top level and answers
+/// 200 under a bare `sessionKey` cookie, so the paste route reaches it as well as the browser one.
+///
+/// Hand-mapped key for the same reason `Organization` hand-maps its own: this response is read by a
+/// plain `JSONDecoder()` with no `keyDecodingStrategy`. Every other field on the endpoint is ignored,
+/// which is what keeps the account record from ever reaching a log or the diagnostics export.
+struct AccountProfile: Decodable {
+    let emailAddress: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case emailAddress = "email_address"
+    }
+}
+
 struct Organization: Codable, Equatable {
     let uuid: String
     let name: String?
     let billingType: String?
     let emailAddress: String?
+    /// The org's plan, e.g. "default_claude_max_20x" or "auto_prepaid_tier_3" (both observed live).
+    /// This is the only field on the response that names a plan: `billingType` is how the org pays
+    /// ("stripe_subscription", "prepaid") and two different plans can share one, so it can never
+    /// identify a plan on its own. `PlanRatio.forTier` turns this string into the 5h-over-weekly
+    /// ratio the Session dial converts a weekly remainder with (R4).
+    let rateLimitTier: String?
+    /// What the org is entitled to, e.g. ["claude_max", "chat"] or ["api"] (both observed live).
+    /// Stored next to the tier because Free has no positive marker of its own: claude.ai's own
+    /// JavaScript picks the plan by looking here for "claude_pro" or "claude_max" and treats their
+    /// ABSENCE as Free. Anyone reading this later: do not go looking for a "claude_free" string,
+    /// there is none - handle absence.
+    let capabilities: [String]?
+
+    /// Written out rather than left to the synthesized memberwise init only so the two plan fields
+    /// can carry defaults. Every existing construction site predates them and has no plan to supply.
+    init(uuid: String, name: String?, billingType: String?, emailAddress: String?,
+         rateLimitTier: String? = nil, capabilities: [String]? = nil) {
+        self.uuid = uuid
+        self.name = name
+        self.billingType = billingType
+        self.emailAddress = emailAddress
+        self.rateLimitTier = rateLimitTier
+        self.capabilities = capabilities
+    }
 
     /// The org's real name, sanitized (newline/RTL-mark strip, 100-char cap), or nil when the org
     /// has no usable name. This is what gets stored on `Account.organizationName`, so a persisted
@@ -1969,5 +2182,11 @@ struct Organization: Codable, Equatable {
         case name
         case billingType = "billing_type"
         case emailAddress = "email_address"
+        // Mapped by hand, exactly like the two above, and it has to be: the organizations response
+        // is read by a plain `JSONDecoder()` with no `keyDecodingStrategy`, unlike `UsageService`
+        // which sets `.convertFromSnakeCase`. Drop this line and `rate_limit_tier` decodes as nil
+        // forever without a single error - the dial just quietly stops converting.
+        case rateLimitTier = "rate_limit_tier"
+        case capabilities
     }
 }
