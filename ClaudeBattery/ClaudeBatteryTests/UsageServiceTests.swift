@@ -724,6 +724,34 @@ final class UsageServicePollTests: XCTestCase {
     }
 
     @MainActor
+    func testSuspendThenResume_withAPollStillInFlight_stillPollsAgain() async {
+        // Pins suspendPolling's "cancel but KEEP the handle" decision, which nothing could fail on
+        // before: the resume test above waits for the first poll to FINISH, so there is no previous
+        // task for restartPolling to chain behind and dropping the handle changes nothing there.
+        // Here the first request is still parked when the sign-in suspends, which is the ordinary
+        // case on the real path - the pause is taken with a poll on the wire.
+        //
+        // With the handle dropped, restartPolling has nothing to wait for, so the resumed poll runs
+        // while the cancelled one is still inside the request with `isPolling` true and is thrown
+        // away by the guard at the top of pollUsage. The user then waits a full interval for data
+        // the resume was supposed to fetch immediately.
+        let gate = GatedSession(data: Data(), statusCode: 403)
+        let service = UsageService(storage: storage, accountStore: accountStore, session: gate)
+
+        service.startPolling()
+        let inFlight = await waitUntil { gate.started }
+        XCTAssertTrue(inFlight, "the poll must be in flight before the sign-in begins")
+
+        service.suspendPolling()
+        service.resumePolling()
+        gate.release()
+
+        let polledAgain = await waitUntil { gate.usageRequests >= 2 }
+        XCTAssertTrue(polledAgain,
+                      "the resumed poll waits for the cancelled one to finish instead of being dropped by the isPolling guard")
+    }
+
+    @MainActor
     func testResume_doesNotStartPollingThatWasNotRunning() async {
         // The app stops polling when the active session goes authFailed. A sign-in that failed must
         // not turn that deliberate stop into a running poll against credentials still known bad.
@@ -742,8 +770,15 @@ final class UsageServicePollTests: XCTestCase {
     func testResumeAfterRepairOfTheActiveAccount_pollsAgain() async {
         // The other half of R11: the pause must not be a one-way door. The active session goes
         // authFailed, the app stops polling (its onAuthFailure wiring), the paste repairs that
-        // account, and the success callback -> switchAccount is what starts polling again. Resume
-        // has to leave that restart alone instead of cancelling it back into silence.
+        // account, and the success callback -> switchAccount is what starts polling again.
+        //
+        // What the resume at the end proves here is that it does not undo that restart. It cannot
+        // prove HOW: polling was already stopped when the suspend was taken, so `resumeShouldRestart`
+        // is false and the resume returns at its own guard, with or without the reset lines in
+        // `restartPolling` (review finding - this comment used to claim it covered those lines).
+        // Those lines save a redundant cancel-and-rechain that nothing observable comes of, so no
+        // test can pin them; what is worth pinning is this route reaching data at all, since it is
+        // the one the user is standing in front of after a repair.
         mockSession.responseData = Data()
         mockSession.responseStatusCode = 401
         let service = UsageService(storage: storage, accountStore: accountStore, session: mockSession)
@@ -810,6 +845,7 @@ private final class GatedSession: HTTPDataFetching, @unchecked Sendable {
     private var _started = false
     private var _delivered = false
     private var _released = false
+    private var _usageRequests = 0
     private var waiter: CheckedContinuation<Void, Never>?
     private let responseData: Data
     private let statusCode: Int
@@ -823,6 +859,11 @@ private final class GatedSession: HTTPDataFetching, @unchecked Sendable {
     var started: Bool { lock.withLock { _started } }
     /// The response has been handed back to the caller.
     var delivered: Bool { lock.withLock { _delivered } }
+    /// How many usage requests have arrived. Counting is what a test needs to say a resume really
+    /// polled AGAIN rather than just once, and the latches above cannot say it. Filtered to the
+    /// usage path the same way the `usageRequestCount()` helper above is, because a 200 poll also
+    /// fetches prepaid credits through this same double.
+    var usageRequests: Int { lock.withLock { _usageRequests } }
 
     func release() {
         lock.lock()
@@ -836,6 +877,7 @@ private final class GatedSession: HTTPDataFetching, @unchecked Sendable {
     func data(for request: URLRequest) async throws -> (Data, URLResponse) {
         lock.lock()
         _started = true
+        if request.url?.path.hasSuffix("/usage") ?? false { _usageRequests += 1 }
         if _released {
             lock.unlock()
         } else {

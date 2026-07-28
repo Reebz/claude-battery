@@ -46,9 +46,17 @@ class UsageService: NSObject, ObservableObject {
     /// nothing gates on it, so an explicit `startPolling`/`switchAccount` during the window still
     /// polls, which is what lets a sign-in that repaired the active account fetch immediately.
     private var isSuspended = false
-    /// Whether `resumePolling` puts polling back. False when nothing was running at suspend time
-    /// (the active session had already gone authFailed and `onAuthFailure` stopped polling, or
-    /// there is no account yet), so a resume cannot start polling the app deliberately stopped.
+    /// Whether `resumePolling` puts polling back: true when a timer was armed or a poll task
+    /// existed at suspend time, so a resume restores what the suspend interrupted rather than
+    /// starting polling that was not running (no account yet, or a stop that stuck).
+    ///
+    /// This is timer state, not intent, and the difference is real: when a poll driven by
+    /// `scheduleNextPoll` gets a 401/403, `onAuthFailure` runs `stopPolling`, and then the closure
+    /// still awaiting that poll reaches its trailing `scheduleNextPoll()` and arms a fresh timer.
+    /// So an account already known expired reads as "was running" here, and a resume fires one more
+    /// poll at it. That poll 403s and stops the chain for real, so it costs one request. The stated
+    /// guarantee is the other direction and it holds: a resume never leaves polling dead, which is
+    /// what R11 is for (review finding: the earlier wording claimed the flag knew about intent).
     private var resumeShouldRestart = false
 
     init(storage: StorageService, accountStore: AccountStore, session: any HTTPDataFetching = ClaudeAPI.session) {
@@ -131,8 +139,11 @@ class UsageService: NSObject, ObservableObject {
     private func restartPolling() {
         // An explicit restart supersedes a pending resume. A sign-in that repaired the ACTIVE
         // account fires its success callback (-> switchAccount -> here) BEFORE it resumes, and
-        // without this the resume that follows would cancel this very poll and chain a second one
-        // (R11, issue #41).
+        // without this the resume that follows would cancel the poll started here and chain a
+        // replacement behind it (R11, issue #41). No poll is lost either way: both tasks are made
+        // and cancelled inside one synchronous main-actor block, so the replacement fetches at the
+        // same moment. What this saves is doing the work twice, which is also why no test can see
+        // the difference (review finding).
         isSuspended = false
         resumeShouldRestart = false
         let previousTask = currentPollTask

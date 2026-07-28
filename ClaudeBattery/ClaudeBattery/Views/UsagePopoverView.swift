@@ -755,24 +755,31 @@ private struct AccountListSection: View {
     @State private var editingAccountId: UUID?
     @State private var editText: String = ""
 
+    /// How many account rows show before the list starts scrolling, and what a row costs: a 24pt
+    /// control with 5pt of padding either side, plus the 1pt divider under it.
+    ///
+    /// The entry limit doubled to 10 with issue #41 and nothing here capped the list or scrolled
+    /// it, so filling the new limit made this section about 150pt taller than a full old one: five
+    /// more rows, less the Add Account row that disappears once no slot is free. An NSPopover
+    /// clamps to the screen, so on a short display the last rows and the footer under them go off
+    /// the bottom with no way to reach them (P3, review finding). The cap engages only past
+    /// `visibleRows`, so the ordinary two-or-three-account popover lays out exactly as before.
+    private static let visibleRows = 5
+    private static let rowHeight: CGFloat = 35
+
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(accountStore.accounts) { account in
-                let isActive = account.id == accountStore.activeAccountId
-
-                if editingAccountId == account.id {
-                    editRow(account: account, isActive: isActive)
-                } else {
-                    accountRow(account: account, isActive: isActive)
+            if accountStore.accounts.count > Self.visibleRows {
+                ScrollView(.vertical) {
+                    accountRows
                 }
-
-                if account.id != accountStore.accounts.last?.id {
-                    Divider()
-                        .background(Color(white: 0.25))
-                }
+                .frame(height: CGFloat(Self.visibleRows) * Self.rowHeight)
+            } else {
+                accountRows
             }
 
-            // "+Add Account" row at the bottom
+            // "+Add Account" row at the bottom, outside the scroller on purpose: it is the one
+            // control here that must not need a scroll to reach.
             if accountStore.canAddAccount {
                 Divider()
                     .background(Color(white: 0.25))
@@ -796,6 +803,27 @@ private struct AccountListSection: View {
         }
         .background(Color(white: 0.15))
         .cornerRadius(8)
+    }
+
+    /// The rows themselves, kept separate so the same list can be laid out plainly or inside the
+    /// scroller without the two copies drifting.
+    private var accountRows: some View {
+        VStack(spacing: 0) {
+            ForEach(accountStore.accounts) { account in
+                let isActive = account.id == accountStore.activeAccountId
+
+                if editingAccountId == account.id {
+                    editRow(account: account, isActive: isActive)
+                } else {
+                    accountRow(account: account, isActive: isActive)
+                }
+
+                if account.id != accountStore.accounts.last?.id {
+                    Divider()
+                        .background(Color(white: 0.25))
+                }
+            }
+        }
     }
 
     private func accountRow(account: Account, isActive: Bool) -> some View {

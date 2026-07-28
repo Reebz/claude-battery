@@ -1077,10 +1077,20 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(orgs.map(\.uuid), ["org-a", "org-b"])
 
         let completed = auth.completeManualSignIn(org: orgs[1])
-        guard case .success = completed else { return XCTFail("adding org-b should succeed, got \(completed)") }
+        guard case .success(_, let refreshedCount) = completed else {
+            return XCTFail("adding org-b should succeed, got \(completed)")
+        }
         XCTAssertEqual(auth.accountStore.accounts.count, 2, "both orgs of the account persist as separate accounts")
         XCTAssertTrue(auth.accountStore.accounts.contains { $0.organizationId == "org-a" })
         XCTAssertTrue(auth.accountStore.accounts.contains { $0.organizationId == "org-b" })
+        // The manual picker's ADD branch also repairs the siblings it enumerated (R2, issue #41).
+        // This route ran unasserted: the pick was checked for success and the two entries for
+        // presence, so dropping the sibling loop from the add branch left everything green while a
+        // user who added their second org kept a dead session on the first (review finding).
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.organizationId == "org-a" }?.sessionKey, "sk-fresh",
+                       "the stored sibling gets the pasted credentials in the same action")
+        XCTAssertEqual(refreshedCount, 1,
+                       "one entry repaired: org-b was added, and an add is not a repair")
     }
 
     @MainActor
@@ -1910,6 +1920,74 @@ final class AuthManagerTests: XCTestCase {
                        "the jar holds the account this sign-in switched to; no restore fights the switch")
     }
 
+    // MARK: - fetchOrganizationId: the failed browser sign-in puts the active account's jar back
+
+    @MainActor
+    func testFetchOrganizationId_403RestoresActiveAccountJar() async {
+        // The P1 this restore exists for. `ClaudeAPI.makeRequest` primes the SHARED jar with the
+        // login window's cookies before the response arrives, so a browser sign-in that then fails
+        // used to leave a healthy account polling on a half-signed-in stranger's cookies: 403,
+        // authFailed, polling stopped, and no success callback on this route to start it again.
+        //
+        // Every pre-existing browser failure test left `pendingCookieHeader` nil, which is exactly
+        // the case where `makeRequest` does NOT prime, so the suite could not see the bug. This one
+        // sets a header, which is what production always has by this point.
+        let auth = makeAuthManager()
+        let url = URL(string: "https://claude.ai")!
+        func jarCookie(_ name: String) -> String? {
+            ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: url)?.first { $0.name == name }?.value
+        }
+        let a = Account(email: "me@x.com", sessionKey: "sk-A", organizationId: "org-a",
+                        allCookieHeader: "sessionKey=sk-A; __cf_bm=cf-A")
+        _ = auth.accountStore.addAccount(a)
+        auth.accountStore.switchTo(a.id)
+        XCTAssertEqual(jarCookie("sessionKey"), "sk-A", "precondition: the jar holds the active account")
+
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 403
+        auth.pendingSessionKey = "sk-stranger"
+        auth.pendingCookieHeader = "sessionKey=sk-stranger; __cf_bm=cf-stranger"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertEqual(jarCookie("sessionKey"), "sk-A",
+                       "the abandoned sign-in's cookies must not outlive it in the jar polling reads")
+        XCTAssertEqual(jarCookie("__cf_bm"), "cf-A",
+                       "the whole stored header goes back, not just the session key")
+        XCTAssertEqual(auth.accountStore.accounts.first?.sessionKey, "sk-A",
+                       "and the stored entry itself was never written to")
+    }
+
+    @MainActor
+    func testFetchOrganizationId_cancelledPickerRestoresActiveAccountJar() async {
+        // The same restore reached through the picker door. With no login window the picker resolves
+        // nil, which is the same exit a user pressing Cancel takes. That route is the worst case for
+        // the jar: the sheet waits on a person, so without the restore the wrong cookies stay live
+        // for as long as the user thinks about it, and then stay live after they give up.
+        let auth = makeAuthManager()
+        let url = URL(string: "https://claude.ai")!
+        func jarCookie(_ name: String) -> String? {
+            ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: url)?.first { $0.name == name }?.value
+        }
+        let a = Account(email: "me@x.com", sessionKey: "sk-A", organizationId: "org-a",
+                        allCookieHeader: "sessionKey=sk-A; __cf_bm=cf-A")
+        _ = auth.accountStore.addAccount(a)
+        auth.accountStore.switchTo(a.id)
+
+        // org-new is unstored, so selectOrg returns .needsChoice and the flow reaches the picker.
+        mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-new"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        auth.pendingSessionKey = "sk-stranger"
+        auth.pendingCookieHeader = "sessionKey=sk-stranger; __cf_bm=cf-stranger"
+
+        await auth.fetchOrganizationId()
+
+        XCTAssertEqual(auth.accountStore.accounts.count, 1, "a cancelled pick adds nothing")
+        XCTAssertEqual(jarCookie("sessionKey"), "sk-A",
+                       "a cancelled pick leaves the active account serving its own cookies")
+        XCTAssertEqual(jarCookie("__cf_bm"), "cf-A")
+    }
+
     @MainActor
     func testFetchOrganizationId_allStored_leavesStoredOrgSetUnchanged() async {
         // R4 on the browser all-stored route: repair only, nothing added, removed, or reordered.
@@ -2042,7 +2120,11 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(auth.accountStore.activeAccountId, a.id,
                        "the browser pick route switches to the picked org (R3)")
         XCTAssertEqual(jarCookie("sessionKey"), "sk-fresh",
-                       "switchTo is the last jar-touching step, so the jar serves the picked account")
+                       "the jar ends on the fresh credentials rather than the stale ones it started with")
+        // It cannot say WHICH entry primed it, unlike the manual twin below: a browser sign-in
+        // carries one captured header, so the picked org and its sibling are written byte-identical
+        // and the jar reads the same either way. The pick-vs-sibling ordering is covered by the
+        // active-account assertion above (review finding: this message used to claim otherwise).
     }
 
     @MainActor
@@ -2232,9 +2314,11 @@ final class AuthManagerTests: XCTestCase {
             return XCTFail("picking the stored org-a should succeed, got \(completed)")
         }
         XCTAssertEqual(count, 2, "the picked entry and its stored sibling both got fresh credentials")
-        // Composed the way Settings composes it, so the sentence the user reads is asserted.
-        XCTAssertEqual("Signed in as \(name). " + AuthManager.repairConfirmation(refreshedCount: count,
-                                                                                viewedAccountRepaired: true),
+        // The sentence Settings prints, built by the function Settings calls. It used to be
+        // concatenated here instead, so it proved only that the name came back - deleting the repair
+        // half of the status line left this green while the picker route went back to confirming
+        // "Signed in as X" over silently rescued siblings (review finding).
+        XCTAssertEqual(AuthManager.signInConfirmation(name: name, refreshedCount: count),
                        "Signed in as me@x.com. Refreshed 2 organizations.")
     }
 
@@ -2252,10 +2336,13 @@ final class AuthManagerTests: XCTestCase {
 
         let completed = auth.completeManualSignIn(org: orgs[0])
 
-        guard case .success(_, let count) = completed else {
+        guard case .success(let name, let count) = completed else {
             return XCTFail("adding org-a should succeed, got \(completed)")
         }
         XCTAssertEqual(count, 0, "a brand-new entry is an add, not a repair")
+        XCTAssertEqual(AuthManager.signInConfirmation(name: name, refreshedCount: count),
+                       "Signed in as \(name).",
+                       "nothing was repaired, so the status line stays the plain one the paste box always showed")
     }
 
     @MainActor
@@ -2324,6 +2411,86 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertTrue(wrote, "the re-auth still happens")
         XCTAssertEqual(auth.accountStore.accounts.first?.sessionKey, "sk-fresh")
         XCTAssertEqual(confirmations, [], "nothing beyond the org signed in to was repaired")
+    }
+
+    @MainActor
+    func testAddOrReactivateWebViewAccount_addingAnOrgThatRepairsOneSibling_reportsIt() async {
+        // The add branch counts differently from the re-auth branch: the org signed in to is newly
+        // stored, so one repaired sibling is a total of one. A single threshold read against both
+        // counts silenced exactly this case, so a browser sign-in fixed the user's other org and told
+        // them nothing while the paste box reported the same event (R6, review finding).
+        let auth = makeAuthManager()
+        let a = Account(email: "me@x.com", sessionKey: "sk-a-old", organizationId: "org-a",
+                        allCookieHeader: "sessionKey=sk-a-old; __cf_bm=cf-a")
+        _ = auth.accountStore.addAccount(a)
+        var confirmations: [String] = []
+        auth.onSignInConfirmation = { confirmations.append($0) }
+        let orgs = ["org-a", "org-b"].map {
+            Organization(uuid: $0, name: nil, billingType: nil, emailAddress: nil)
+        }
+
+        let wrote = auth.addOrReactivateWebViewAccount(org: orgs[1], orgs: orgs, sessionKey: "sk-fresh",
+                                                       cookieHeader: "sessionKey=sk-fresh; __cf_bm=cf-fresh",
+                                                       email: "me@x.com")
+
+        XCTAssertTrue(wrote, "org-b is unstored and there is a free slot, so it is added")
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.id == a.id }?.sessionKey, "sk-fresh",
+                       "the stored sibling really was rewritten - that is the news being reported")
+        XCTAssertEqual(confirmations, ["Refreshed 1 organization."],
+                       "one stored entry rewritten, stated singular, on the same terms as the paste box")
+    }
+
+    @MainActor
+    func testAddOrReactivateWebViewAccount_addingAnOrg_doesNotCountItselfAmongTheRepaired() async {
+        // The count is stored entries actually rewritten, so adding an org alongside two repaired
+        // siblings reads two, not three. Counting the added org would claim the app repaired an entry
+        // it had never stored.
+        let auth = makeAuthManager()
+        for uuid in ["org-a", "org-b"] {
+            _ = auth.accountStore.addAccount(Account(email: "me@x.com", sessionKey: "sk-\(uuid)-old",
+                organizationId: uuid, allCookieHeader: "sessionKey=sk-\(uuid)-old"))
+        }
+        var confirmations: [String] = []
+        auth.onSignInConfirmation = { confirmations.append($0) }
+        let orgs = ["org-a", "org-b", "org-c"].map {
+            Organization(uuid: $0, name: nil, billingType: nil, emailAddress: nil)
+        }
+
+        let wrote = auth.addOrReactivateWebViewAccount(org: orgs[2], orgs: orgs, sessionKey: "sk-fresh",
+                                                       cookieHeader: "sessionKey=sk-fresh; __cf_bm=cf-fresh",
+                                                       email: "me@x.com")
+
+        XCTAssertTrue(wrote, "org-c is added")
+        XCTAssertEqual(auth.accountStore.accounts.count, 3, "the two siblings plus the org just added")
+        for uuid in ["org-a", "org-b"] {
+            XCTAssertEqual(auth.accountStore.accounts.first { $0.organizationId == uuid }?.sessionKey, "sk-fresh",
+                           "\(uuid) was rewritten, so the number reported must include it")
+        }
+        XCTAssertEqual(auth.accountStore.accounts.first { $0.organizationId == "org-c" }?.sessionKey, "sk-fresh",
+                       "the added org holds the same credentials, it was just never stored before")
+        XCTAssertEqual(auth.accountStore.activeAccountId,
+                       auth.accountStore.accounts.first { $0.organizationId == "org-c" }?.id,
+                       "the browser pick route ends on the org the user chose (R3), not on the sibling the loop wrote last")
+        XCTAssertEqual(confirmations, ["Refreshed 2 organizations."],
+                       "two stored entries were rewritten; the third was added, not repaired")
+    }
+
+    @MainActor
+    func testAddOrReactivateWebViewAccount_firstAddWithNoSiblings_staysSilent() async {
+        // The lower edge of the add branch. A first sign-in stores one org and repairs nothing, so
+        // there is no news and the modal must not fire - the same rule the single-org re-auth test
+        // pins on the other branch, which is where the threshold lives now.
+        let auth = makeAuthManager()
+        var confirmations: [String] = []
+        auth.onSignInConfirmation = { confirmations.append($0) }
+        let orgs = [Organization(uuid: "org-a", name: nil, billingType: nil, emailAddress: nil)]
+
+        let wrote = auth.addOrReactivateWebViewAccount(org: orgs[0], orgs: orgs, sessionKey: "sk-fresh",
+                                                       cookieHeader: "sessionKey=sk-fresh; __cf_bm=cf-fresh",
+                                                       email: "me@x.com")
+
+        XCTAssertTrue(wrote, "the account is stored")
+        XCTAssertEqual(confirmations, [], "nothing was repaired, so there is nothing to report")
     }
 
     // MARK: - Issue #41 (R11): polling pauses across the network windows of a sign-in
@@ -2532,6 +2699,130 @@ final class AuthManagerTests: XCTestCase {
         let result = await auth.manualSignIn("sessionKey=sk-fresh; __cf_bm=cf-fresh")
 
         guard case .success = result else { return XCTFail("expected the re-auth to land, got \(result)") }
+        XCTAssertEqual(jarAtSuspend, ["sk-X"],
+                       "polling was suspended while the jar still held the old cookies, so the suspend came FIRST")
+        XCTAssertEqual(jarSessionKey(), "sk-fresh",
+                       "and the prime really did happen afterwards, so the assertion above is not vacuous")
+    }
+
+    @MainActor
+    func testFetchOrganizationId_everyExitResumesPolling() async {
+        // The browser path is the normal way in (D3), and it primes the same shared jar the manual
+        // path does, so R11 covers it too. Same invariant as the manual tests: every exit resumes,
+        // because a missed resume leaves polling dead until the app restarts.
+        let header = "sessionKey=sk-fresh; __cf_bm=cf-fresh"
+
+        let authFailed = await pauseEvents(prefix: "u9n_") { auth in
+            mockSession.responseData = Data()
+            mockSession.responseStatusCode = 401
+            auth.pendingSessionKey = "sk-fresh"
+            auth.pendingCookieHeader = header
+            await auth.fetchOrganizationId()
+            XCTAssertEqual(auth.loginState, .error("Sign-in failed. Please try again."))
+        }
+        XCTAssertEqual(authFailed, ["suspend", "resume"], "a rejected sign-in must not leave polling stopped")
+
+        let noOrgs = await pauseEvents(prefix: "u9o_") { auth in
+            mockSession.responseData = "[]".data(using: .utf8)!
+            mockSession.responseStatusCode = 200
+            auth.pendingSessionKey = "sk-fresh"
+            auth.pendingCookieHeader = header
+            await auth.fetchOrganizationId()
+        }
+        XCTAssertEqual(noOrgs, ["suspend", "resume"])
+
+        let refusedNilHeader = await pauseEvents(prefix: "u9p_") { auth in
+            // The KTD4 refusal: no captured header, so nothing is written - but the suspend was
+            // already taken, and it still has to be undone.
+            mockSession.responseData = #"[{"uuid":"org-solo"}]"#.data(using: .utf8)!
+            mockSession.responseStatusCode = 200
+            auth.pendingSessionKey = "sk-fresh"
+            auth.pendingCookieHeader = nil
+            await auth.fetchOrganizationId()
+            XCTAssertEqual(auth.accountStore.accounts.count, 0)
+        }
+        XCTAssertEqual(refusedNilHeader, ["suspend", "resume"])
+
+        let added = await pauseEvents(prefix: "u9q_") { auth in
+            mockSession.responseData = #"[{"uuid":"org-solo"}]"#.data(using: .utf8)!
+            mockSession.responseStatusCode = 200
+            auth.pendingSessionKey = "sk-fresh"
+            auth.pendingCookieHeader = header
+            await auth.fetchOrganizationId()
+            XCTAssertEqual(auth.accountStore.accounts.count, 1, "expected the single-org add to land")
+        }
+        XCTAssertEqual(added, ["suspend", "resume"])
+
+        let allStored = await pauseEvents(prefix: "u9r_") { auth in
+            for uuid in ["org-a", "org-b"] {
+                _ = auth.accountStore.addAccount(Account(email: "me@x.com", sessionKey: "sk-\(uuid)-old",
+                    organizationId: uuid, allCookieHeader: "sessionKey=sk-\(uuid)-old"))
+            }
+            mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-b"}]"#.data(using: .utf8)!
+            mockSession.responseStatusCode = 200
+            auth.pendingSessionKey = "sk-fresh"
+            auth.pendingCookieHeader = header
+            await auth.fetchOrganizationId()
+            XCTAssertEqual(auth.accountStore.accounts.first?.sessionKey, "sk-fresh", "expected the repair route")
+        }
+        XCTAssertEqual(allStored, ["suspend", "resume"],
+                       "the success route fires onAuthSuccess before this resume, which restarts polling itself - the resume is then a no-op, not a second poll")
+
+        let picker = await pauseEvents(prefix: "u9s_") { auth in
+            // One stored org and one unstored, so the flow hands off to the picker. Headless there
+            // is no login window, so the picker resolves nil - the cancel exit.
+            _ = auth.accountStore.addAccount(Account(email: "me@x.com", sessionKey: "sk-a-old",
+                organizationId: "org-a", allCookieHeader: "sessionKey=sk-a-old"))
+            mockSession.responseData = #"[{"uuid":"org-a"},{"uuid":"org-new"}]"#.data(using: .utf8)!
+            mockSession.responseStatusCode = 200
+            auth.pendingSessionKey = "sk-fresh"
+            auth.pendingCookieHeader = header
+            await auth.fetchOrganizationId()
+        }
+        XCTAssertEqual(picker, ["suspend", "resume", "suspend", "resume"],
+                       "two pauses, one per network window, with the NSAlert sheet sitting BETWEEN them unpaused: it waits on a person and can sit open until the login timeout (KTD8)")
+    }
+
+    @MainActor
+    func testFetchOrganizationId_thrownRequestStillResumesPolling() async {
+        // The catch exit on the browser path. Kept separate because `responseError` on the shared
+        // mock would leak into the cases above.
+        mockSession.responseError = URLError(.notConnectedToInternet)
+        let events = await pauseEvents(prefix: "u9t_") { auth in
+            auth.pendingSessionKey = "sk-fresh"
+            auth.pendingCookieHeader = "sessionKey=sk-fresh; __cf_bm=cf-fresh"
+            await auth.fetchOrganizationId()
+            XCTAssertEqual(auth.loginState, .error("Connection error. Please try again."))
+        }
+        XCTAssertEqual(events, ["suspend", "resume"])
+    }
+
+    @MainActor
+    func testFetchOrganizationId_suspendsBeforeTheJarIsPrimed() async {
+        // Browser-path twin of testManualSignIn_suspendsBeforeTheJarIsPrimed. The ordering is the
+        // property R11 rests on: a suspend taken after the jar has been re-primed leaves open
+        // exactly the window the pause exists to close. Read from inside the suspend callback,
+        // because the jar is the thing being raced.
+        let auth = makeAuthManager()
+        let url = URL(string: "https://claude.ai")!
+        func jarSessionKey() -> String? {
+            ClaudeAPI.session.configuration.httpCookieStorage?.cookies(for: url)?.first { $0.name == "sessionKey" }?.value
+        }
+        let x = Account(email: "x@test.com", sessionKey: "sk-X", organizationId: "org-X",
+                        allCookieHeader: "sessionKey=sk-X; __cf_bm=cf-X")
+        _ = auth.accountStore.addAccount(x)
+        auth.accountStore.switchTo(x.id)
+        XCTAssertEqual(jarSessionKey(), "sk-X", "precondition: the jar holds the active account")
+
+        var jarAtSuspend: [String?] = []
+        auth.onSuspendPolling = { jarAtSuspend.append(jarSessionKey()) }
+        mockSession.responseData = #"[{"uuid":"org-X"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+        auth.pendingSessionKey = "sk-fresh"
+        auth.pendingCookieHeader = "sessionKey=sk-fresh; __cf_bm=cf-fresh"
+
+        await auth.fetchOrganizationId()
+
         XCTAssertEqual(jarAtSuspend, ["sk-X"],
                        "polling was suspended while the jar still held the old cookies, so the suspend came FIRST")
         XCTAssertEqual(jarSessionKey(), "sk-fresh",

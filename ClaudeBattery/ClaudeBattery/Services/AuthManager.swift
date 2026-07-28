@@ -842,20 +842,81 @@ class AuthManager: NSObject, ObservableObject {
         return "Refreshed \(orgs), but not the one you're viewing - switch to a refreshed one, or paste that account's cookie header."
     }
 
+    /// The paste box's status line for a completed sign-in (R6, issue #41). A count of zero is a
+    /// first add of an org the app had never stored, which repaired nothing and keeps the plain
+    /// sentence the paste box always showed.
+    ///
+    /// Here rather than inline in `SettingsView.apply` because the view has no test that can reach
+    /// it: dropping the repair half of the sentence would put the picker route back to confirming
+    /// "Signed in as X" while silently having rescued the user's other orgs, and the tests that
+    /// claimed to cover the sentence were rebuilding it themselves, so they would still have passed
+    /// (review finding). Same convention as `UsagePopoverView.batteryColor` - the view keeps the
+    /// rendering, the pure value it renders is testable on its own.
+    ///
+    /// `viewedAccountRepaired` is not a parameter: every `.success` route ends in `switchTo` on the
+    /// entry the pasted credentials just wrote, so the account being viewed afterwards is always one
+    /// of the repaired. D6's branch belongs to `.alreadySignedInAllOrgs`, which calls
+    /// `repairConfirmation` directly with the value the auth layer computed.
+    nonisolated static func signInConfirmation(name: String, refreshedCount: Int) -> String {
+        guard refreshedCount > 0 else { return "Signed in as \(name)." }
+        return "Signed in as \(name). " + repairConfirmation(refreshedCount: refreshedCount,
+                                                             viewedAccountRepaired: true)
+    }
+
     /// Report a WebView sign-in's repair count to the app so it can show it (R6, issue #41).
     ///
-    /// Fires only when the sign-in wrote fresh credentials to MORE than the org the user signed in
-    /// to. This route has no inline status line the way the manual paste section does, so the app
-    /// wires this to a one-line alert, and a modal for every ordinary single-org re-auth would charge
-    /// a click for news the user does not have. The manual path states the count even at one, because
-    /// writing another line into a status field it was already writing costs nothing.
+    /// Fires only when the sign-in wrote fresh credentials to a stored entry OTHER than the org the
+    /// user signed in to. This route has no inline status line the way the manual paste section does,
+    /// so the app wires this to a one-line alert, and a modal for every ordinary single-org re-auth
+    /// would charge a click for news the user does not have. The manual path states the count even at
+    /// one, because writing another line into a status field it was already writing costs nothing.
+    ///
+    /// The gate takes the sibling count rather than the total because the three call sites arrive
+    /// with the org signed in to counted differently: the picker's add route stored it new, the other
+    /// two repaired it. A single `refreshedCount >= 2` therefore meant "at least one sibling" on two
+    /// routes and "at least two siblings" on the third, so a browser sign-in that added an org and
+    /// rescued exactly one stored sibling said nothing at all, while the manual paste box reported
+    /// the same event (P3, review finding). Splitting the two quantities leaves one threshold over
+    /// one meaning, which cannot drift apart again.
+    ///
+    /// The number shown is the siblings plus the org signed in to when that org was itself a repair -
+    /// the same arithmetic `completeManualSignIn` does with `pickedOrgWasStored`, so one event cannot
+    /// be counted two ways on the two paths.
     ///
     /// `viewedAccountRepaired` is always true here: every success route on this path ends in
-    /// `switchTo`, so the account being viewed afterwards is by construction one of those repaired,
-    /// and D6's branch cannot arise.
-    private func reportWebViewRepair(refreshedCount: Int) {
-        guard refreshedCount >= 2 else { return }
+    /// `switchTo`, so the account being viewed afterwards holds credentials this sign-in just wrote,
+    /// repaired on two routes and newly added on the third. D6's branch is for an entry the sign-in
+    /// deliberately left stale, which cannot arise here.
+    private func reportWebViewRepair(siblingsRepaired: Int, signedInOrgRepaired: Bool) {
+        guard siblingsRepaired >= 1 else { return }
+        let refreshedCount = siblingsRepaired + (signedInOrgRepaired ? 1 : 0)
         onSignInConfirmation?(Self.repairConfirmation(refreshedCount: refreshedCount, viewedAccountRepaired: true))
+    }
+
+    /// Put the active account's cookies back in the shared jar (R5, R10, issue #41).
+    ///
+    /// `ClaudeAPI.activateCookies` mutates the SHARED jar that `UsageService.pollUsage` reads, so
+    /// every non-success outcome of a sign-in has to put the active account's cookies back. Without
+    /// this, a failed attempt to ADD a new account would clobber the working account's cookies and
+    /// its next poll would 401 - silently breaking a healthy account (P1, review finding).
+    ///
+    /// Read the store AT restore time rather than snapshotting before the network call (R10, KTD6,
+    /// issue #41). Account is a struct, so a pre-network capture is a frozen copy: if the user
+    /// switches accounts or removes one while the sign-in is still waiting on the network, putting
+    /// that copy back writes the old account's cookies over whichever account is active now - the
+    /// same healthy-account breakage this helper exists to prevent, just aimed at a different
+    /// account. A nil read means the entry that was active has been removed with nothing left to
+    /// fall back to, so the jar is cleared rather than re-primed from a deleted account.
+    ///
+    /// One method on `AuthManager` rather than a helper nested in each sign-in function: it started
+    /// nested inside `discoverAndAddManualAccount`, and the browser path was later found to need the
+    /// identical restore (P1, review finding). Two copies of a rule this sharp drift.
+    private func restoreActiveJar() {
+        if let active = accountStore.activeAccount {
+            ClaudeAPI.activateCookies(sessionKey: active.sessionKey, cookieHeader: active.allCookieHeader)
+        } else {
+            ClaudeAPI.clearClaudeCookies()
+        }
     }
 
     // internal for @testable access in AuthManagerTests
@@ -866,11 +927,47 @@ class AuthManager: NSObject, ObservableObject {
             return
         }
 
+        // Pause polling for this sign-in's network window (R11, KTD8, issue #41), immediately before
+        // the first jar prime and never after it. `ClaudeAPI.makeRequest` below rewrites the SHARED
+        // jar that `UsageService.pollUsage` reads, and URLSession writes a request's Cookie header
+        // when the request goes out rather than when it was created - so a poll already in flight
+        // can be answered with the signing-in account's credentials. That answer is a 403, which
+        // marks a healthy account expired and stops polling, and the failure routes below fire no
+        // success callback, so nothing would start it again.
+        //
+        // Declared BEFORE the jar-restore `defer` below so it runs AFTER it: defers unwind in
+        // reverse order, and resuming into a jar that still held the abandoned sign-in's cookies
+        // would hand the very poll this pause protects the wrong credentials.
+        //
+        // On the success routes this resume is a no-op rather than a second poll: they fire
+        // `onAuthSuccess` synchronously, which reaches `UsageService.restartPolling` and clears the
+        // suspend bookkeeping, so `resumePolling` returns at its own guard.
+        onSuspendPolling?()
+        defer { onResumePolling?() }
+
         guard let request = ClaudeAPI.makeRequest(path: "/api/organizations", sessionKey: sessionKey, cookieHeader: pendingCookieHeader) else {
             logger.error("Failed to construct organizations API URL")
             handleOrgDiscoveryFailure("Connection error. Please try again.")
             return
         }
+
+        // The request above has now primed the shared jar with the login window's cookies, so every
+        // failure and every cancellation exit below would otherwise return leaving a half-signed-in
+        // account's cookies live for the active account's next poll (P1, review finding; the same
+        // defect class `restoreActiveJar` was added to the manual path for).
+        //
+        // A `defer` here rather than a call inside `handleOrgDiscoveryFailure`: the
+        // `guard !Task.isCancelled` returns below are how the 10-minute login timeout and the
+        // window-close teardown leave this function, and they never reach that handler.
+        //
+        // `endedOnFreshCredentials` keeps it off the success routes, which deliberately end in
+        // `switchTo` having primed the jar with the credentials just written - a restore there would
+        // fight the switch and would throw away any Cloudflare rotation the response put in the jar.
+        // `jarPrimed` keeps it off the KTD4 nil-header refusal, which never primed the jar. Both
+        // read before the branches below, because the failure handler clears `pendingCookieHeader`.
+        let jarPrimed = !(pendingCookieHeader ?? "").isEmpty
+        var endedOnFreshCredentials = false
+        defer { if jarPrimed && !endedOnFreshCredentials { restoreActiveJar() } }
 
         do {
             let (data, response) = try await session.data(for: request)
@@ -966,25 +1063,45 @@ class AuthManager: NSObject, ObservableObject {
                 // `switchTo` stays the last jar-touching step (KTD3): every write above put the same
                 // fresh credentials in, so the jar ends up holding `matched`'s copy of them.
                 accountStore.switchTo(matched.id)
+                // Past the switch the jar holds credentials this sign-in just wrote, so the restore
+                // installed above must not fire on the way out (it would fight the switch).
+                endedOnFreshCredentials = true
                 // The manual path gates its success callback and its jar restore on whether the
                 // ACTIVE entry was among those repaired (KTD1). That gate collapses here rather than
                 // being dropped: `switchTo` has just made `matched` active, and `matched` is always a
                 // member of `refreshedIds` because `matchedAccount` returns an entry whose org is in
                 // `orgs`, which is exactly what `matchedAccounts` filters on. So there is no branch
-                // to take, and no jar restore to add either - this route ends active on freshly
-                // written credentials, and a restore would fight the switch.
+                // to take, and this is a route the jar restore must stay off, which is what the flag
+                // set above does.
                 logger.info("Re-auth: all orgs already added, refreshed \(refreshedIds.count) account(s), active is \(matched.id.uuidString)")
                 pendingSessionKey = nil
                 pendingCookieHeader = nil
                 loginState = .idle
                 stopLoginWindow()
                 // Say how many were repaired (R6). Reported after stopLoginWindow so the message is
-                // about a finished sign-in rather than arriving over the login window.
-                reportWebViewRepair(refreshedCount: refreshedIds.count)
+                // about a finished sign-in rather than arriving over the login window. `matched` is
+                // always a member of `refreshedIds` (see just above), so the org signed in to was
+                // itself repaired and the rest of the set are its siblings.
+                reportWebViewRepair(siblingsRepaired: refreshedIds.count - 1, signedInOrgRepaired: true)
                 onAuthSuccess?()
                 return
             case .needsChoice(let choices):
+                // Hand the jar and polling back before waiting on a person (KTD8, R5, issue #41).
+                // This picker is an NSAlert sheet that can sit open until the 10-minute login
+                // timeout, and `beginSheetModal` does not block the run loop, so the poll timer
+                // keeps firing: a pause held across it is exactly the think-time pause KTD8 rules
+                // out. The jar goes back FIRST, because resuming polling while the jar still held
+                // the signing-in account's cookies would be worse than not resuming at all. Same
+                // order and same reason as the manual path, which restores before returning
+                // `.needsOrgChoice`. The KTD4 guard above means the jar has been primed by here.
+                restoreActiveJar()
+                onResumePolling?()
                 let picked = await showOrgPicker(orgs: choices)
+                // Second window, matching `completeManualSignIn`: the writes below re-point the
+                // shared jar (`addOrReactivateWebViewAccount` ends in `switchTo`), so they are
+                // paused too. Above the cancellation and cancel-button guards so every route out of
+                // the picker is balanced by the resume on the way out.
+                onSuspendPolling?()
                 // If teardown (timeout / window close) resumed the picker with nil, orgDiscoveryTask
                 // is already cancelled — do not fight the teardown by re-driving login state.
                 guard !Task.isCancelled else { return }
@@ -1006,6 +1123,9 @@ class AuthManager: NSObject, ObservableObject {
                 handleOrgDiscoveryFailure("Account limit reached.")
                 return
             }
+            // Same as the all-already-stored route: this ended in `switchTo`, so the jar already
+            // holds the credentials just written and the restore must not fire on the way out.
+            endedOnFreshCredentials = true
 
             // Success — clean up, close window, and notify
             pendingSessionKey = nil
@@ -1043,16 +1163,23 @@ class AuthManager: NSObject, ObservableObject {
         // sibling write is jar-neutral unless the sibling is the outgoing active account, and that
         // write puts in the same fresh credentials `switchTo` is about to.
         //
-        // Unlike the manual path this route has no jar restore and needs none: every success route
-        // ends in `switchTo`, and the failure route returns without having written anything. Adding
-        // one would fight the switch.
+        // No jar restore inside THIS function, and none belongs here: every success route below ends
+        // in `switchTo`, and the limit-reached route returns without having written anything, so a
+        // restore here would only fight the switch. That covers this function's own writes and
+        // nothing more. It is NOT true of the shared cookie jar on the path as a whole - by the time
+        // this runs, `ClaudeAPI.makeRequest` in `fetchOrganizationId` has already repointed that jar
+        // at the signing-in account. The restore for that lives in `fetchOrganizationId`'s `defer`,
+        // which every failure and cancellation exit passes through. An earlier version of this
+        // comment read "this route has no jar restore and needs none", which was true of the account
+        // store and false of the jar, and the gap it blessed was a P1 (review finding).
         //
         // Accepted limit (D7): an entry is keyed only by org and labelled with whoever added it
         // first, and there is deliberately no owner check here - see the all-orgs-already-stored
         // branch in discoverAndAddManualAccount for why the stored email cannot serve as one.
         //
-        // Returns how many siblings were repaired, so the caller can add the chosen org to that and
-        // report the total (R6).
+        // Returns how many SIBLINGS were repaired. That is the quantity the confirmation is gated on,
+        // and the chosen org is counted separately by each branch below, because only one of the two
+        // repaired it (R6).
         func refreshSiblings() -> Int {
             let siblings = Self.matchedAccounts(orgs: orgs, accounts: accountStore.accounts)
                 .filter { $0.organizationId != org.uuid }
@@ -1075,12 +1202,14 @@ class AuthManager: NSObject, ObservableObject {
 
         if accountStore.addAccount(account) {
             // The chosen org is newly stored, so it is not part of the repaired count - only the
-            // siblings this sign-in rescued alongside it are (R6).
-            let repaired = refreshSiblings()
+            // siblings this sign-in rescued alongside it are (R6). Same basis as the manual picker
+            // with `pickedOrgWasStored` false, so adding an org that rescued one stored sibling
+            // reports "Refreshed 1 organization." on both paths rather than only on the paste box.
+            let siblings = refreshSiblings()
             accountStore.switchTo(account.id)
             // Non-PII id, not displayName (= email by default); os_log can be read off-device.
             logger.info("Account added and activated: \(account.id.uuidString)")
-            reportWebViewRepair(refreshedCount: repaired)
+            reportWebViewRepair(siblingsRepaired: siblings, signedInOrgRepaired: false)
             return true
         }
 
@@ -1090,10 +1219,10 @@ class AuthManager: NSObject, ObservableObject {
             // pair that was paired with the previous sessionKey.
             accountStore.updateSessionKey(existing.id, sessionKey, cookieHeader: cookieHeader)
             // The chosen org WAS already stored, so it counts as repaired along with its siblings.
-            let repaired = refreshSiblings() + 1
+            let siblings = refreshSiblings()
             accountStore.switchTo(existing.id)
             logger.info("Re-authenticated existing account: \(existing.id.uuidString)")
-            reportWebViewRepair(refreshedCount: repaired)
+            reportWebViewRepair(siblingsRepaired: siblings, signedInOrgRepaired: true)
             return true
         }
 
@@ -1288,26 +1417,10 @@ class AuthManager: NSObject, ObservableObject {
         // Drop any prior unfinished org-choice context so a stale credential is not retained.
         pendingManualSignIn = nil
 
-        // activateCookies mutates the SHARED jar that UsageService.pollUsage reads, so every
-        // non-success outcome has to put the active account's cookies back. Without this, a failed
-        // attempt to ADD a new account would clobber the working account's cookies and its next
-        // poll would 401 - silently breaking a healthy account (P1, review finding).
-        //
-        // Read the store AT restore time rather than snapshotting before the network call (R10,
-        // issue #41). Account is a struct, so a pre-network capture is a frozen copy: if the user
-        // switches accounts or removes one while the paste is still waiting on the network, putting
-        // that copy back writes the old account's cookies over whichever account is active now -
-        // the same healthy-account breakage this helper exists to prevent, just aimed at a
-        // different account. A nil read means the entry that was active has been removed with
-        // nothing left to fall back to, so the jar is cleared rather than re-primed from a deleted
-        // account.
-        func restoreActiveJar() {
-            if let active = accountStore.activeAccount {
-                ClaudeAPI.activateCookies(sessionKey: active.sessionKey, cookieHeader: active.allCookieHeader)
-            } else {
-                ClaudeAPI.clearClaudeCookies()
-            }
-        }
+        // `restoreActiveJar` (the method, shared with the browser path) is what every non-success
+        // outcome below calls to put the active account's cookies back after `activateCookies`
+        // rewrote the SHARED jar that UsageService.pollUsage reads. It reads the store at restore
+        // time, not before the network call (R10, KTD6) - see the method for why that matters.
 
         // Pause polling for this sign-in's network window (R11, KTD8, issue #41), immediately
         // before the first jar prime and never after it. The line below rewrites the SHARED jar

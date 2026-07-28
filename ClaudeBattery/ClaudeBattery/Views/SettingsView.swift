@@ -298,12 +298,10 @@ private struct ManualSignInSection: View {
         case .success(let name, let refreshedCount):
             statusIsError = false
             // One pick can repair the picked org's stored siblings as well (R2, issue #41), so name
-            // the count rather than let that happen silently. Zero is a first add of an org the app
-            // had never stored, which repaired nothing and keeps the message it always had.
-            statusText = refreshedCount > 0
-                ? "Signed in as \(name). " + AuthManager.repairConfirmation(refreshedCount: refreshedCount,
-                                                                           viewedAccountRepaired: true)
-                : "Signed in as \(name)."
+            // the count rather than let that happen silently. The sentence is built by a pure helper
+            // next to `repairConfirmation` rather than here, because nothing in this project can
+            // test a view body (KTD9) and the composition was the untested half (review finding).
+            statusText = AuthManager.signInConfirmation(name: name, refreshedCount: refreshedCount)
             pasted = ""
             orgChoices = []
         case .needsOrgChoice(let orgs):
