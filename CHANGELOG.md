@@ -1,5 +1,33 @@
 # Change Log
 
+### v1.70
+
+**Session Dial**
+- When your weekly limit is nearly gone, the Session dial now converts what is left of the week into session terms instead of showing the weekly percentage on a gauge that measures sessions. With 6% of a week left on Max 5x it reads 76%, because that is roughly how much of a 5-hour window you can still use. It previously read 6%, which made a full session look empty.
+- The app reads your plan from your account to do that conversion. On a plan it does not recognise, it shows the true session number rather than guessing.
+- Each account also works out its own conversion from your real usage over time, and once that is reliable it is used in place of the published figures.
+- An exhausted week now reads 0% and says so, even before the app knows your plan.
+
+**Sign-In**
+- One sign-in repairs every organization stored under that account. Previously an expired session came back one organization at a time, so you signed in, switched organizations in Settings, and pasted the same credentials again (issue #41).
+- Fixed a bug where cancelling a sign-in could leave a different account you were already using unable to refresh, showing as expired until you switched accounts or restarted.
+- Pasting only a session key no longer reports success and then fails on the next check.
+- The manual paste box stays available when you have reached the account limit, which is when Google and passkey accounts need it most.
+- Accounts now show your email address instead of "Account 1".
+
+**Accounts**
+- You can now store up to 10 accounts, up from 5. Each organization counts as one, and only the active one is polled, so the extra entries cost nothing.
+
+**Popover**
+- The update notice moved to the top of the popover, where it is easier to see, and the last-updated line no longer disappears when an update is waiting.
+- Removed the Claude Design row.
+
+**Diagnostics**
+- Diagnostics can now record which plan your account is on, so limits can be confirmed on plans we cannot see directly. It records no email address, organization name, or account identifier.
+
+**Documentation**
+- The README explains what the Models card shows: your weekly quota per model, how much is left rather than how much is used, and why the models listed depend on your plan (issue #42).
+
 ### v1.60
 
 **Concentric Usage Arcs**
