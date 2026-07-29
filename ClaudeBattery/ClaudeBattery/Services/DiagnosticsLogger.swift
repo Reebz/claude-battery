@@ -91,9 +91,16 @@ final class DiagnosticsLogger: @unchecked Sendable {
     /// Emit a gated event: synchronous file write to `diag-*.jsonl` + parallel os.Logger.notice
     /// (live Console only). No-op when the gate is off; opens the file and writes session-start
     /// on the first gated call. Every event uses this path — only the file is exported.
-    func emitMilestone(kind: String, payload: [String: Any]) {
+    ///
+    /// `payload` is an autoclosure so a disabled logger never builds one. Producers write their
+    /// dictionary at the call site, and some of them cost real work: the plan sample in
+    /// `UsageService.pollUsage` hashes an account id and formats two dates on every poll, every two
+    /// minutes, for the overwhelming majority of users who never turn diagnostics on. Doing it here
+    /// rather than at each call site keeps the gate in the one place that owns it, and covers every
+    /// producer at once instead of the eight of them remembering to check.
+    func emitMilestone(kind: String, payload: @autoclosure () -> [String: Any]) {
         guard diagnosticLoggingEnabled else { return }
-        let line = redactedLine(kind: kind, payload: payload)
+        let line = redactedLine(kind: kind, payload: payload())
         logger.notice("[\(kind, privacy: .public)] \(line, privacy: .public)")
         writeQueue.async { [weak self] in
             guard let self else { return }
@@ -193,9 +200,19 @@ final class DiagnosticsLogger: @unchecked Sendable {
         resolvedFileURL = url
         Self.pruneOldLogs(in: dir, keeping: url)
 
+        // The file NAME and a home-relative directory, never the absolute path. The absolute path
+        // is `/Users/<macOS account name>/Library/Containers/.../diag-....jsonl`, and the redactor
+        // cannot catch it: a bare filesystem path has no `=`, no `@` and no scheme, so every pass
+        // skips it and the username ships verbatim. This file exists to be attached to a public
+        // GitHub issue, and Settings tells the user no account names are saved, so the one string
+        // in the export that carries their name does not belong in it. What the line is FOR
+        // survives the abbreviation: which file this launch opened, and whether the directory
+        // resolved where it should. The override is a presence marker for the same reason, since a
+        // test override path is the other way a home-shaped string could reach this payload.
         writeLineLocked(SecretRedactor.redact(serialize(kind: "path-resolved", payload: [
-            "path": url.path,
-            "directoryOverride": directoryOverride?.path ?? "(none)"
+            "file": url.lastPathComponent,
+            "dir": (url.deletingLastPathComponent().path as NSString).abbreviatingWithTildeInPath,
+            "directoryOverride": directoryOverride == nil ? "(none)" : "(set)"
         ])))
         writeLineLocked(SecretRedactor.redact(serialize(kind: "session-start", payload: [
             "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "(unknown)",

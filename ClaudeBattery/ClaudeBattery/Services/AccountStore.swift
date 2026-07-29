@@ -162,14 +162,32 @@ class AccountStore: ObservableObject {
     /// answer whenever the app is unsure (D4). Keeping the old string would keep converting on a
     /// plan we can no longer see.
     ///
-    /// No cookie-jar work here, unlike `updateSessionKey`: this writes three display fields and
-    /// touches no credentials, so it is safe to call in either order around a jar-priming write.
+    /// No cookie-jar work here, unlike `updateSessionKey`: this writes display fields and touches
+    /// no credentials, so it is safe to call in either order around a jar-priming write.
     ///
     /// `billingType` is defaulted because nothing reads it for the dial - it exists so the
     /// diagnostics export can carry it (R6) - and a caller with no organizations response in hand
     /// has no honest value to pass. Every sign-in route has the org and passes it.
     func updatePlan(_ id: UUID, rateLimitTier: String?, capabilities: [String]?, billingType: String? = nil) {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
+        // A CONFIRMED plan change also throws the running measurement away. Those points were spent
+        // against capacities the account no longer has, the lifetime totals have no decay to work
+        // that out on their own, and the measurement OUTRANKS the tier being written here
+        // (`PlanRatio.resolve`), so leaving it would keep the dial converting on the old plan while
+        // the freshly corrected tier sat unused - the exact failure this function exists to prevent
+        // (R4).
+        //
+        // Both sides have to be present and different before that counts as a plan change. Nil to a
+        // string is the ordinary "we have only just learned the tier" case, which is every account
+        // carried over from v1.60, and clearing there would destroy a mature correct measurement.
+        // A string to nil is just as likely to mean the field stopped arriving as a real change,
+        // and it would wipe every account's measurement at once, taking with it the one thing that
+        // still converts the dial when the table cannot (D3).
+        if let previous = accounts[index].rateLimitTier,
+           let incoming = rateLimitTier,
+           previous != incoming {
+            accounts[index].ratioMeasurement = nil
+        }
         accounts[index].rateLimitTier = rateLimitTier
         accounts[index].capabilities = capabilities
         accounts[index].billingType = billingType
@@ -180,12 +198,19 @@ class AccountStore: ObservableObject {
     /// because the totals are built up over many polls and have to survive a relaunch: a version
     /// that started from nothing each time the app quit would hand a user who quits daily a
     /// measurement that never gets anywhere. That is one small UserDefaults write every two
-    /// minutes, the same shape of write `updateDidNotify` already makes from a poll.
+    /// minutes, but only when the measurement actually moved: `accounts` is `@Published`, so
+    /// assigning into it re-encodes the whole account list AND invalidates every view watching the
+    /// store, and a poll that returns the same percentages produces a value equal to the stored one
+    /// (both totals grow by exactly zero). Issue #11 was CPU burned on redraws nothing asked for,
+    /// so a publish with no new information is not worth making. Do not assume this write already
+    /// happened anyway: the `updateDidNotify` one it resembles sits behind `checkAndNotify`, which
+    /// returns early unless notifications are on, and they are off by default.
     ///
     /// Takes the whole value rather than a delta so the accumulation rules all live in one pure
     /// function (`RatioMeasurement.updated`) that can be tested without a store behind it.
     func updateRatioMeasurement(_ id: UUID, _ measurement: RatioMeasurement) {
         guard let index = accounts.firstIndex(where: { $0.id == id }) else { return }
+        guard accounts[index].ratioMeasurement != measurement else { return }
         accounts[index].ratioMeasurement = measurement
         persist()
     }

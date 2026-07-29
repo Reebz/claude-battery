@@ -353,8 +353,8 @@ final class NoSecretsExportGateTests: XCTestCase {
         XCTAssertEqual(payload["session_remaining"] as? Double, 40)
         XCTAssertEqual(payload["weekly_remaining"] as? Double, 80)
 
-        // And the populated shape carries what it was given, measured ratio included: 4.2 weekly
-        // points over 40 session points is 0.105, above the confidence bar and inside the
+        // And the populated shape carries what it was given, measured ratio included: 42 weekly
+        // points over 400 session points is 0.105, above the confidence bar and inside the
         // plausible band, so it is a number the reader can check against the table.
         let full = UsageService.planSamplePayload(accountId: UUID(),
                                                   rateLimitTier: "default_claude_max_5x",
@@ -387,14 +387,16 @@ final class NoSecretsExportGateTests: XCTestCase {
     private static let sessionReset = ISO8601DateFormatter().date(from: sessionResetString)!
     private static let weeklyReset = ISO8601DateFormatter().date(from: weeklyResetString)!
 
-    /// A measurement past its confidence bar: 40 session points consumed against 4.2 weekly, so
-    /// `ratio` is 0.105 rather than nil.
+    /// A measurement past its confidence bar: 400 session points consumed against 42 weekly, so
+    /// `ratio` is 0.105 rather than nil. The bar counts WEEKLY points, so a total of 4.2 - which
+    /// whole-number readings could not produce anyway - would leave this nil and the payload
+    /// carrying no measured ratio at all.
     private static let measurement = RatioMeasurement(lastSessionRemaining: 100,
                                                       lastSessionResetsAt: sessionReset,
                                                       lastWeeklyRemaining: 6,
                                                       lastWeeklyResetsAt: weeklyReset,
-                                                      sessionPointsConsumed: 40,
-                                                      weeklyPointsConsumed: 4.2)
+                                                      sessionPointsConsumed: 400,
+                                                      weeklyPointsConsumed: 42)
 
     /// A `UsageData` built from the legacy per-field tiers, so session and weekly can be set
     /// independently. Mirrors the helper in `UsageServiceTests`; duplicated rather than shared

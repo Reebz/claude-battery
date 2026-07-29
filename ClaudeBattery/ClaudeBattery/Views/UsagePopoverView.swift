@@ -376,10 +376,15 @@ struct UsagePopoverView: View {
     /// One spoken label per dial combining usage, time-remaining, and the pace status (R9). The
     /// pace is spelled out with its meaning ("over pace") rather than reusing the terse visual
     /// caption, and `.unknown` has nothing to add.
+    ///
+    /// `.toNearestOrEven` because these are the same two Doubles the gauge draws with "%.0f", and
+    /// that is what "%.0f" does at an exact half: plain `.rounded()` would speak 17 against a dial
+    /// printing 16. Every menu bar renderer already rounds this way for the same reason. #43 was
+    /// this class of bug between two surfaces, and a screen reader is a third one.
     static func gaugeAccessibilityLabel(name: String, usage: Double, timeRemaining: Double?, pace: PaceStatus) -> String {
-        var parts = ["\(name) usage \(Int(usage.rounded())) percent"]
+        var parts = ["\(name) usage \(Int(usage.rounded(.toNearestOrEven))) percent"]
         if let timeRemaining {
-            parts.append("time remaining \(Int(timeRemaining.rounded())) percent")
+            parts.append("time remaining \(Int(timeRemaining.rounded(.toNearestOrEven))) percent")
         }
         switch pace {
         case .onTrack:       parts.append("on track")

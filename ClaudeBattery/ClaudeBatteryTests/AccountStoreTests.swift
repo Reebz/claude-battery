@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 @testable import ClaudeBattery
 
@@ -496,5 +497,104 @@ final class AccountStoreTests: XCTestCase {
         XCTAssertEqual(store.accounts.first?.sessionKey, "sk-real")
         XCTAssertEqual(store.accounts.first?.allCookieHeader, "sessionKey=sk-real; __cf_bm=cf",
                        "a plan write touches two display fields and no credentials")
+    }
+
+    // MARK: - updatePlan and the running measurement (R4, R5, D3)
+
+    /// An account already carrying a mature measurement, so a plan write has something to destroy.
+    private func accountWithAMeasurement(tier: String?) -> Account {
+        var account = Account(email: "me@x.com", sessionKey: "sk", organizationId: "org-1",
+                              rateLimitTier: tier)
+        account.ratioMeasurement = RatioMeasurement(lastSessionRemaining: 100,
+                                                    lastSessionResetsAt: Date(timeIntervalSince1970: 1),
+                                                    lastWeeklyRemaining: 68,
+                                                    lastWeeklyResetsAt: Date(timeIntervalSince1970: 2),
+                                                    sessionPointsConsumed: 400,
+                                                    weeklyPointsConsumed: 32)
+        return account
+    }
+
+    @MainActor
+    func testUpdatePlanToADifferentTier_clearsTheMeasurement() {
+        // The measurement outranks the tier being written, so an upgrade that kept it would keep
+        // converting the dial on capacities the account no longer has - the exact thing updatePlan
+        // exists to stop.
+        let storage = makeStorage()
+        let store = AccountStore(storage: storage)
+        let account = accountWithAMeasurement(tier: "default_claude_max_5x")
+        _ = store.addAccount(account)
+
+        store.updatePlan(account.id, rateLimitTier: "default_claude_max_20x", capabilities: nil)
+
+        XCTAssertNil(store.accounts.first?.ratioMeasurement)
+        XCTAssertNil(storage.readAccounts().first?.ratioMeasurement,
+                     "cleared in storage too, or the next launch reads the old plan's arithmetic back")
+    }
+
+    @MainActor
+    func testUpdatePlanWithTheSameTier_leavesTheMeasurementAlone() {
+        // The common case by far: every re-auth refreshes the plan, and re-writing the same string
+        // must not restart a measurement that took days to build.
+        let store = AccountStore(storage: makeStorage())
+        let account = accountWithAMeasurement(tier: "default_claude_max_5x")
+        _ = store.addAccount(account)
+
+        store.updatePlan(account.id, rateLimitTier: "default_claude_max_5x", capabilities: ["claude_max"])
+
+        XCTAssertEqual(store.accounts.first?.ratioMeasurement?.weeklyPointsConsumed, 32)
+    }
+
+    @MainActor
+    func testLearningTheTierForTheFirstTime_leavesTheMeasurementAlone() {
+        // nil to a string is not a plan change, it is the first time the app saw the plan at all.
+        // That is every account carried over from v1.60, and some of them have measured a correct
+        // ratio in the meantime.
+        let store = AccountStore(storage: makeStorage())
+        let account = accountWithAMeasurement(tier: nil)
+        _ = store.addAccount(account)
+
+        store.updatePlan(account.id, rateLimitTier: "default_claude_max_20x", capabilities: nil)
+
+        XCTAssertEqual(store.accounts.first?.ratioMeasurement?.weeklyPointsConsumed, 32)
+        XCTAssertEqual(store.accounts.first?.rateLimitTier, "default_claude_max_20x")
+    }
+
+    @MainActor
+    func testATierGoingMissing_leavesTheMeasurementAlone() {
+        // A string to nil is just as likely to mean the field stopped arriving as a real change,
+        // and it would wipe every account's measurement at once - taking with it the one thing
+        // that still converts the dial once the table cannot (D3).
+        let store = AccountStore(storage: makeStorage())
+        let account = accountWithAMeasurement(tier: "default_claude_max_5x")
+        _ = store.addAccount(account)
+
+        store.updatePlan(account.id, rateLimitTier: nil, capabilities: nil)
+
+        XCTAssertNil(store.accounts.first?.rateLimitTier, "the tier still clears")
+        XCTAssertEqual(store.accounts.first?.ratioMeasurement?.weeklyPointsConsumed, 32)
+    }
+
+    @MainActor
+    func testRepeatingTheSameMeasurement_doesNotRepublishTheStore() {
+        // A poll that reads back the same percentages folds to a value equal to the stored one, so
+        // writing it would re-encode every account and invalidate every view watching the store,
+        // every two minutes, with nothing new to show for it (issue #11).
+        let store = AccountStore(storage: makeStorage())
+        let account = accountWithAMeasurement(tier: "default_claude_max_5x")
+        _ = store.addAccount(account)
+        let stored = account.ratioMeasurement!
+
+        var publishes = 0
+        let cancellable = store.objectWillChange.sink { _ in publishes += 1 }
+        defer { cancellable.cancel() }
+
+        store.updateRatioMeasurement(account.id, stored)
+        XCTAssertEqual(publishes, 0, "an unchanged measurement is not news")
+
+        var moved = stored
+        moved.weeklyPointsConsumed += 1
+        store.updateRatioMeasurement(account.id, moved)
+        XCTAssertEqual(publishes, 1, "a measurement that moved still writes")
+        XCTAssertEqual(store.accounts.first?.ratioMeasurement?.weeklyPointsConsumed, 33)
     }
 }

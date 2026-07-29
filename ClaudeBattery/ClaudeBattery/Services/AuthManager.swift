@@ -2177,6 +2177,34 @@ struct Organization: Codable, Equatable {
         return "Organization"
     }
 
+    /// Written out so every optional field degrades to nil on a shape drift instead of throwing,
+    /// matching `UsageLimit` and the rest of the decoders in this app ("All fields optional/lenient
+    /// so a shape drift degrades to nil rather than throwing the whole `/usage` decode").
+    ///
+    /// The synthesized decoder threw on any value of the wrong TYPE, and both sign-in routes decode
+    /// `[Organization]`, so one org anywhere in the list with, say, `capabilities` enriched from
+    /// strings to objects would fail the whole array and stop every sign-in behind "Connection
+    /// error. Please try again." - a message pointing at the network for a problem that is not the
+    /// network, with no way for the user to get out of it until a new build ships. `capabilities`
+    /// is the container-shaped field and the likeliest to grow, but `name`, `billing_type`,
+    /// `email_address` and `rate_limit_tier` all had the identical property, so they are all
+    /// lenient here rather than four of them waiting to do the same thing.
+    ///
+    /// `uuid` stays required: an org with no uuid cannot be stored or polled, so throwing is the
+    /// honest answer (`testDecodeMissingUuidThrows` pins it). The cost of the rest being lenient is
+    /// stated plainly: a wrong-typed `rate_limit_tier` now quietly stops the dial converting rather
+    /// than failing loudly. That is the D4 fallback, the true session number with no conversion,
+    /// which is a worse diagnostic but a much better outcome than nobody being able to sign in.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        uuid = try container.decode(String.self, forKey: .uuid)
+        name = try? container.decode(String.self, forKey: .name)
+        billingType = try? container.decode(String.self, forKey: .billingType)
+        emailAddress = try? container.decode(String.self, forKey: .emailAddress)
+        rateLimitTier = try? container.decode(String.self, forKey: .rateLimitTier)
+        capabilities = try? container.decode([String].self, forKey: .capabilities)
+    }
+
     private enum CodingKeys: String, CodingKey {
         case uuid
         case name

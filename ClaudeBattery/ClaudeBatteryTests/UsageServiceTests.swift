@@ -61,6 +61,42 @@ final class UsageDataTests: XCTestCase {
         XCTAssertTrue(usage.modelUsages.isEmpty)
         XCTAssertNil(usage.weeklyResetDate)
         XCTAssertNil(usage.sessionResetDate)
+        // And the reading says so, so the measurement can refuse to difference against it.
+        XCTAssertFalse(usage.sessionPercentWasRead)
+        XCTAssertFalse(usage.weeklyPercentWasRead)
+    }
+
+    func testPercentageThatWasRead_isMarkedAsRead_onBothResponseShapes() throws {
+        // The flag exists to separate a real 100 from a defaulted one, so it has to be true
+        // wherever a percentage really arrived - in the newer limits[] shape as well as the legacy
+        // per-field tiers - or the measurement would refuse readings it should be using.
+        let legacy = UsageData(from: try decodeFixture("usage_full"))
+        XCTAssertTrue(legacy.sessionPercentWasRead)
+        XCTAssertTrue(legacy.weeklyPercentWasRead)
+
+        let limits = UsageData(from: try decodeFixture("usage_limits_spend"))
+        XCTAssertTrue(limits.sessionPercentWasRead)
+        XCTAssertTrue(limits.weeklyPercentWasRead)
+    }
+
+    func testOnePercentageMissingWhileItsResetTimeIsPresent_isStillMarkedUnread() throws {
+        // The shape that matters: a fabricated 100 carrying a genuine reset date would otherwise
+        // look like any other reading to the accumulator, because the only check there is whether
+        // both windows match.
+        let json = """
+        {
+          "five_hour": { "resets_at": "2026-07-28T22:00:00Z" },
+          "seven_day": { "utilization": 37.0, "resets_at": "2026-08-02T00:00:00Z" }
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        let usage = UsageData(from: try decoder.decode(UsageResponse.self, from: Data(json.utf8)))
+        XCTAssertEqual(usage.sessionRemaining, 100, accuracy: 0.01)
+        XCTAssertNotNil(usage.sessionResetDate)
+        XCTAssertFalse(usage.sessionPercentWasRead)
+        XCTAssertTrue(usage.weeklyPercentWasRead, "the other half of the response was read normally")
     }
 
     // MARK: - Clamping: utilization > 100
@@ -128,6 +164,55 @@ final class UsageDataTests: XCTestCase {
             XCTAssertNil(PlanRatio.forTier(tier), "\(tier) must not map to a ratio")
         }
         XCTAssertNil(PlanRatio.forTier(nil), "no stored tier must not map to a ratio")
+    }
+
+    // MARK: - Which of the two ratios the dial gets (R5, D3)
+
+    func testResolve_measurementWinsWhenItAgreesWithTheTable() {
+        // The ordinary case and the point of measuring: the account's own numbers replace the
+        // unvalidated table. 0.10 against Max 5x's 0.0792 is a 26% correction, well inside the band.
+        XCTAssertEqual(PlanRatio.resolve(measured: 0.10, tier: "default_claude_max_5x") ?? -1,
+                       0.10, accuracy: 0.00001)
+    }
+
+    func testResolve_noMeasurement_fallsBackToTheTable() {
+        XCTAssertEqual(PlanRatio.resolve(measured: nil, tier: "default_claude_pro") ?? -1,
+                       PlanRatio.pro, accuracy: 0.00001)
+        XCTAssertNil(PlanRatio.resolve(measured: nil, tier: "auto_prepaid_tier_3"),
+                     "neither source has anything, so the dial stays unconverted (R3, D4)")
+    }
+
+    func testResolve_unrecognisedTier_takesTheMeasurementWhateverItSays() {
+        // There is no table entry to disagree with, and refusing here would leave the dial
+        // unconverted for exactly the accounts the measurement was built for.
+        XCTAssertEqual(PlanRatio.resolve(measured: 0.40, tier: "auto_prepaid_tier_3") ?? -1,
+                       0.40, accuracy: 0.00001)
+        XCTAssertEqual(PlanRatio.resolve(measured: 0.40, tier: nil) ?? -1, 0.40, accuracy: 0.00001)
+    }
+
+    func testResolve_measurementThatContradictsAKnownTier_isRefused() {
+        // Past its bar the measurement is good to a few percent, so a 2x disagreement is not
+        // imprecision, it is a measurement of something else - and the table at least has a stated
+        // origin. Both directions, and the edges of the band are still adopted.
+        let table = PlanRatio.max5x
+        XCTAssertEqual(PlanRatio.resolve(measured: table * 2.5, tier: "default_claude_max_5x") ?? -1,
+                       table, accuracy: 0.00001, "far too high: the table stands")
+        XCTAssertEqual(PlanRatio.resolve(measured: table / 2.5, tier: "default_claude_max_5x") ?? -1,
+                       table, accuracy: 0.00001, "far too low: the table stands")
+        XCTAssertEqual(PlanRatio.resolve(measured: table * 2, tier: "default_claude_max_5x") ?? -1,
+                       table * 2, accuracy: 0.00001, "the band is inclusive")
+        XCTAssertEqual(PlanRatio.resolve(measured: table / 2, tier: "default_claude_max_5x") ?? -1,
+                       table / 2, accuracy: 0.00001)
+    }
+
+    func testAgreementBand_isWiderThanAnyCorrectionTheTableCouldNeed() {
+        // The band has to stay out of the way of R5: every disagreement inside the material this
+        // table came from has to fit in it, or a correct measurement would be thrown away for
+        // disagreeing with a wrong constant. Widest disagreement in that material is the source's
+        // prose against its own numbers, 12.63x against 9.09x, and the table's own span is Max 20x
+        // over Max 5x.
+        XCTAssertGreaterThan(PlanRatio.agreementFactor, 12.63 / 9.09)
+        XCTAssertGreaterThan(PlanRatio.agreementFactor, PlanRatio.max20x / PlanRatio.max5x)
     }
 
     // MARK: - Session gauge: the weekly converted into session units before it caps anything
@@ -221,6 +306,37 @@ final class UsageDataTests: XCTestCase {
         let usage = makeUsage(session: 80, weekly: 0, planRatio: PlanRatio.max5x)
         XCTAssertTrue(usage.isSessionWeeklyLimited)
         XCTAssertEqual(usage.sessionDisplayRemaining, 0, accuracy: 0.01)
+    }
+
+    func testGauge_weeklyExhausted_readsZeroWithNoRatioEither() {
+        // "On any ratio" includes having none. Zero is the one weekly value that needs no plan to
+        // convert, so it is answered rather than deferred to R3/D4's fallback. Without this the
+        // dial read a full 100, in green, captioned "On Track", beside a Weekly card at 0% - the
+        // state EVERY account carried over from v1.60 is in, since `AccountStore.updatePlan` runs
+        // only on the sign-in and re-auth routes and a blocked user can never spend enough for the
+        // measurement to reach its bar.
+        let usage = makeUsage(session: 100, weekly: 0)
+        XCTAssertNil(usage.planRatio, "precondition: nothing is known about this account's plan")
+        XCTAssertEqual(usage.weeklyRemainingInSessionUnits ?? -1, 0, accuracy: 0.01)
+        // The flag the popover reads for the "Limited by weekly" caption and to suppress the
+        // session time arc; see RunOutForecastTests for the caption itself.
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        // The dial, and every menu-bar renderer, which all read this same value.
+        XCTAssertEqual(usage.sessionDisplayRemaining, 0, accuracy: 0.01)
+        XCTAssertEqual(usage.sessionRemaining, 100, accuracy: 0.01, "and the raw session survives")
+    }
+
+    func testGauge_weeklyAndSessionBothEmpty_isNotClaimedAsWeeklyLimited() {
+        // The edge of the zero case, with or without a ratio: an empty week is not TIGHTER than an
+        // already-empty session, so nothing defers to the weekly and the Session card keeps grading
+        // its own emptiness (Danger) instead of saying "Limited by weekly". The number is 0 either
+        // way, so this is about which caption shows, not about the dial.
+        for ratio: Double? in [nil, PlanRatio.max5x] {
+            let usage = makeUsage(session: 0, weekly: 0, planRatio: ratio)
+            XCTAssertFalse(usage.isSessionWeeklyLimited,
+                           "at ratio \(String(describing: ratio))")
+            XCTAssertEqual(usage.sessionDisplayRemaining, 0, accuracy: 0.01)
+        }
     }
 
     func testGauge_healthyWeek_doesNotDownRateSession() {
@@ -967,6 +1083,28 @@ final class UsageServicePollTests: XCTestCase {
     }
 
     @MainActor
+    func testPoll_exhaustedWeekOnAnAccountWithNoStoredTier_readsZero() async {
+        // The upgraded-account state end to end, and the one case the fallback above must NOT
+        // catch. Same account with no tier, but the week is spent rather than merely low: zero
+        // converts to zero on every plan, so the dial reads empty without knowing the plan. This
+        // account cannot rescue itself with a measurement either - it is blocked, so it cannot
+        // spend, so neither accumulated total grows toward the bar.
+        mockSession.responseData = usageResponse(session: 100, weekly: 0)
+        mockSession.responseStatusCode = 200
+
+        let service = UsageService(storage: storage, accountStore: accountStore, session: mockSession)
+
+        await service.pollUsage()
+
+        let usage = try! XCTUnwrap(service.latestUsage)
+        XCTAssertNil(usage.planRatio, "precondition: no stored tier and no measurement")
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        XCTAssertEqual(String(format: "%.0f", usage.sessionDisplayRemaining), "0",
+                       "v1.60 read 0 here; an unconverted fallback reads a full 100")
+        XCTAssertEqual(usage.sessionRemaining, 100, accuracy: 0.01)
+    }
+
+    @MainActor
     func testPoll_storedTierWeDoNotRecognise_showsTheTrueSessionValue() async {
         // The other half of the fallback, and the one a missing-tier test cannot reach: a tier IS
         // stored, it travels through the call site, and it still maps to nothing. auto_prepaid_tier_3
@@ -1088,8 +1226,8 @@ final class UsageServicePollTests: XCTestCase {
 
     @MainActor
     func testPoll_measurementBelowTheBar_dialStillUsesTheTableRatio() async {
-        // AE9. Two polls is eight session points, nowhere near 38, so the published table is what
-        // converts the dial and the reporter's 76 is what shows.
+        // AE9. Two polls is eight session points and no weekly movement at all, nowhere near the
+        // bar, so the published table is what converts the dial and the reporter's 76 is what shows.
         accountStore.updatePlan(testAccount.id, rateLimitTier: "default_claude_max_5x", capabilities: nil)
         mockSession.responseData = usageResponse(session: 100, weekly: 6)
         mockSession.responseStatusCode = 200
@@ -1146,8 +1284,9 @@ final class UsageServicePollTests: XCTestCase {
 
     @MainActor
     func testPoll_measurementBelowTheBarOnAnUnrecognisedTier_leavesTheDialUnconverted() async {
-        // Neither source has anything: the measurement is a point short of its bar and the tier
-        // maps to nothing. The dial shows the true session number rather than a guess (R3, D4).
+        // Neither source has anything: the measurement is short of its bar (3 weekly points, not 30)
+        // and the tier maps to nothing. The dial shows the true session number rather than a guess
+        // (R3, D4).
         accountStore.updatePlan(testAccount.id, rateLimitTier: "auto_prepaid_tier_3", capabilities: ["api"])
         accountStore.updateRatioMeasurement(testAccount.id, measurementFromAnotherWindow(session: 37, weekly: 3))
         mockSession.responseData = reporterUsageResponse()
@@ -1178,6 +1317,79 @@ final class UsageServicePollTests: XCTestCase {
         let usage = try! XCTUnwrap(service.latestUsage)
         XCTAssertEqual(usage.planRatio ?? -1, PlanRatio.max5x, accuracy: 0.0001)
         XCTAssertEqual(String(format: "%.0f", usage.sessionDisplayRemaining), "76")
+    }
+
+    @MainActor
+    func testPoll_measurementThatContradictsTheStoredPlan_keepsTheTable() async {
+        // Past the bar and inside the plausible band, but it says a week holds four 5-hour windows
+        // when the account's own plan says twelve and a half. One of the two is measuring something
+        // else, and the table is the one with a stated origin, so the dial keeps the reporter's 76.
+        accountStore.updatePlan(testAccount.id, rateLimitTier: "default_claude_max_5x", capabilities: nil)
+        accountStore.updateRatioMeasurement(testAccount.id, measurementFromAnotherWindow(session: 120, weekly: 30))
+        mockSession.responseData = reporterUsageResponse()
+        mockSession.responseStatusCode = 200
+
+        let service = UsageService(storage: storage, accountStore: accountStore, session: mockSession)
+        await service.pollUsage()
+
+        let usage = try! XCTUnwrap(service.latestUsage)
+        XCTAssertEqual(accountStore.activeAccount?.ratioMeasurement?.ratio ?? -1, 0.25, accuracy: 0.0001,
+                       "precondition: the measurement itself is still produced")
+        XCTAssertEqual(usage.planRatio ?? -1, PlanRatio.max5x, accuracy: 0.0001)
+        XCTAssertEqual(String(format: "%.0f", usage.sessionDisplayRemaining), "76")
+    }
+
+    @MainActor
+    func testPoll_afterAPlanChange_theOldPlansMeasurementIsGoneAndTheDialReRates() async {
+        // The measurement outranks the tier, so a plan change that only refreshed the tier would
+        // leave the dial converting on the capacities the account no longer has - with the correct
+        // value sitting unused beside it (R4).
+        accountStore.updatePlan(testAccount.id, rateLimitTier: "default_claude_max_5x", capabilities: nil)
+        accountStore.updateRatioMeasurement(testAccount.id, measurementFromAnotherWindow(session: 400, weekly: 32))
+        mockSession.responseData = reporterUsageResponse()
+        mockSession.responseStatusCode = 200
+
+        let service = UsageService(storage: storage, accountStore: accountStore, session: mockSession)
+        await service.pollUsage()
+        XCTAssertEqual(String(format: "%.0f", try! XCTUnwrap(service.latestUsage).sessionDisplayRemaining), "75",
+                       "precondition: the Max 5x measurement is what converts the dial")
+
+        accountStore.updatePlan(testAccount.id, rateLimitTier: "default_claude_max_20x", capabilities: nil)
+        await service.pollUsage()
+
+        let usage = try! XCTUnwrap(service.latestUsage)
+        XCTAssertEqual(usage.planRatio ?? -1, PlanRatio.max20x, accuracy: 0.0001)
+        XCTAssertEqual(String(format: "%.0f", usage.sessionDisplayRemaining), "45",
+                       "the upgraded plan's table value, not a ratio measured on the old one")
+    }
+
+    @MainActor
+    func testPoll_aReadingWithNoPercentageInIt_isNeverAccumulated() async {
+        // A response that carries resets_at but no utilization reads as a full window for display,
+        // which is a fabricated 100 rather than an observed one. Differencing the next real reading
+        // against it would book a whole window of session points nobody spent.
+        let noPercentage = Data("""
+        {
+          "five_hour": { "resets_at": "2026-07-28T22:00:00Z" },
+          "seven_day": { "utilization": 37.0, "resets_at": "2026-08-02T00:00:00Z" }
+        }
+        """.utf8)
+        mockSession.responseData = noPercentage
+        mockSession.responseStatusCode = 200
+        let service = UsageService(storage: storage, accountStore: accountStore, session: mockSession)
+        await service.pollUsage()
+
+        let seeded = try! XCTUnwrap(service.latestUsage)
+        XCTAssertEqual(seeded.sessionRemaining, 100, accuracy: 0.01, "the display still shows a full window")
+        XCTAssertNotNil(seeded.sessionResetDate, "and it keeps the real reset date the countdown reads")
+
+        mockSession.responseData = usageResponse(session: 40, weekly: 63)
+        await service.pollUsage()
+
+        let measurement = try! XCTUnwrap(accountStore.activeAccount?.ratioMeasurement)
+        XCTAssertEqual(measurement.sessionPointsConsumed, 0,
+                       "60 points of nothing must not enter the accumulator")
+        XCTAssertEqual(measurement.weeklyPointsConsumed, 0, "and neither half of that interval counts")
     }
 
     // MARK: - Helpers
@@ -1536,12 +1748,36 @@ final class RatioMeasurementTests: XCTestCase {
                                  weeklyResetsAt: weeklyResets ?? weeklyWindow)
     }
 
-    /// A measurement holding given totals. The stored sample is irrelevant to `ratio`, so it is
-    /// filled with a plain reading.
-    private func accumulated(session: Double, weekly: Double) -> RatioMeasurement {
-        RatioMeasurement(lastSessionRemaining: 50, lastSessionResetsAt: sessionWindow,
-                         lastWeeklyRemaining: 50, lastWeeklyResetsAt: weeklyWindow,
-                         sessionPointsConsumed: session, weeklyPointsConsumed: weekly)
+    /// A measurement holding the given totals, built the only way the app can really build them:
+    /// by folding whole-number readings through the accumulator, rolling the 5-hour window whenever
+    /// it runs out, with the weekly ticking down one point at a time.
+    ///
+    /// Writing the two totals down directly can state pairs the API can never send - a fractional
+    /// weekly total most of all - and a test that does is testing arithmetic no user will ever
+    /// reach. Every reading here is a whole number, which is what the confidence bar is sized
+    /// against.
+    private func accumulated(session: Int, weekly: Int) -> RatioMeasurement {
+        var measurement = fold(nil, session: 100, weekly: 100)
+        guard session > 0 else { return measurement }
+
+        var window = sessionWindow
+        var sessionRemaining = 100.0
+        for point in 1...session {
+            if sessionRemaining <= 0 {
+                // The 5-hour window ran out. It rolls, and the interval straddling it is discarded
+                // by the accumulator exactly as it is in the app (KTD4).
+                window = window.addingTimeInterval(5 * 3600)
+                sessionRemaining = 100
+                measurement = fold(measurement, session: sessionRemaining,
+                                   weekly: measurement.lastWeeklyRemaining, sessionResets: window)
+            }
+            sessionRemaining -= 1
+            // The weekly moves in whole points, spread evenly over the run.
+            let weeklyConsumed = (Double(point) * Double(weekly) / Double(session)).rounded(.down)
+            measurement = fold(measurement, session: sessionRemaining,
+                               weekly: 100 - weeklyConsumed, sessionResets: window)
+        }
+        return measurement
     }
 
     // MARK: - Accumulating
@@ -1677,29 +1913,53 @@ final class RatioMeasurementTests: XCTestCase {
     // MARK: - The confidence bar (KTD5)
 
     func testConfidenceBar_isTheNumberTheArithmeticGives() {
-        // Re-derives the constant rather than restating it, so the comment beside it cannot drift
-        // away from the value. Quantisation error on a consumed total is 0.41 points, and the
-        // hardest pair to separate is Pro (0.1100) from Max 20x (0.1320).
-        let quantisationError = 0.41
-        let halfGap = (PlanRatio.max20x - PlanRatio.pro) / 2
+        // Re-derives the constant from what the ratio is USED for, so the comment beside it cannot
+        // drift away from the value. Both totals are whole numbers, so the reachable ratios sit on
+        // a grid one weekly point apart; the ratio is a divisor, so that grid step lands straight
+        // on the displayed number as a fraction of itself.
+        XCTAssertEqual(RatioMeasurement.confidenceBar, 30)
+        let worstCaseAtTheBar = 1 / RatioMeasurement.confidenceBar
 
-        XCTAssertEqual(RatioMeasurement.confidenceBar, 38)
-        XCTAssertLessThan(quantisationError / RatioMeasurement.confidenceBar, halfGap,
-                          "at the bar the error is inside half the gap")
-        XCTAssertGreaterThan(quantisationError / (RatioMeasurement.confidenceBar - 1), halfGap,
-                             "and one point below it is not, so 38 is the first number that clears it")
+        for table in [PlanRatio.pro, PlanRatio.max5x, PlanRatio.max20x] {
+            // The session points it takes to buy the bar, and what one weekly point is worth in
+            // ratio units at that point.
+            let sessionPoints = RatioMeasurement.confidenceBar / table
+            let gridStep = 1 / sessionPoints
+
+            XCTAssertEqual(gridStep / table, worstCaseAtTheBar, accuracy: 0.000001,
+                           "the relative resolution is 1 / weekly points on every plan, which is why "
+                           + "the bar counts weekly points and not session points")
+            XCTAssertGreaterThan(sessionPoints, 200,
+                                 "KTD5 asked for several hundred accumulated session points, and "
+                                 + "\(table) reaches the bar at \(sessionPoints)")
+        }
+
+        XCTAssertLessThan(worstCaseAtTheBar, 0.034,
+                          "a whole point of rounding stays inside a few percent of the displayed number")
+    }
+
+    func testAnAfternoonOfUse_isNotYetAMeasurement() {
+        // The case a session-point bar got wrong. 38 session points on Max 5x buys about 3 whole
+        // weekly points, and 3 can only be read as 2, 3 or 4, so the ratio would swing from 0.053
+        // to 0.105 and take the dial from 57 to 100 with it. No number at all is the right answer.
+        XCTAssertNil(accumulated(session: 38, weekly: 3).ratio)
     }
 
     func testBelowTheConfidenceBar_thereIsNoMeasuredRatio() {
-        // AE9. One point short is still short: the table value stands.
-        let measurement = accumulated(session: 37, weekly: 37 * PlanRatio.max5x)
+        // AE9. One weekly point short is still short: the table value stands.
+        let measurement = accumulated(session: 366, weekly: 29)
+        XCTAssertEqual(measurement.weeklyPointsConsumed, 29, accuracy: 0.0001, "precondition")
         XCTAssertNil(measurement.ratio)
     }
 
     func testAtTheConfidenceBar_theMeasuredRatioIsAvailable() {
-        // AE8. The bar is inclusive.
-        let measurement = accumulated(session: 38, weekly: 38 * PlanRatio.max5x)
-        XCTAssertEqual(measurement.ratio ?? -1, PlanRatio.max5x, accuracy: 0.0001)
+        // AE8. The bar is inclusive, and 30 weekly points off a Max 5x account is about 379 session
+        // points, so this is the shape of run that really produces the first usable ratio.
+        let measurement = accumulated(session: 379, weekly: 30)
+        XCTAssertEqual(measurement.weeklyPointsConsumed, 30, accuracy: 0.0001, "precondition")
+        XCTAssertEqual(measurement.ratio ?? -1, PlanRatio.max5x,
+                       accuracy: PlanRatio.max5x / RatioMeasurement.confidenceBar,
+                       "inside the one-weekly-point resolution the bar is sized for")
     }
 
     func testNothingMeasuredYet_hasNoRatioAndDoesNotDivideByZero() {
@@ -1712,18 +1972,27 @@ final class RatioMeasurementTests: XCTestCase {
         // 0.6 would mean a whole week's capacity holds under two 5-hour windows. Nothing looks
         // like that, so it is a measurement of something other than what we think (A3), and the
         // dial gets the table value instead of a number nobody can defend.
-        XCTAssertNil(accumulated(session: 100, weekly: 60).ratio)
-        XCTAssertEqual(accumulated(session: 100, weekly: 50).ratio ?? -1, 0.5, accuracy: 0.0001,
+        XCTAssertNil(accumulated(session: 50, weekly: 30).ratio)
+        XCTAssertEqual(accumulated(session: 60, weekly: 30).ratio ?? -1, 0.5, accuracy: 0.0001,
                        "and the edge of the band is inside it")
     }
 
     func testImplausiblyLowRatio_isRejected() {
-        // The weekly never moved across 400 accumulated session points. Either the two limits do
-        // not share a credit unit (A3) or something upstream is broken; either way a ratio of zero
-        // would divide the weekly remainder into an enormous number.
-        XCTAssertNil(accumulated(session: 400, weekly: 0).ratio)
-        XCTAssertEqual(accumulated(session: 400, weekly: 4).ratio ?? -1, 0.01, accuracy: 0.0001,
+        // 30 weekly points spread over 4000 session points is a week holding 133 full windows.
+        // Either the two limits do not share a credit unit (A3) or something upstream is broken;
+        // either way it would divide the weekly remainder into an enormous number.
+        XCTAssertNil(accumulated(session: 4000, weekly: 30).ratio)
+        XCTAssertEqual(accumulated(session: 3000, weekly: 30).ratio ?? -1, 0.01, accuracy: 0.0001,
                        "and the edge of the band is inside it")
+    }
+
+    func testAWeeklyThatNeverMoved_neverReachesTheBandAtAll() {
+        // The old shape of this case: 400 session points and a weekly that never ticked. The bar
+        // counts weekly points now, so a measurement with nothing on that side is refused before
+        // the band is ever consulted, which is the same answer one step earlier.
+        let measurement = accumulated(session: 400, weekly: 0)
+        XCTAssertEqual(measurement.weeklyPointsConsumed, 0)
+        XCTAssertNil(measurement.ratio)
     }
 
     // MARK: - End to end on a synthetic run
@@ -1756,13 +2025,15 @@ final class RatioMeasurementTests: XCTestCase {
 
         let result = measurement!
         // 59 intervals, 4 of them straddling a rollover: 55 x 7 points. A version that accumulated
-        // through rollovers would land on some other number, whichever way it got the sign.
+        // through rollovers would land on some other number, whichever way it got the sign. The 30
+        // weekly points are exactly the confidence bar, so this run is also what crossing it looks
+        // like: a shorter run would produce no ratio to check at all.
         XCTAssertEqual(result.sessionPointsConsumed, 385, accuracy: 0.0001)
         XCTAssertEqual(result.weeklyPointsConsumed, 30, accuracy: 0.0001)
 
         let measured = try! XCTUnwrap(result.ratio)
-        XCTAssertEqual(measured, trueRatio, accuracy: 0.011,
-                       "inside the half-gap the confidence bar was sized for")
+        XCTAssertEqual(measured, trueRatio, accuracy: trueRatio / RatioMeasurement.confidenceBar,
+                       "inside the one-weekly-point resolution the confidence bar was sized for")
         // And it identifies the right plan, which is what the number is for.
         let distances = [PlanRatio.pro, PlanRatio.max5x, PlanRatio.max20x].map { abs($0 - measured) }
         XCTAssertEqual(distances.min(), abs(PlanRatio.max5x - measured),

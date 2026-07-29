@@ -259,11 +259,20 @@ class UsageService: NSObject, ObservableObject {
             // Persisted rather than held in memory because the totals are built up over many polls
             // and a version that restarted at every app launch would hand a user who quits the app
             // daily a measurement that never gets anywhere.
-            let measurement = RatioMeasurement.updated(from: account.ratioMeasurement,
-                                                       sessionRemaining: reading.sessionRemaining,
-                                                       sessionResetsAt: reading.sessionResetDate,
-                                                       weeklyRemaining: reading.weeklyRemaining,
-                                                       weeklyResetsAt: reading.weeklyResetDate)
+            //
+            // A percentage that was not in the response reads as "nothing used yet" for display
+            // (`sessionPercentWasRead`), which is a fabricated reading rather than an observed one.
+            // The measurement is handed no window identity for that side, so the check that already
+            // discards a rollover discards both the interval ending at this poll and the one
+            // starting from it, instead of differencing a real reading against an invented full
+            // window. The reading itself keeps its real reset date, which the countdown and the
+            // run-out forecast read.
+            let measurement = RatioMeasurement.updated(
+                from: account.ratioMeasurement,
+                sessionRemaining: reading.sessionRemaining,
+                sessionResetsAt: reading.sessionPercentWasRead ? reading.sessionResetDate : nil,
+                weeklyRemaining: reading.weeklyRemaining,
+                weeklyResetsAt: reading.weeklyPercentWasRead ? reading.weeklyResetDate : nil)
             accountStore.updateRatioMeasurement(account.id, measurement)
 
             // The plan ratio is what lets the Session dial state the weekly remainder on the
@@ -275,14 +284,20 @@ class UsageService: NSObject, ObservableObject {
             // tier (`AccountStore.updatePlan`) and an account switch both take effect on the next
             // poll with nothing to invalidate.
             //
-            // The measurement wins whenever it has one to give (R5, D3): it comes from this
-            // account's own usage rather than from a third party's unvalidated table, and it needs
-            // no plan string at all, so it converts the dial even on a tier we do not recognise.
-            // The table is the fallback, and the table falls back to nil for an account added
-            // before this release or on a plan we cannot identify. Nil turns the conversion off
-            // entirely: the dial then shows the true session number rather than a figure derived
-            // from a guessed ratio (R3, D4).
-            reading.applyPlanRatio(measurement.ratio ?? PlanRatio.forTier(account.rateLimitTier))
+            // The measurement wins whenever it has one to give and it does not flatly contradict a
+            // tier we recognise (R5, D3) - see `PlanRatio.resolve`. The table is the fallback, and
+            // the table falls back to nil for an account added before this release or on a plan we
+            // cannot identify. Nil turns the conversion off entirely: the dial then shows the true
+            // session number rather than a figure derived from a guessed ratio (R3, D4).
+            let measuredRatio = measurement.ratio
+            let appliedRatio = PlanRatio.resolve(measured: measuredRatio, tier: account.rateLimitTier)
+            if let measuredRatio, appliedRatio != measuredRatio {
+                // Rare and worth seeing without turning diagnostics on: the account has measured a
+                // ratio its own plan cannot account for, which means the accumulator or assumption
+                // A3 is wrong rather than the table being off.
+                logger.warning("Measured ratio \(measuredRatio) disagrees with the stored plan by more than \(PlanRatio.agreementFactor)x, keeping the table value")
+            }
+            reading.applyPlanRatio(appliedRatio)
             latestUsage = reading
 
             // Record what this plan reports, for the plans nobody here can see (R6). Emitted after
@@ -290,7 +305,8 @@ class UsageService: NSObject, ObservableObject {
             // from the poll rather than from sign-in because the poll is the only thing guaranteed
             // to run while a reporter has logging turned on - most of them will never sign in
             // during the window they are recording. See `planSamplePayload` for what is and is not
-            // in it; `emitMilestone` is a no-op until the user opts in.
+            // in it; `emitMilestone` is a no-op until the user opts in, and takes the payload as an
+            // autoclosure, so with logging off this poll does not build the sample either.
             DiagnosticsLogger.shared.emitMilestone(
                 kind: Self.planSampleKind,
                 payload: Self.planSamplePayload(accountId: account.id,
@@ -663,12 +679,16 @@ struct UsageCreditsData: Equatable {
 /// WHERE THESE NUMBERS COME FROM, AND WHY THEY ARE NOT TRUSTED. They are read off a third-party
 /// reverse-engineering write-up at she-llac.com/claude-limits: Pro 550,000 / 5,000,000, Max 5x
 /// 3,300,000 / 41,666,700, Max 20x 11,000,000 / 83,333,300. Anthropic publishes none of this and
-/// we have not validated any of it. That same page contradicts itself - its prose claims about
-/// 9.1x for every tier while its own table implies 12.63x for Max 5x, so at most one of the two
-/// can be right. Read these as a starting value, never as confirmed capacities.
+/// we have not validated any of it. That same page contradicts itself, and on two of the three
+/// tiers, not one: its prose claims about 9.1x for every tier while its own table implies 9.09x
+/// for Pro, 12.63x for Max 5x and 7.58x for Max 20x. The prose agrees with the table on Pro alone.
+/// Max 20x is worth saying out loud because it is the only tier string anyone here has seen live,
+/// so it is the entry most likely to be trusted and shipped on, and it is off the prose figure by
+/// about 17%. Read all three as a starting value, never as confirmed capacities.
 ///
 /// The correction path is measurement, not a better guess: once the ratio derived from the user's
-/// own observed usage clears its confidence bar it overrides this table (R5, D3).
+/// own observed usage clears its confidence bar it overrides this table (R5, D3), unless it
+/// disagrees by so much that it cannot be measuring the same thing - see `resolve` below.
 enum PlanRatio {
     static let pro: Double = 0.1100          // 550,000 / 5,000,000
     static let max5x: Double = 0.0792        // 3,300,000 / 41,666,700
@@ -689,6 +709,43 @@ enum PlanRatio {
         case "default_claude_max_20x": return max20x
         default:                       return nil
         }
+    }
+
+    /// How far a measured ratio may sit from a recognised tier's table value before the table is
+    /// kept instead, as a factor either way.
+    ///
+    /// Wide on purpose. The whole reason for measuring is that this table can be wrong (D1, D3), so
+    /// the band has to admit every correction the table plausibly needs. The widest disagreement
+    /// inside the material the table came from is its own prose against its own numbers, 12.63x
+    /// against 9.09x, a factor of 1.39, and the three published ratios span 1.67x end to end. A
+    /// factor of 2 leaves room for a correction larger than anything that source can justify.
+    static let agreementFactor: Double = 2
+
+    /// The ratio the dial converts with: the account's own measurement when there is one to
+    /// believe, and this table otherwise (R5, D3).
+    ///
+    /// The measurement wins by default. It comes from the account's own usage rather than from a
+    /// third party's unvalidated table, and it needs no plan string at all, so it converts the dial
+    /// even on a tier we do not recognise - which is the only conversion those accounts will ever
+    /// get.
+    ///
+    /// The one thing it does not get to do is contradict a tier we DO recognise by more than
+    /// `agreementFactor`. Past its confidence bar the measurement resolves the ratio to a few
+    /// percent, so a disagreement of 2x is not the measurement being imprecise, it is the
+    /// measurement measuring something other than what we think: an accumulator fed a fabricated
+    /// reading, or A3 false and session and weekly not sharing a credit unit, in which case no
+    /// single ratio exists to find. Preferring the table there is the same call D4 makes elsewhere
+    /// - a number with a stated origin beats a number we can show is broken. Nothing is swallowed:
+    /// the plan sample carries `measured_ratio` and `applied_ratio` side by side, so a reporter's
+    /// file shows the disagreement and what the dial did about it (R6).
+    static func resolve(measured: Double?, tier: String?) -> Double? {
+        let table = forTier(tier)
+        guard let measured else { return table }
+        // No table entry means nothing to check against, and refusing here would leave the dial
+        // unconverted for exactly the accounts the measurement exists to serve.
+        guard let table else { return measured }
+        guard measured <= table * agreementFactor, measured * agreementFactor >= table else { return table }
+        return measured
     }
 }
 
@@ -719,36 +776,48 @@ struct RatioMeasurement: Codable, Equatable {
     var sessionPointsConsumed: Double
     var weeklyPointsConsumed: Double
 
-    /// Session points that must be accumulated before the measured ratio is allowed near the dial
+    /// WEEKLY points that must be accumulated before the measured ratio is allowed near the dial
     /// (KTD5).
     ///
     /// THE ARITHMETIC, so this is a number someone can check rather than a number someone liked.
-    /// The API reports both percentages as whole integers, so a reading is a rounded value off by
-    /// up to half a point either way, uniformly: a standard deviation of 0.5 / sqrt(3) = 0.289
-    /// points. A consumed total is the difference of two such readings, so it carries
-    /// sqrt(2) x 0.289 = 0.41 points of error, and up to a full point at the extremes.
+    /// The API reports both percentages as whole integers, so every reading is a rounded value off
+    /// by up to half a point either way, and every accumulated total is a sum of differences of
+    /// whole numbers and is therefore itself a whole number.
     ///
-    /// The ratio is weekly-over-session. Error in the session total matters roughly eight times
-    /// less than error in the weekly total, because it enters scaled by the ratio itself (about
-    /// 0.12), so the error on the ratio is about 0.41 divided by the accumulated session points.
+    /// That is what sets the resolution. The ratio is weekly-over-session, so with the session
+    /// total held fixed the reachable values sit on a grid one weekly point apart, and relative to
+    /// the ratio itself that step is
     ///
-    /// What that error has to beat: the two CLOSEST published ratios are Pro at 0.1100 and Max 20x
-    /// at 0.1320. Telling those two apart needs the error inside half their gap.
+    ///     (1 / sessionPoints) / (weeklyPoints / sessionPoints) = 1 / weeklyPoints
     ///
-    ///     gap       = 0.1320 - 0.1100 = 0.0220
-    ///     half gap  = 0.0110
-    ///     0.41 / S  < 0.0110   ->   S > 37.3
+    /// The session total cancels out. How precise this measurement can be depends only on how many
+    /// weekly points have been watched, whatever the plan, which is why the bar counts weekly
+    /// points. Counting session points instead cannot work: 38 session points on Max 5x buys about
+    /// 3 weekly points, a grid of one part in three, and no amount of averaging gets a value
+    /// inside a grid coarser than the answer needs to be.
     ///
-    /// So 38, the first whole number that clears it: 0.41 / 37 = 0.0111 still misses, 0.41 / 38 =
-    /// 0.0108 makes it. Below the bar the table value stands (AE9); at or above it the measurement
-    /// takes over (AE8).
+    /// What the resolution has to be good enough for. The ratio is a DIVISOR - the dial shows
+    /// weeklyRemaining / ratio - so its relative error passes straight to the number on screen. It
+    /// is never used to pick a plan out of the table. At 30 weekly points a whole point of rounding
+    /// is 1/30 = 3.3% of the displayed number, and the 0.41-point standard deviation of a rounded
+    /// difference (0.5 / sqrt(3) = 0.289 per reading, sqrt(2) of them) is 1.4%. A few percent on a
+    /// dial that shows whole numbers is the accuracy worth waiting for. Below the bar the table
+    /// value stands (AE9); at or above it the measurement takes over (AE8).
     ///
-    /// 38 is also reachable inside a single 5-hour window, which is what makes the arithmetic above
-    /// honest: consecutive clean intervals telescope to first reading minus last, so one unbroken
-    /// run really does carry only the two readings' worth of error the derivation assumes. A longer
-    /// run broken by rollovers pays that error once per unbroken stretch, so it is slightly noisier
-    /// than the bound - the plausible-range check below is what keeps that from reaching the dial.
-    static let confidenceBar: Double = 38
+    /// What 30 weekly points costs the user is the session points that buy them, 30 / ratio: 227 on
+    /// Max 20x, 273 on Pro, 379 on Max 5x. That is the "several hundred accumulated session points"
+    /// KTD5 asked for, reached from the arithmetic rather than assumed.
+    ///
+    /// THE CAVEAT, stated rather than waved at. Consecutive clean intervals telescope to first
+    /// reading minus last, so one unbroken run really does carry only the two readings' worth of
+    /// error above. KTD4 deliberately keeps accumulating across rollovers, and a run broken into
+    /// several stretches pays that error once per stretch, so it is noisier by roughly the square
+    /// root of the number of stretches. Nothing downstream rescues that: `plausibleRange` below is
+    /// about forty times wider than the whole published table and cannot see an error of a few
+    /// percent. What contains it is that the totals keep growing after the bar is crossed while the
+    /// error grows only as sqrt(stretches), so the measurement keeps converging and the crossing
+    /// itself is the noisiest moment it will have.
+    static let confidenceBar: Double = 30
 
     /// The band a measured ratio has to land in to be believed at all, easiest to read as how many
     /// full 5-hour windows a week's capacity would hold: 0.5 is two windows a week, 0.01 is a
@@ -756,16 +825,22 @@ struct RatioMeasurement: Codable, Equatable {
     /// is deliberately loose. It is not a second opinion on the table - it is there to catch a
     /// measurement that is not measuring anything.
     ///
-    /// Two ways that happens. A3 may be false: if session and weekly weight models differently
+    /// The way that happens is A3 being false: if session and weekly weight models differently
     /// there is no single ratio to find, and what comes out is arbitrary rather than merely
-    /// imprecise. Or the weekly simply never moved over the accumulated stretch, which yields a
-    /// ratio at or near zero and would divide the weekly remainder into an enormous number.
+    /// imprecise - a weekly that barely moves against an enormous session total divides the weekly
+    /// remainder into a huge number, and one that moves far too fast divides it into nothing. The
+    /// case where the weekly never moved at all no longer arrives here: the bar counts weekly
+    /// points, so a measurement with nothing on that side never produces a ratio in the first
+    /// place.
     static let plausibleRange: ClosedRange<Double> = 0.01...0.5
 
     /// The measured ratio, or nil while there is no reason to trust one. Nil is the normal state
     /// for a long time after install, and the caller falls back to `PlanRatio` (D1).
     var ratio: Double? {
-        guard sessionPointsConsumed >= Self.confidenceBar else { return nil }
+        // The session total is guarded only because this is a division: the same spend drives both
+        // percentages, so a weekly total past the bar with nothing on the session side is not a
+        // state real usage produces, and an infinity should not need the band below to stop it.
+        guard weeklyPointsConsumed >= Self.confidenceBar, sessionPointsConsumed > 0 else { return nil }
         let measured = weeklyPointsConsumed / sessionPointsConsumed
         guard Self.plausibleRange.contains(measured) else { return nil }
         return measured
@@ -831,6 +906,17 @@ struct UsageData: Equatable {
     let sessionResetDate: Date?
     let modelUsages: [ModelUsage]
     let usageCredits: UsageCreditsData?
+    /// Whether each percentage above was actually read from the response, or defaulted.
+    ///
+    /// A missing percentage falls back to "nothing used yet" for DISPLAY, which is the least
+    /// alarming thing to show for one poll. It is not an observation, though, and the measurement
+    /// must never difference a real reading against an invented full window: that one interval
+    /// books a whole window of points nobody spent and drags the measured ratio down until real
+    /// usage outweighs it. Every decoder in this file is deliberately lenient (`try?`), so a null,
+    /// a missing key or a changed type all arrive as nil rather than as an error, which is why this
+    /// has to be recorded rather than assumed. `pollUsage` is what acts on it.
+    let sessionPercentWasRead: Bool
+    let weeklyPercentWasRead: Bool
     /// The active account's 5h-over-weekly capacity ratio, measured (`RatioMeasurement`) or off the
     /// table (`PlanRatio`), or nil when the plan is unknown and nothing has been measured yet. Nil
     /// disables the conversion entirely rather than substituting a guess (R3).
@@ -844,17 +930,23 @@ struct UsageData: Equatable {
         if let limit = limits?.first(where: { $0.kind == "session" }), let percent = limit.percent {
             sessionRemaining = UsageData.clamp(100 - percent)
             sessionResetDate = limit.resetsAt
+            sessionPercentWasRead = true
         } else {
-            sessionRemaining = UsageData.clamp(100 - (response.fiveHour?.utilization ?? 0))
+            let utilization = response.fiveHour?.utilization
+            sessionRemaining = UsageData.clamp(100 - (utilization ?? 0))
             sessionResetDate = response.fiveHour?.resetsAt
+            sessionPercentWasRead = utilization != nil
         }
 
         if let limit = limits?.first(where: { $0.kind == "weekly_all" }), let percent = limit.percent {
             weeklyRemaining = UsageData.clamp(100 - percent)
             weeklyResetDate = limit.resetsAt
+            weeklyPercentWasRead = true
         } else {
-            weeklyRemaining = UsageData.clamp(100 - (response.sevenDay?.utilization ?? 0))
+            let utilization = response.sevenDay?.utilization
+            weeklyRemaining = UsageData.clamp(100 - (utilization ?? 0))
             weeklyResetDate = response.sevenDay?.resetsAt
+            weeklyPercentWasRead = utilization != nil
         }
 
         // Per-model: from weekly_scoped when limits[] present, else legacy seven_day_* gated
@@ -886,8 +978,9 @@ struct UsageData: Equatable {
     }
 
     /// The weekly remainder expressed in SESSION units: how much of one 5-hour window the week's
-    /// leftovers could still fill, 0...100. nil when the plan ratio is unknown, because there is
-    /// then no honest way to state the weekly on the session's scale.
+    /// leftovers could still fill, 0...100. nil when the plan ratio is unknown and the weekly still
+    /// has something left in it, because there is then no honest way to state the weekly on the
+    /// session's scale.
     ///
     /// This replaces a 20-point floor (`weeklyGateFloor`) that used to gate the old comparison.
     /// Removing that floor is the point of this change, not a side effect: it only ever existed
@@ -896,6 +989,15 @@ struct UsageData: Equatable {
     /// both sides are in the same units the plain minimum is correct at every level and there is
     /// nothing left for a threshold to protect against (R2).
     var weeklyRemainingInSessionUnits: Double? {
+        // An exhausted week is the one weekly value that needs no ratio: 0 divided by any positive
+        // ratio is 0, so the converted answer is the same on every plan and nothing is invented.
+        // Answering "unknown" here would call the one certain case uncertain, and it would do it to
+        // nearly everyone: `AccountStore.updatePlan` runs only on the sign-in and re-auth routes,
+        // never from the poll, so every account carried over from v1.60 has no stored tier until it
+        // signs in again, and a blocked user cannot spend, so the measurement never grows either.
+        // Without this line that account reads a full green Session dial captioned "On Track" next
+        // to a Weekly card at 0%, which is what v1.60 correctly showed as 0 and "Limited by weekly".
+        if weeklyRemaining <= 0 { return 0 }
         // A non-positive ratio is not a ratio; guarding here also means a measured value that
         // collapses to zero can never divide into an infinity that reaches the dial.
         guard let planRatio, planRatio > 0 else { return nil }
@@ -906,8 +1008,21 @@ struct UsageData: Equatable {
     /// 5h session - is the wall the user hits next. The popover reads this for its "Limited by
     /// weekly" caption and to suppress the session time arc.
     ///
-    /// False whenever the plan ratio is unknown: with nothing to convert, claiming the weekly
-    /// binds would be a guess, and R3/D4 say show the true session number instead.
+    /// With no plan ratio this is false everywhere except an exhausted week, and that silence in
+    /// between is the honest answer rather than a dropped warning. One fact holds without a ratio:
+    /// a 5-hour window is a fraction of a week, so the ratio is always below 1 and the converted
+    /// weekly is therefore never SMALLER than the raw weekly percentage. That settles both ends and
+    /// only the ends. At `weeklyRemaining == 0` the converted value is 0 on every plan, so the
+    /// weekly binds for certain (handled in the conversion above). At `weeklyRemaining >=
+    /// sessionRemaining` the converted weekly is at least the session, so the weekly certainly does
+    /// NOT bind. In between - a low but non-zero weekly on an unknown plan - it genuinely cannot be
+    /// told: 6% of a week is 76% of a Max 5x session and 45% of a Max 20x one, so whether it
+    /// undercuts the session depends entirely on which plan the account is on. Saying "Limited by
+    /// weekly" there is the guess D4 forbids, and the v1.60 test that said it
+    /// (`weeklyRemaining < sessionRemaining && weeklyRemaining < 20`) is the cross-unit comparison
+    /// R2 deleted, which claimed the weekly bound at weekly 19 on Max 20x where it does not. The low
+    /// week is not hidden meanwhile: the Weekly card sits beside this one and every menu-bar
+    /// renderer draws the weekly red below 20.
     var isSessionWeeklyLimited: Bool {
         guard let converted = weeklyRemainingInSessionUnits else { return false }
         return converted < sessionRemaining
@@ -915,7 +1030,8 @@ struct UsageData: Equatable {
 
     /// The Session value every surface DISPLAYS: the true 5h-session remaining, capped to what
     /// the week's leftovers can actually fill, `min(sessionRemaining, weeklyRemaining / ratio)`
-    /// clamped to 0...100 (R1). With no ratio it is the raw session value, unconverted (R3).
+    /// clamped to 0...100 (R1). With no ratio it is the raw session value, unconverted (R3) - except
+    /// on an exhausted week, which converts to 0 on every plan and so needs no ratio.
     /// Used by both the popover dial and the menu-bar icons - they must never disagree about a
     /// number both label "Session". Display-only: raw `sessionRemaining` stays untouched for the
     /// #31 session run-out forecast and pace, which grade the real 5h window.

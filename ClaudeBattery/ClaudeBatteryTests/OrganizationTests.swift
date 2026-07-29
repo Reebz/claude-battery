@@ -63,6 +63,29 @@ final class OrganizationTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode([Organization].self, from: json))
     }
 
+    // MARK: - Error Path: a drifted field shape degrades to nil instead of throwing
+
+    func testDecodeDriftedCapabilities_degradesToNilAndKeepsTheRestOfTheList() throws {
+        // Both sign-in routes decode the whole `[Organization]` array at once, so an org whose
+        // `capabilities` grew from strings to objects used to fail the entire decode and stop every
+        // sign-in behind "Connection error. Please try again." Nothing on the dial reads this field.
+        let json = """
+        [
+          {"uuid": "org-drifted", "name": "Acme", "rate_limit_tier": "default_claude_max_20x",
+           "capabilities": [{"name": "claude_max"}]},
+          {"uuid": "org-normal", "capabilities": ["claude_pro", "chat"]}
+        ]
+        """.data(using: .utf8)!
+
+        let orgs = try JSONDecoder().decode([Organization].self, from: json)
+
+        XCTAssertEqual(orgs.count, 2, "one drifted org must not take the whole list down with it")
+        XCTAssertNil(orgs[0].capabilities)
+        XCTAssertEqual(orgs[0].rateLimitTier, "default_claude_max_20x",
+                       "the fields beside the drifted one still decode")
+        XCTAssertEqual(orgs[1].capabilities, ["claude_pro", "chat"])
+    }
+
     // MARK: - sanitizedName (stored on Account for disambiguation, issue #32)
 
     func testSanitizedName_nilWhenNoName() {

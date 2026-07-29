@@ -70,9 +70,10 @@ final class RunOutForecastTests: XCTestCase {
     // MARK: - sessionPace (weekly-gated Session card, #31 must stay on RAW session)
 
     /// UsageData with session/weekly derived independently and a session reset `sessionResetsIn`
-    /// seconds from `now`. These cases all carry the Max 5x plan ratio, because the weekly can
-    /// only bind once it has been converted into session units - with no ratio there is nothing
-    /// to convert and `isSessionWeeklyLimited` is false by definition.
+    /// seconds from `now`. These cases carry the Max 5x plan ratio by default, because a non-zero
+    /// weekly can only bind once it has been converted into session units and with no ratio there
+    /// is nothing to convert. An exhausted week is the exception - it converts to zero on every
+    /// plan - so the case below states `planRatio: nil` outright.
     private func makeUsage(session: Double, weekly: Double, sessionResetsIn: TimeInterval?,
                            planRatio: Double? = PlanRatio.max5x) -> UsageData {
         UsageData(from: UsageResponse(
@@ -129,6 +130,20 @@ final class RunOutForecastTests: XCTestCase {
         XCTAssertEqual(UsagePopoverView.sessionPace(for: usage, now: now), .weeklyLimited)
     }
 
+    func testSessionPace_weeklyExhaustedWithNoRatio_stillSaysLimitedByWeekly() {
+        // The caption half of the exhausted-week case. With no plan ratio the pace used to fall
+        // through to the RAW session (100 remaining, half the window left, delta -50) and print
+        // "On Track" in green while the week was spent. Zero needs no ratio to convert, so the
+        // caption fires on an account whose plan is unknown - which is every account carried over
+        // from v1.60, since the tier is written only on the sign-in and re-auth routes.
+        let usage = makeUsage(session: 100, weekly: 0, sessionResetsIn: 9000, planRatio: nil)
+        XCTAssertNil(usage.planRatio)
+        XCTAssertTrue(usage.isSessionWeeklyLimited, "this also suppresses the session time arc")
+        let pace = UsagePopoverView.sessionPace(for: usage, now: now)
+        XCTAssertEqual(pace, .weeklyLimited)
+        XCTAssertEqual(UsagePopoverView.paceCaption(pace), "Limited by weekly")
+    }
+
     // MARK: - gaugeAccessibilityLabel
 
     func testGaugeA11y_weeklyLimited_omitsSessionTimeAndSaysLimited() {
@@ -137,6 +152,17 @@ final class RunOutForecastTests: XCTestCase {
         let label = UsagePopoverView.gaugeAccessibilityLabel(
             name: "Session", usage: 2, timeRemaining: nil, pace: .weeklyLimited)
         XCTAssertEqual(label, "Session usage 2 percent, limited by weekly")
+    }
+
+    func testGaugeA11y_roundsHalvesTheWayTheGaugePrintsThem() {
+        // The gauge prints these same two Doubles with "%.0f", which rounds a half to the EVEN
+        // integer: 16.5 draws "16". Plain .rounded() goes half away from zero and would speak 17,
+        // so a screen reader would announce a different number from the one on screen - the #43
+        // mismatch again, this time between the dial and the voice. 16.5 rather than 15.5 or 17.5
+        // on purpose: only halves with an even integer part tell the two modes apart.
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Session", usage: 16.5, timeRemaining: 42.5, pace: .unknown)
+        XCTAssertEqual(label, "Session usage 16 percent, time remaining 42 percent")
     }
 
     func testGaugeA11y_speaksPaceWithMeaning() {
