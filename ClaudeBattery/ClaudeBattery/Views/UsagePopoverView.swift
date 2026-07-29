@@ -40,6 +40,12 @@ struct UsagePopoverView: View {
         ]
 
         VStack(spacing: 8) {
+            // Update notice leads the popover instead of sitting in the footer: down there it was
+            // caption2 gray under the Settings hint and easy to miss, and it also REPLACED the
+            // "Updated N minutes ago" line, so noticing an update cost you the freshness line.
+            // Renders nothing when no update is available, leaving the usual layout untouched.
+            updateBanner()
+
             LazyVGrid(columns: columns, spacing: 8) {
                 sessionCard(usage: usage)
                 weeklyCard(usage: usage)
@@ -61,8 +67,6 @@ struct UsagePopoverView: View {
                         .frame(maxHeight: .infinity)
                 }
             }
-
-            claudeDesignRow()
 
             // Account list (hidden when only 1 account)
             if accountStore.accounts.count > 1 {
@@ -88,19 +92,11 @@ struct UsagePopoverView: View {
             }
 
             VStack(spacing: 2) {
-                if let version = updateChecker.availableVersion,
-                   let url = updateChecker.downloadURL {
-                    Button(action: { NSWorkspace.shared.open(url) }) {
-                        Text("v\(version) available — Download")
-                            .font(.caption2)
-                            .foregroundColor(.cyan)
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Text(lastUpdatedText)
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
+                // Freshness line is now unconditional: the update notice lives in the top banner,
+                // so the two no longer compete for this slot.
+                Text(lastUpdatedText)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
                 Text("Right-click the battery icon in your menu bar for Settings.")
                     .font(.system(size: 9))
                     .foregroundColor(.secondary)
@@ -583,16 +579,51 @@ struct UsagePopoverView: View {
         creditsResetDateFormatter.string(from: date)
     }
 
-    private func claudeDesignRow() -> some View {
-        unifiedBarRow(label: "Claude Design", remainingPercent: nil) {
-            Text("Shares standard usage limits")
-                .font(.system(size: 10, weight: .regular))
-                .foregroundColor(Color(white: 0.45))
-                .multilineTextAlignment(.trailing)
+    /// Resolved content for the top update banner, or nil when there is nothing to announce. Both
+    /// fields must be present - the same pair-unwrap the old footer link used, kept because
+    /// UpdateChecker publishes version and URL together (a half-set state never reaches the view).
+    /// Pure so the show/hide rule and the copy are testable without the SwiftUI view.
+    /// spokenLabel spells "v" out as "Version" for speech but keeps the visible word "Download":
+    /// the label replaces the button's name outright, so dropping it would leave Voice Control with
+    /// no way to activate the banner by the one word on screen that names an action.
+    static func updateBannerContent(availableVersion: String?, downloadURL: URL?) -> (title: String, spokenLabel: String, url: URL)? {
+        guard let availableVersion, let downloadURL else { return nil }
+        return (title: "v\(availableVersion) available - Download",
+                spokenLabel: "Version \(availableVersion) available, Download",
+                url: downloadURL)
+    }
+
+    /// Full-width update banner at the top of the popover. The URL is host- and scheme-validated
+    /// inside UpdateChecker before it is published, so opening it straight from the view is safe.
+    @ViewBuilder
+    private func updateBanner() -> some View {
+        if let banner = Self.updateBannerContent(availableVersion: updateChecker.availableVersion,
+                                                 downloadURL: updateChecker.downloadURL) {
+            Button(action: { NSWorkspace.shared.open(banner.url) }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 12))
+                    Text(banner.title)
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer(minLength: 0)
+                }
+                // Cyan is the colour the footer update link already used. The tint sits on the same
+                // opaque Color(white: 0.15) every other block paints, so the banner reads as a card
+                // in the same family as the neutral rows; without the base it would be the only
+                // block whose colour comes from whatever is behind the popover's vibrancy material.
+                // The active account row does the same thing one step louder (tint plus a border).
+                .foregroundColor(.cyan)
+                .padding(10)
+                .frame(maxWidth: .infinity)
+                .background(Color.cyan.opacity(0.12))
+                .background(Color(white: 0.15))
+                .cornerRadius(12)
+            }
+            .buttonStyle(.plain)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(banner.spokenLabel)
+            .accessibilityHint("Opens the download page for the new version")
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Claude Design, shares standard usage limits")
-        .accessibilityHint("Claude Design counts against your standard session and weekly usage")
     }
 
     // MARK: - States
