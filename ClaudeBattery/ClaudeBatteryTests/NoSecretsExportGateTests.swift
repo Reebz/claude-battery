@@ -186,5 +186,256 @@ final class NoSecretsExportGateTests: XCTestCase {
                       "login-state kind signal lost: \(combined)")
     }
 
+    // MARK: - Plan sample (R6): the milestone that collects plan data for tiers nobody here can see
+
+    /// The real `plan-sample` payload, driven through the real producer and the real archive.
+    ///
+    /// Two things it pins. The SIGNAL survives: the tier string, the capabilities, the billing type,
+    /// the reset times and the applied ratio are the whole point of the milestone, and a redactor
+    /// change that scrubbed any of them would leave a reporter's file useless while every
+    /// no-secrets assertion still passed. And the line is not silently thrown away:
+    /// `DiagnosticsLogger.serialize` degrades a payload it cannot encode to a `serialize-failed`
+    /// stub with the values dropped, so a Date or a bare nil sneaking into the payload would lose
+    /// every sample without failing anything else.
+    func testEndToEnd_planSample_carriesPlanSignalAndIsNotDropped() throws {
+        let accountId = UUID()
+        let usage = Self.makeUsage(session: 100, weekly: 6,
+                                   sessionResetsAt: Self.sessionReset,
+                                   weeklyResetsAt: Self.weeklyReset,
+                                   planRatio: PlanRatio.max5x)
+        let logger = DiagnosticsLogger(directoryOverride: dir, enabledOverride: true)
+        logger.emitMilestone(kind: UsageService.planSampleKind,
+                             payload: UsageService.planSamplePayload(
+                                accountId: accountId,
+                                rateLimitTier: "default_claude_max_5x",
+                                capabilities: ["claude_max", "chat"],
+                                billingType: "stripe_subscription",
+                                usage: usage,
+                                measurement: Self.measurement))
+        logger.flush()
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let combined = try Self.exportedText(from: dir, into: dir.appendingPathComponent("extracted-plan", isDirectory: true))
+
+        XCTAssertTrue(combined.contains("plan-sample"), "the plan-sample kind is missing: \(combined)")
+        XCTAssertFalse(combined.contains("serialize-failed"),
+                       "the payload could not be encoded, so the sample was dropped: \(combined)")
+        XCTAssertTrue(combined.contains("default_claude_max_5x"),
+                      "the tier string is the whole reason this milestone exists: \(combined)")
+        XCTAssertTrue(combined.contains("claude_max") && combined.contains("chat"),
+                      "capabilities lost: \(combined)")
+        XCTAssertTrue(combined.contains("stripe_subscription"), "billing type lost: \(combined)")
+        // Reset times carry colons and hyphens, which trip the credential, cookie and UUID
+        // pre-filters on the way through. Both must come out intact and NOT swapped for each other.
+        XCTAssertTrue(combined.contains(Self.sessionResetString), "session reset time lost: \(combined)")
+        XCTAssertTrue(combined.contains(Self.weeklyResetString), "weekly reset time lost: \(combined)")
+        // The one-way account tag is what keeps a two-account export from interleaving into one
+        // unusable sequence, so it has to survive too.
+        XCTAssertTrue(combined.contains(SecretRedactor.sha256Prefix(accountId.uuidString)),
+                      "the account tag was redacted away: \(combined)")
+        XCTAssertTrue(combined.contains("applied_ratio") && combined.contains("measured_ratio"),
+                      "both ratios must be present, they answer different questions: \(combined)")
+        // Nothing identifying may ride along even on the clean path.
+        XCTAssertFalse(combined.contains(accountId.uuidString), "the raw account id reached the archive")
+        for secret in Self.forbiddenSecrets {
+            XCTAssertFalse(combined.contains(secret), "FORBIDDEN secret '\(secret)' present in exported archive bytes")
+        }
+    }
+
+    /// The leak KTD6 exists to close. `GET /api/organizations` returns names shaped like
+    /// `"someone@gmail.com's Organization"`, so an address arrives EMBEDDED in a longer string
+    /// rather than as a bare value. `planSamplePayload` deliberately emits no org name at all, which
+    /// is the actual guarantee - this pins the backstop behind it, by planting the org name on the
+    /// new milestone in every shape a future producer might add it in: a plain string value, a
+    /// value inside a longer sentence, and an IDN address.
+    ///
+    /// It also asserts the redaction is SCOPED. `[EMAIL]'s Organization` proves the address alone
+    /// was matched mid-string; a pass that nuked the whole line would satisfy every "absent"
+    /// assertion here while destroying the diagnostic.
+    func testEndToEnd_planSampleWithEmailBearingOrgName_isRedacted() throws {
+        let usage = Self.makeUsage(session: 100, weekly: 6,
+                                   sessionResetsAt: Self.sessionReset,
+                                   weeklyResetsAt: Self.weeklyReset,
+                                   planRatio: PlanRatio.max5x)
+        var payload = UsageService.planSamplePayload(accountId: UUID(),
+                                                     rateLimitTier: "default_claude_max_5x",
+                                                     capabilities: ["claude_max", "chat"],
+                                                     billingType: "stripe_subscription",
+                                                     usage: usage,
+                                                     measurement: Self.measurement)
+        payload["org_name"] = "victim@example.com's Organization"
+        payload["org_name_idn"] = "jens@müller.de's Organization"
+        payload["note"] = "sampled victim@example.com's Organization at 100/6"
+        payload["orgs"] = ["victim@example.com's Organization", "someone.else@example.com's Org"]
+
+        let logger = DiagnosticsLogger(directoryOverride: dir, enabledOverride: true)
+        logger.emitMilestone(kind: UsageService.planSampleKind, payload: payload)
+        logger.flush()
+        Thread.sleep(forTimeInterval: 0.2)
+
+        let combined = try Self.exportedText(from: dir, into: dir.appendingPathComponent("extracted-orgname", isDirectory: true))
+
+        XCTAssertFalse(combined.contains("victim@example.com"),
+                       "an org name's embedded address reached the archive: \(combined)")
+        XCTAssertFalse(combined.contains("someone.else@example.com"),
+                       "an org name's embedded address reached the archive: \(combined)")
+        XCTAssertFalse(combined.contains("jens@müller.de"),
+                       "an IDN org-name address reached the archive: \(combined)")
+        XCTAssertFalse(combined.contains("müller.de"), "an IDN domain remnant reached the archive: \(combined)")
+        XCTAssertNil(combined.range(of: "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", options: .regularExpression),
+                     "an @-email survived from an org name: \(combined)")
+        XCTAssertTrue(combined.contains("[EMAIL]"),
+                      "no email marker, so the address was never matched: \(combined)")
+        XCTAssertTrue(combined.contains("[EMAIL]'s Organization"),
+                      "the mid-string match must scrub the address and leave the rest: \(combined)")
+        // The real signal must still survive alongside the planted names.
+        XCTAssertTrue(combined.contains("default_claude_max_5x"), "tier lost: \(combined)")
+        XCTAssertFalse(combined.contains("serialize-failed"), "the sample was dropped: \(combined)")
+    }
+
+    /// The opt-in invariant, restated for the new milestone. `emitMilestone` gates on the toggle, so
+    /// the plan sample must leave nothing on disk for a user who never turned logging on - and this
+    /// one runs every couple of minutes, so a gate regression here would write continuously rather
+    /// than once per sign-in.
+    func testPlanSample_writesNothingWhenDiagnosticsDisabled() throws {
+        let usage = Self.makeUsage(session: 100, weekly: 6,
+                                   sessionResetsAt: Self.sessionReset,
+                                   weeklyResetsAt: Self.weeklyReset,
+                                   planRatio: PlanRatio.max5x)
+        let logger = DiagnosticsLogger(directoryOverride: dir, enabledOverride: false)
+        for _ in 0..<5 {
+            logger.emitMilestone(kind: UsageService.planSampleKind,
+                                 payload: UsageService.planSamplePayload(
+                                    accountId: UUID(),
+                                    rateLimitTier: "default_claude_max_5x",
+                                    capabilities: ["claude_max", "chat"],
+                                    billingType: "stripe_subscription",
+                                    usage: usage,
+                                    measurement: Self.measurement))
+        }
+        logger.flush()
+        Thread.sleep(forTimeInterval: 0.2)
+
+        XCTAssertNil(logger.currentSessionFileURL, "a disabled logger opened a file")
+        let contents = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        XCTAssertTrue(contents.filter { $0.lastPathComponent.hasPrefix("diag-") }.isEmpty,
+                      "a disabled logger wrote a diag file: \(contents.map { $0.lastPathComponent })")
+        XCTAssertTrue(LogsExporter.eligibleLogFiles(in: dir, installedAfter: Date(timeIntervalSince1970: 0)).isEmpty,
+                      "a disabled logger produced something exportable")
+    }
+
+    /// The payload on its own, with no producer or archive around it.
+    ///
+    /// Absence has to be WRITTEN as JSON null, not left out. A reader deriving a ratio from these
+    /// lines has to tell "this account has no measured ratio yet" apart from "this build did not
+    /// emit the field", and a missing key cannot say which. The `isValidJSONObject` check is the
+    /// one that matters most: it is the difference between a sample and a `serialize-failed` stub.
+    func testPlanSamplePayload_isJSONEncodableAndWritesAbsenceAsNull() {
+        // A brand-new account: no plan stored, no reset times, nothing measured, no ratio applied.
+        let usage = Self.makeUsage(session: 40, weekly: 80,
+                                   sessionResetsAt: nil, weeklyResetsAt: nil, planRatio: nil)
+        let empty = RatioMeasurement(lastSessionRemaining: 40, lastSessionResetsAt: nil,
+                                     lastWeeklyRemaining: 80, lastWeeklyResetsAt: nil,
+                                     sessionPointsConsumed: 0, weeklyPointsConsumed: 0)
+        let payload = UsageService.planSamplePayload(accountId: UUID(),
+                                                     rateLimitTier: nil,
+                                                     capabilities: nil,
+                                                     billingType: nil,
+                                                     usage: usage,
+                                                     measurement: empty)
+
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(payload),
+                      "the payload must be encodable or the whole sample is replaced by a stub")
+        for key in ["rate_limit_tier", "capabilities", "billing_type",
+                    "session_resets_at", "weekly_resets_at", "measured_ratio", "applied_ratio"] {
+            XCTAssertTrue(payload[key] is NSNull, "\(key) must be written as null when absent, not omitted")
+        }
+        XCTAssertEqual(payload["session_remaining"] as? Double, 40)
+        XCTAssertEqual(payload["weekly_remaining"] as? Double, 80)
+
+        // And the populated shape carries what it was given, measured ratio included: 42 weekly
+        // points over 400 session points is 0.105, above the confidence bar and inside the
+        // plausible band, so it is a number the reader can check against the table.
+        let full = UsageService.planSamplePayload(accountId: UUID(),
+                                                  rateLimitTier: "default_claude_max_5x",
+                                                  capabilities: ["claude_max", "chat"],
+                                                  billingType: "stripe_subscription",
+                                                  usage: Self.makeUsage(session: 100, weekly: 6,
+                                                                        sessionResetsAt: Self.sessionReset,
+                                                                        weeklyResetsAt: Self.weeklyReset,
+                                                                        planRatio: PlanRatio.max5x),
+                                                  measurement: Self.measurement)
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(full))
+        XCTAssertEqual(full["rate_limit_tier"] as? String, "default_claude_max_5x")
+        XCTAssertEqual(full["capabilities"] as? [String], ["claude_max", "chat"])
+        XCTAssertEqual(full["billing_type"] as? String, "stripe_subscription")
+        XCTAssertEqual(full["session_resets_at"] as? String, Self.sessionResetString)
+        XCTAssertEqual(full["weekly_resets_at"] as? String, Self.weeklyResetString)
+        XCTAssertEqual(full["applied_ratio"] as? Double, PlanRatio.max5x)
+        XCTAssertEqual(full["measured_ratio"] as? Double ?? 0, 0.105, accuracy: 0.0001)
+        // Neither the org name nor the org uuid nor the address is in the shape at all - not
+        // emitted is the guarantee, the redactor is only the backstop behind it.
+        for key in ["org_name", "organization_name", "organization_id", "email", "uuid"] {
+            XCTAssertNil(full[key], "\(key) must not be part of the plan sample")
+        }
+    }
+
     // MARK: - Helpers (archive decode is shared via ArchiveTestSupport in LogsExporterTests)
+
+    private static let sessionResetString = "2026-07-29T12:34:56Z"
+    private static let weeklyResetString = "2026-08-02T03:04:05Z"
+    private static let sessionReset = ISO8601DateFormatter().date(from: sessionResetString)!
+    private static let weeklyReset = ISO8601DateFormatter().date(from: weeklyResetString)!
+
+    /// A measurement past its confidence bar: 400 session points consumed against 42 weekly, so
+    /// `ratio` is 0.105 rather than nil. The bar counts WEEKLY points, so a total of 4.2 - which
+    /// whole-number readings could not produce anyway - would leave this nil and the payload
+    /// carrying no measured ratio at all.
+    private static let measurement = RatioMeasurement(lastSessionRemaining: 100,
+                                                      lastSessionResetsAt: sessionReset,
+                                                      lastWeeklyRemaining: 6,
+                                                      lastWeeklyResetsAt: weeklyReset,
+                                                      sessionPointsConsumed: 400,
+                                                      weeklyPointsConsumed: 42)
+
+    /// A `UsageData` built from the legacy per-field tiers, so session and weekly can be set
+    /// independently. Mirrors the helper in `UsageServiceTests`; duplicated rather than shared
+    /// because the two suites have no common base and this one needs the reset times set.
+    private static func makeUsage(session: Double, weekly: Double,
+                                  sessionResetsAt: Date?, weeklyResetsAt: Date?,
+                                  planRatio: Double?) -> UsageData {
+        func tier(remaining: Double, resetsAt: Date?) -> UsageTier {
+            var json: [String: Any] = ["utilization": 100 - remaining]
+            if let resetsAt {
+                json["resets_at"] = ISO8601DateFormatter().string(from: resetsAt)
+            }
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            decoder.dateDecodingStrategy = .iso8601
+            return try! decoder.decode(UsageTier.self, from: JSONSerialization.data(withJSONObject: json))
+        }
+        return UsageData(from: UsageResponse(fiveHour: tier(remaining: session, resetsAt: sessionResetsAt),
+                                             sevenDay: tier(remaining: weekly, resetsAt: weeklyResetsAt),
+                                             sevenDayOpus: nil,
+                                             sevenDaySonnet: nil,
+                                             extraUsage: nil,
+                                             limits: nil,
+                                             spend: nil),
+                         planRatio: planRatio)
+    }
+
+    /// Run the REAL eligibility + archive path over whatever the producer wrote, and hand back
+    /// every extracted byte as one string. The assertions are about what did and did not survive
+    /// the whole producer-to-archive pipeline, so nothing here short-circuits it.
+    private static func exportedText(from dir: URL, into extractDir: URL) throws -> String {
+        let eligible = LogsExporter.eligibleLogFiles(in: dir, installedAfter: Date(timeIntervalSince1970: 0))
+        let archiveURL = try LogsExporter.buildArchive(from: eligible)
+        defer { try? FileManager.default.removeItem(at: archiveURL) }
+        try ArchiveTestSupport.decode(at: archiveURL, into: extractDir)
+        var combined = ""
+        for f in try FileManager.default.contentsOfDirectory(at: extractDir, includingPropertiesForKeys: nil) {
+            combined += (try? String(contentsOf: f, encoding: .utf8)) ?? ""
+        }
+        return combined
+    }
 }

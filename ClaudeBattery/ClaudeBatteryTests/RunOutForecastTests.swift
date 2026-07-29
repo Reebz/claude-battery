@@ -70,12 +70,17 @@ final class RunOutForecastTests: XCTestCase {
     // MARK: - sessionPace (weekly-gated Session card, #31 must stay on RAW session)
 
     /// UsageData with session/weekly derived independently and a session reset `sessionResetsIn`
-    /// seconds from `now`.
-    private func makeUsage(session: Double, weekly: Double, sessionResetsIn: TimeInterval?) -> UsageData {
+    /// seconds from `now`. These cases carry the Max 5x plan ratio by default, because a non-zero
+    /// weekly can only bind once it has been converted into session units and with no ratio there
+    /// is nothing to convert. An exhausted week is the exception - it converts to zero on every
+    /// plan - so the case below states `planRatio: nil` outright.
+    private func makeUsage(session: Double, weekly: Double, sessionResetsIn: TimeInterval?,
+                           planRatio: Double? = PlanRatio.max5x) -> UsageData {
         UsageData(from: UsageResponse(
             fiveHour: makeTier(utilization: 100 - session, resetsAt: sessionResetsIn.map(resetsIn)),
             sevenDay: makeTier(utilization: 100 - weekly),
-            sevenDayOpus: nil, sevenDaySonnet: nil, extraUsage: nil, limits: nil, spend: nil))
+            sevenDayOpus: nil, sevenDaySonnet: nil, extraUsage: nil, limits: nil, spend: nil),
+                  planRatio: planRatio)
     }
 
     private func makeTier(utilization: Double, resetsAt: Date? = nil) -> UsageTier {
@@ -92,8 +97,10 @@ final class RunOutForecastTests: XCTestCase {
     }
 
     func testSessionPace_weeklyBindsAndAhead_isWeeklyLimited() {
-        // Weekly nearly exhausted (5) with a high session (90) ahead of pace: defer to weekly.
+        // Weekly nearly exhausted (5, or 63.1% of a session once converted) with a high session
+        // (90) ahead of pace: defer to weekly.
         let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
         XCTAssertEqual(UsagePopoverView.sessionPace(for: usage, now: now), .weeklyLimited)
     }
 
@@ -104,21 +111,37 @@ final class RunOutForecastTests: XCTestCase {
     }
 
     func testSessionPace_weeklyBindsButSessionInDanger_showsDanger() {
-        // Weekly binds (14 < 15 and < 20), but RAW session (15%, 50% of the window) has delta +35
-        // -> Danger. That nearer, concrete wall must win over the "Limited by weekly" label.
-        let usage = makeUsage(session: 15, weekly: 14, sessionResetsIn: 9000)
+        // Weekly binds (1% of the week is 12.6% of a session, under the session's 15), but RAW
+        // session (15%, 50% of the window) has delta +35 -> Danger. That nearer, concrete wall
+        // must win over the "Limited by weekly" label.
+        let usage = makeUsage(session: 15, weekly: 1, sessionResetsIn: 9000)
         XCTAssertTrue(usage.isSessionWeeklyLimited)
         XCTAssertEqual(UsagePopoverView.sessionPace(for: usage, now: now), .danger)
     }
 
     func testSessionPace_neverGradesCappedValue() {
-        // Discriminator: the capped gauge value (weekly=5) over the 5h window would grade Danger;
-        // sessionPace must instead return .weeklyLimited (it grades the RAW session, which is ahead).
-        let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
+        // Discriminator: the capped gauge value (weekly 1 -> 12.6 in session units) over the 5h
+        // window would grade Danger; sessionPace must instead return .weeklyLimited (it grades the
+        // RAW session, which is ahead).
+        let usage = makeUsage(session: 90, weekly: 1, sessionResetsIn: 9000)
         let wrong = UsagePopoverView.paceStatus(remainingPercent: usage.sessionDisplayRemaining,
                                                 resetsAt: usage.sessionResetDate, window: s, now: now)
         XCTAssertEqual(wrong, .danger)
         XCTAssertEqual(UsagePopoverView.sessionPace(for: usage, now: now), .weeklyLimited)
+    }
+
+    func testSessionPace_weeklyExhaustedWithNoRatio_stillSaysLimitedByWeekly() {
+        // The caption half of the exhausted-week case. With no plan ratio the pace used to fall
+        // through to the RAW session (100 remaining, half the window left, delta -50) and print
+        // "On Track" in green while the week was spent. Zero needs no ratio to convert, so the
+        // caption fires on an account whose plan is unknown - which is every account carried over
+        // from v1.60, since the tier is written only on the sign-in and re-auth routes.
+        let usage = makeUsage(session: 100, weekly: 0, sessionResetsIn: 9000, planRatio: nil)
+        XCTAssertNil(usage.planRatio)
+        XCTAssertTrue(usage.isSessionWeeklyLimited, "this also suppresses the session time arc")
+        let pace = UsagePopoverView.sessionPace(for: usage, now: now)
+        XCTAssertEqual(pace, .weeklyLimited)
+        XCTAssertEqual(UsagePopoverView.paceCaption(pace), "Limited by weekly")
     }
 
     // MARK: - gaugeAccessibilityLabel
@@ -129,6 +152,17 @@ final class RunOutForecastTests: XCTestCase {
         let label = UsagePopoverView.gaugeAccessibilityLabel(
             name: "Session", usage: 2, timeRemaining: nil, pace: .weeklyLimited)
         XCTAssertEqual(label, "Session usage 2 percent, limited by weekly")
+    }
+
+    func testGaugeA11y_roundsHalvesTheWayTheGaugePrintsThem() {
+        // The gauge prints these same two Doubles with "%.0f", which rounds a half to the EVEN
+        // integer: 16.5 draws "16". Plain .rounded() goes half away from zero and would speak 17,
+        // so a screen reader would announce a different number from the one on screen - the #43
+        // mismatch again, this time between the dial and the voice. 16.5 rather than 15.5 or 17.5
+        // on purpose: only halves with an even integer part tell the two modes apart.
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Session", usage: 16.5, timeRemaining: 42.5, pace: .unknown)
+        XCTAssertEqual(label, "Session usage 16 percent, time remaining 42 percent")
     }
 
     func testGaugeA11y_speaksPaceWithMeaning() {

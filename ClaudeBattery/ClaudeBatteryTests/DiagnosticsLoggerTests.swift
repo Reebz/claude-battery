@@ -85,6 +85,25 @@ final class DiagnosticsLoggerTests: XCTestCase {
         XCTAssertEqual(decode(lines[2])?["kind"] as? String, "first-real-event")
     }
 
+    func testPathResolved_namesTheFileWithoutTheAbsolutePath() {
+        // The export is written to be attached to a public GitHub issue, and the absolute path
+        // carries the macOS account name. The redactor cannot help: a bare filesystem path has no
+        // `=`, no `@` and no scheme, so it ships verbatim. Keep the file name and a home-relative
+        // directory, and make the override a presence marker rather than a second path.
+        let logger = makeEnabledLogger()
+        logger.emitMilestone(kind: "first-real-event", payload: ["k": "v"])
+        Thread.sleep(forTimeInterval: 0.05)
+
+        let lines = readAllLines(from: logger.currentSessionFileURL!)
+        let payload = decode(lines[0])?["payload"] as? [String: Any]
+        XCTAssertNil(payload?["path"], "the absolute path must not be emitted")
+        XCTAssertEqual(payload?["file"] as? String, logger.currentSessionFileURL?.lastPathComponent)
+        XCTAssertEqual(payload?["directoryOverride"] as? String, "(set)",
+                       "a test override is a home-shaped path too, so it is reported as presence only")
+        XCTAssertFalse(lines[0].contains(NSHomeDirectory()),
+                       "no home path may reach a file the user is told to post publicly")
+    }
+
     func testEnabled_createsMissingDirectoryOnFirstEmit() {
         XCTAssertFalse(FileManager.default.fileExists(atPath: tempDir.path))
         let logger = makeEnabledLogger()

@@ -174,7 +174,10 @@ final class RenderStateTests: XCTestCase {
     }
 
     /// UsageData with session (fiveHour) and weekly (sevenDay) utilization set independently.
-    static func makeUsage(sessionUtilization: Double, weeklyUtilization: Double) -> UsageData {
+    /// `planRatio` is what turns a weekly percentage into session units; without one no cap can
+    /// happen at all, so the weekly-capped cases have to supply it.
+    static func makeUsage(sessionUtilization: Double, weeklyUtilization: Double,
+                          planRatio: Double? = nil) -> UsageData {
         UsageData(from: UsageResponse(
             fiveHour: Self.makeTier(utilization: sessionUtilization),
             sevenDay: Self.makeTier(utilization: weeklyUtilization),
@@ -183,7 +186,7 @@ final class RenderStateTests: XCTestCase {
             extraUsage: nil,
             limits: nil,
             spend: nil
-        ))
+        ), planRatio: planRatio)
     }
 
     private static func makeTier(utilization: Double) -> UsageTier {
@@ -284,17 +287,42 @@ final class IconSignatureTests: XCTestCase {
     // superset of what gets drawn - it may redraw an identical image, but never misses a changed
     // one. See IconStyleTests for the drawn-value side of the contract.
     func testWeeklyCapIsDerived_rawSessionSurvivesInTheSignature() {
-        let high = RenderStateTests.makeUsage(sessionUtilization: 20, weeklyUtilization: 95) // session 80, weekly 5
-        let low = RenderStateTests.makeUsage(sessionUtilization: 92, weeklyUtilization: 95)  // session 8, weekly 5
+        // Weekly 5 on a Max 5x ratio converts to 63.1% of a session, so both sessions above it
+        // collapse onto that same displayed value.
+        let high = RenderStateTests.makeUsage(sessionUtilization: 20, weeklyUtilization: 95,
+                                              planRatio: PlanRatio.max5x) // session 80, weekly 5
+        let low = RenderStateTests.makeUsage(sessionUtilization: 30, weeklyUtilization: 95,
+                                             planRatio: PlanRatio.max5x)  // session 70, weekly 5
 
         XCTAssertTrue(high.isSessionWeeklyLimited)
         XCTAssertTrue(low.isSessionWeeklyLimited)
-        XCTAssertEqual(high.sessionDisplayRemaining, low.sessionDisplayRemaining, accuracy: 0.01) // both -> 5
-        XCTAssertNotEqual(high.sessionRemaining, low.sessionRemaining, accuracy: 0.01)        // 80 vs 8
+        XCTAssertEqual(high.sessionDisplayRemaining, low.sessionDisplayRemaining, accuracy: 0.01) // both -> 63.1
+        XCTAssertNotEqual(high.sessionRemaining, low.sessionRemaining, accuracy: 0.01)        // 80 vs 70
 
         let sigHigh = makeSignature(isAuthenticated: true, usage: high)
         let sigLow = makeSignature(isAuthenticated: true, usage: low)
         XCTAssertNotEqual(sigHigh, sigLow)
+    }
+
+    // The plan ratio is a STORED field on UsageData, so it rides inside the signature with the rest
+    // of the snapshot. That is what makes the menu bar repaint when the ratio arrives or changes:
+    // the session and weekly numbers can be identical while the drawn Session value is not, and the
+    // dedup has to notice. Had the ratio been looked up outside UsageData, the icon would keep
+    // drawing the pre-conversion number until some other field happened to move.
+    func testPlanRatioChange_producesUnequalSignatures() {
+        let unknownPlan = RenderStateTests.makeUsage(sessionUtilization: 0, weeklyUtilization: 94)
+        let max5x = RenderStateTests.makeUsage(sessionUtilization: 0, weeklyUtilization: 94,
+                                               planRatio: PlanRatio.max5x)
+
+        // The drawn number really does differ between these two, so the assertion below is about
+        // the dedup rather than about two images that were never the same anyway.
+        XCTAssertEqual(unknownPlan.sessionDisplayRemaining, 100, accuracy: 0.01)
+        XCTAssertEqual(max5x.sessionDisplayRemaining, 75.76, accuracy: 0.01)
+        XCTAssertEqual(unknownPlan.sessionRemaining, max5x.sessionRemaining, accuracy: 0.01)
+        XCTAssertEqual(unknownPlan.weeklyRemaining, max5x.weeklyRemaining, accuracy: 0.01)
+
+        XCTAssertNotEqual(makeSignature(isAuthenticated: true, usage: unknownPlan),
+                          makeSignature(isAuthenticated: true, usage: max5x))
     }
 
     func testUsageNilVsPresent_produceUnequalSignatures() {

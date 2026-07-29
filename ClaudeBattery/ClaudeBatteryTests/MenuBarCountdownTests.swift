@@ -27,7 +27,7 @@ final class MenuBarCountdownTests: XCTestCase {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         decoder.dateDecodingStrategy = .iso8601
         let response = try decoder.decode(UsageResponse.self, from: Data(json.utf8))
-        let usage = UsageData(from: response)
+        let usage = UsageData(from: response, planRatio: PlanRatio.max5x)
         // Guard the fixture itself: the decode must yield the reset date the cases assume, and
         // must NOT trip the weekly gate - with no weekly entry the decode falls back to the
         // legacy tier and lands on 100 remaining, so the cases below see a plain countdown.
@@ -37,10 +37,12 @@ final class MenuBarCountdownTests: XCTestCase {
     }
 
     /// Build a weekly-limited UsageData: session healthy (80 remaining) but weekly nearly gone
-    /// (5 remaining), so `sessionDisplayRemaining` - and therefore the session pill the countdown
-    /// cell sits beside - shows the WEEKLY number. `weekly_all` is the kind the production decode
-    /// reads for the weekly tier. Same `resets_at` as `makeUsage`, so a valid future session reset
-    /// exists and the weekly gate is the only thing that can explain an empty countdown.
+    /// (5 remaining), which on the Max 5x ratio converts to 63.1% of a session and so caps the
+    /// session pill the countdown cell sits beside. `weekly_all` is the kind the production
+    /// decode reads for the weekly tier. Same `resets_at` as `makeUsage`, so a valid future
+    /// session reset exists and the weekly gate is the only thing that can explain an empty
+    /// countdown. The plan ratio is required: with none stored there is nothing to convert and
+    /// the cap cannot fire at all.
     private func makeWeeklyLimitedUsage() throws -> UsageData {
         let json = """
         {
@@ -54,17 +56,18 @@ final class MenuBarCountdownTests: XCTestCase {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         decoder.dateDecodingStrategy = .iso8601
         let response = try decoder.decode(UsageResponse.self, from: Data(json.utf8))
-        let usage = UsageData(from: response)
+        let usage = UsageData(from: response, planRatio: PlanRatio.max5x)
         // Assert the fixture really is weekly-limited, so the case cannot silently rot into
-        // testing nothing if the gate's threshold or shape moves.
+        // testing nothing if the gate's shape moves.
         XCTAssertEqual(usage.sessionResetDate, resetDate)
         XCTAssertTrue(usage.isSessionWeeklyLimited)
         return usage
     }
 
-    /// The same two-limit shape with a HEALTHY weekly (90 remaining), so the gate stays shut.
-    /// The control for `makeWeeklyLimitedUsage`: proves the suppression is gated on the weekly
-    /// limit binding rather than on merely having a weekly limit in the response.
+    /// The same two-limit shape and the same plan ratio, with a HEALTHY weekly (90 remaining),
+    /// so the gate stays shut. The control for `makeWeeklyLimitedUsage`: proves the suppression
+    /// is gated on the weekly limit binding rather than on merely having a weekly limit in the
+    /// response.
     private func makeWeeklyHealthyUsage() throws -> UsageData {
         let json = """
         {
@@ -78,7 +81,7 @@ final class MenuBarCountdownTests: XCTestCase {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         decoder.dateDecodingStrategy = .iso8601
         let response = try decoder.decode(UsageResponse.self, from: Data(json.utf8))
-        let usage = UsageData(from: response)
+        let usage = UsageData(from: response, planRatio: PlanRatio.max5x)
         XCTAssertEqual(usage.sessionResetDate, resetDate)
         XCTAssertFalse(usage.isSessionWeeklyLimited)
         return usage

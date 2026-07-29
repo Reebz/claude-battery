@@ -188,7 +188,12 @@ enum SecretRedactor {
         return "REDACTED_LEN_\(count)"
     }
 
-    private static func sha256Prefix(_ value: String) -> String {
+    /// One-way 8-character tag for a value. Internal rather than private because a producer needs
+    /// the same thing the redactor does: `UsageService`'s plan sample tags each reading with the
+    /// account it came from, so a two-account export does not interleave two accounts' readings
+    /// into one sequence nobody can take a ratio from (R6). Reused rather than duplicated so there
+    /// is one definition of what the app's one-way tag looks like.
+    static func sha256Prefix(_ value: String) -> String {
         let digest = SHA256.hash(data: Data(value.utf8))
         let hex = digest.map { String(format: "%02x", $0) }.joined()
         return String(hex.prefix(8))
