@@ -9,7 +9,9 @@ namespace ClaudeBatteryWin.Tests;
 /// <see cref="IVelopackUpdater"/> and the relaunch teardown behind <see cref="IUpdateTeardown"/>,
 /// so nothing touches GitHub, disk, or the process. Covers the plan's three scenarios:
 /// a null check leaves the row in "last checked", a non-null exposes version + notes, and the
-/// apply teardown releases the mutex so relaunch is single-instance.
+/// apply teardown releases the mutex so relaunch is single-instance. Also pins the failure flag
+/// (<see cref="UpdateService.LastCheckFailed"/>) and the Settings row text precedence
+/// (<see cref="UpdateService.UpdateRowText"/>) so the raw exe never sits on "Checking..." forever.
 /// </summary>
 public class UpdateServiceTests
 {
@@ -182,6 +184,52 @@ public class UpdateServiceTests
         Assert.Equal("1.51.0", service.AvailableUpdate!.Version);
     }
 
+    // --- CheckForUpdatesAsync: failure lands on LastCheckFailed, never on "Up to date" -------------
+
+    [Fact]
+    public async Task CheckForUpdates_ThrowingCheck_SetsLastCheckFailedWithoutFlippingChecked()
+    {
+        var (service, _, _) = BuildService(checkThrows: new HttpRequestException("network down"));
+
+        var result = await service.CheckForUpdatesAsync();
+
+        Assert.Null(result);
+        Assert.True(service.LastCheckFailed);
+        Assert.Null(service.AvailableUpdate);
+        // A failed check must not read as "Up to date." - only a completed check sets HasChecked.
+        Assert.False(service.HasChecked);
+    }
+
+    [Fact]
+    public async Task CheckForUpdates_SuccessAfterFailure_ClearsLastCheckFailed()
+    {
+        var (service, updater, _) = BuildService(checkThrows: new HttpRequestException("network down"));
+        await service.CheckForUpdatesAsync();
+        Assert.True(service.LastCheckFailed);
+
+        // GitHub comes back; the next check completes and the failure flag clears.
+        updater.CheckThrows = null;
+        updater.CheckResult = null;
+        await service.CheckForUpdatesAsync();
+
+        Assert.False(service.LastCheckFailed);
+        Assert.True(service.HasChecked);
+        Assert.Null(service.AvailableUpdate);
+    }
+
+    [Fact]
+    public async Task CheckForUpdates_WhenNotInstalled_DoesNotMarkFailed()
+    {
+        // The raw exe never runs a check, so it neither completes nor fails; the row's
+        // not-installed text is driven off IsUpdaterInstalled instead.
+        var (service, _, _) = BuildService(checkResult: null, isInstalled: false);
+
+        await service.CheckForUpdatesAsync();
+
+        Assert.False(service.LastCheckFailed);
+        Assert.False(service.HasChecked);
+    }
+
     [Fact]
     public async Task CheckForUpdates_Cancellation_Propagates()
     {
@@ -190,6 +238,31 @@ public class UpdateServiceTests
 
         // Cancellation is not swallowed like a transport failure; it propagates.
         await Assert.ThrowsAsync<OperationCanceledException>(() => service.CheckForUpdatesAsync());
+    }
+
+    // --- UpdateRowText: the Settings About row as a pure function of service state --------------
+
+    [Theory]
+    // Still checking: installed, nothing known yet.
+    [InlineData(true, null, false, false, "Checking for updates...")]
+    // A completed check with nothing newer.
+    [InlineData(true, null, true, false, "Up to date.")]
+    // A failed check must not claim up-to-date, and must not sit on "Checking...".
+    [InlineData(true, null, false, true, "Couldn't check for updates.")]
+    // The raw exe: honest about the missing updater instead of "Checking..." forever.
+    [InlineData(false, null, false, false, "Auto-update isn't available for this build. Get new versions from GitHub Releases.")]
+    // Not-installed wins over a (stale or impossible) checked flag.
+    [InlineData(false, null, true, false, "Auto-update isn't available for this build. Get new versions from GitHub Releases.")]
+    // Not-installed also wins over a failed flag.
+    [InlineData(false, null, false, true, "Auto-update isn't available for this build. Get new versions from GitHub Releases.")]
+    // A known update wins over everything else, including not-installed and a later failure.
+    [InlineData(true, "1.51.0", true, false, "Update available: v1.51.0")]
+    [InlineData(true, "1.51.0", true, true, "Update available: v1.51.0")]
+    [InlineData(false, "1.51.0", false, false, "Update available: v1.51.0")]
+    public void UpdateRowText_ReflectsStatePrecedence(
+        bool isInstalled, string? availableVersion, bool hasChecked, bool lastCheckFailed, string expected)
+    {
+        Assert.Equal(expected, UpdateService.UpdateRowText(isInstalled, availableVersion, hasChecked, lastCheckFailed));
     }
 
     // --- ApplyUpdateAsync: teardown contract / single-instance relaunch -------------------------

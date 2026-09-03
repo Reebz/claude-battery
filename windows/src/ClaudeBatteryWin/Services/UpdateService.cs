@@ -41,6 +41,15 @@ public sealed class UpdateService
     public bool HasChecked { get; private set; }
 
     /// <summary>
+    /// True when the most recent check threw (GitHub unreachable, no Velopack assets on the latest
+    /// release, ...). Cleared by the next successful check. Lets the Settings row land on
+    /// "Couldn't check for updates." instead of sitting on "Checking for updates..." forever;
+    /// <see cref="HasChecked"/> deliberately stays false on failure so a failed check is never
+    /// reported as "Up to date.".
+    /// </summary>
+    public bool LastCheckFailed { get; private set; }
+
+    /// <summary>
     /// True only when the host install was actually managed by Velopack (a real installed build).
     /// In a dev (<c>dotnet run</c>) or test context the updater is not installed, so checks no-op.
     /// Mirrors Velopack's own <c>UpdateManager.IsInstalled</c> guard.
@@ -62,7 +71,8 @@ public sealed class UpdateService
     /// Swallows transport/source failures the way the Mac update check does (a failed check is a
     /// no-op, not an error surfaced to the user); leaves the prior <see cref="AvailableUpdate"/>
     /// untouched on failure and does not flip <see cref="HasChecked"/>, so a transient GitHub blip
-    /// does not erase a previously-found update.
+    /// does not erase a previously-found update. A failure does set <see cref="LastCheckFailed"/>
+    /// so the UI can say so.
     /// </summary>
     public async Task<VelopackUpdateInfo?> CheckForUpdatesAsync(CancellationToken cancellationToken = default)
     {
@@ -79,6 +89,7 @@ public sealed class UpdateService
 
             AvailableUpdate = info;
             HasChecked = true;
+            LastCheckFailed = false;
             return info;
         }
         catch (OperationCanceledException)
@@ -88,9 +99,42 @@ public sealed class UpdateService
         catch (Exception)
         {
             // A failed check is a no-op (parity with the Mac's debug-logged swallow). Keep any
-            // previously-found update visible; do not mark HasChecked off a failed attempt.
+            // previously-found update visible; do not mark HasChecked off a failed attempt. Only
+            // record that the attempt failed so the update row can stop saying "Checking...".
+            LastCheckFailed = true;
             return null;
         }
+    }
+
+    /// <summary>
+    /// The status line for the Settings update row, as a pure function of the service state so it
+    /// is unit-testable without a window. Precedence: a known update always wins; then a build the
+    /// updater cannot manage (the raw single-file exe testers run, where a check never runs and so
+    /// never "completes"); then a completed check; then a failed check; else still checking.
+    /// </summary>
+    public static string UpdateRowText(bool isInstalled, string? availableVersion, bool hasChecked, bool lastCheckFailed)
+    {
+        if (availableVersion is not null)
+        {
+            return $"Update available: v{availableVersion}";
+        }
+
+        if (!isInstalled)
+        {
+            return "Auto-update isn't available for this build. Get new versions from GitHub Releases.";
+        }
+
+        if (hasChecked)
+        {
+            return "Up to date.";
+        }
+
+        if (lastCheckFailed)
+        {
+            return "Couldn't check for updates.";
+        }
+
+        return "Checking for updates...";
     }
 
     /// <summary>

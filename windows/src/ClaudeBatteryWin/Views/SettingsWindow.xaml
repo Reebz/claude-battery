@@ -65,16 +65,31 @@
                       Checked="OnNotificationsToggled"
                       Unchecked="OnNotificationsToggled"
                       AutomationProperties.Name="Low usage notifications" />
+            <!-- Test toast: shown only when the host supplies a sender (the real WinRT sink), so a
+                 tester can prove Windows accepts the app's toasts without waiting for a low-usage
+                 poll. Collapsed on the author/non-Windows build. -->
+            <Button x:Name="TestNotificationButton"
+                    Content="Send test notification"
+                    Margin="24,6,0,0"
+                    HorizontalAlignment="Left"
+                    Padding="12,4"
+                    Visibility="Collapsed"
+                    Click="OnTestNotificationClicked"
+                    AutomationProperties.Name="Send a test notification" />
+            <TextBlock x:Name="TestNotificationStatus"
+                       Style="{StaticResource Caption}"
+                       Margin="24,4,0,0"
+                       Visibility="Collapsed" />
 
             <CheckBox x:Name="CountdownToggle"
-                      Content="Show session countdown in menu bar"
+                      Content="Show session countdown in the tray tooltip"
                       Margin="0,12,0,0"
                       Checked="OnCountdownToggled"
                       Unchecked="OnCountdownToggled"
-                      AutomationProperties.Name="Show session countdown in the tray" />
+                      AutomationProperties.Name="Show session countdown in the tray tooltip" />
             <TextBlock Style="{StaticResource Caption}"
                        Margin="24,2,0,0"
-                       Text="Adds a compact session countdown (e.g. &quot;4h+&quot;, &quot;32m&quot;) to the left of the tray icon. Hidden when there is no active session." />
+                       Text="Adds a compact session countdown (e.g. &quot;4h+&quot;, &quot;32m&quot;) to the tooltip shown when you hover the tray icon. Hidden when there is no active session." />
 
             <!-- Accounts -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="ACCOUNTS" />
@@ -145,7 +160,8 @@
                 </StackPanel>
             </Border>
 
-            <!-- Version / update row (bound to the U12 UpdateService) -->
+            <!-- Version / update row (bound to the U12 UpdateService). On a build the updater
+                 cannot manage (the raw exe) the row says so and the button opens the releases page. -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="ABOUT" />
             <Border Style="{StaticResource Card}">
                 <Grid>

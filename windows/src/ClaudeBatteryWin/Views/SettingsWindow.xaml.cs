@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -12,12 +13,19 @@ namespace ClaudeBatteryWin.Views;
 
 /// <summary>
 /// Settings surface (U11), the Windows port of the Mac SettingsView. Hosts the launch-at-login,
-/// notifications, and session-countdown toggles; the account list with inline nickname edit and
-/// two-step remove; the manual cookie-paste sign-in; and the version/update row.
+/// notifications (plus a test-toast button when the host supplies a sender), and session-countdown
+/// toggles; the account list with inline nickname edit and two-step remove; the manual cookie-paste
+/// sign-in; and the version/update row.
 ///
 /// The window is constructed by the integration layer with the live services. The icon style is
 /// fixed for v1 (no picker). Per-account threshold sliders appear only while notifications are
 /// enabled, mirroring the Mac (which shows the slider per account only when notificationsEnabled).
+///
+/// The account list follows the store: <see cref="AccountStore.ActiveAccountChanged"/> (raised on
+/// add, remove, switch and re-auth) rebuilds the list while the window is open, so an account added
+/// through the WebView2 login or a switch made from the flyout shows up without reopening Settings.
+/// <see cref="RefreshAccounts"/> and <see cref="RefreshUpdateRow"/> are the explicit hooks for the
+/// integration layer to push a refresh (e.g. when a background update check completes).
 ///
 /// Bindings are wired in code rather than via a separate view-model: the account rows need a
 /// DataTemplate-style swap between a label and an edit field (the active edit field gets a Fluent
@@ -33,6 +41,10 @@ public partial class SettingsWindow : Window
     private readonly AutostartService _autostart;
     private readonly IAppSettings _settings;
     private readonly UpdateService _updateService;
+
+    /// Sends a test toast through the host's real toast sink and reports whether Windows accepted
+    /// it. Null on builds without a sink (author/non-Windows), which hides the button.
+    private readonly Func<bool>? _sendTestToast;
 
     /// The account currently awaiting a two-step remove confirm, or null. Mirrors the Mac
     /// confirmRemoveId.
@@ -50,15 +62,23 @@ public partial class SettingsWindow : Window
         ManualSignIn manualSignIn,
         AutostartService autostart,
         IAppSettings settings,
-        UpdateService updateService)
+        UpdateService updateService,
+        Func<bool>? sendTestToast = null)
     {
         _accountStore = accountStore ?? throw new ArgumentNullException(nameof(accountStore));
         _manualSignIn = manualSignIn ?? throw new ArgumentNullException(nameof(manualSignIn));
         _autostart = autostart ?? throw new ArgumentNullException(nameof(autostart));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _updateService = updateService ?? throw new ArgumentNullException(nameof(updateService));
+        _sendTestToast = sendTestToast;
 
         InitializeComponent();
+
+        // Follow the store while open so an account added via the login window, or a switch made
+        // from the flyout, shows up here without a reopen. Unsubscribe on close: the window is
+        // recreated per open (App nulls its reference on Closed) and must not outlive itself.
+        _accountStore.ActiveAccountChanged += OnStoreChanged;
+        Closed += (_, _) => _accountStore.ActiveAccountChanged -= OnStoreChanged;
 
         // Reflect current state into the toggles WITHOUT firing the Checked/Unchecked handlers (set
         // the field before the window is loaded so the handler's guard sees them initialized).
@@ -72,6 +92,13 @@ public partial class SettingsWindow : Window
         NotificationsToggle.IsChecked = _settings.NotificationsEnabled;
         CountdownToggle.IsChecked = _settings.ShowSessionCountdown;
         _suppressToggleEvents = false;
+
+        // The test-toast button only makes sense when the host wired a real sender.
+        TestNotificationButton.Visibility = _sendTestToast is null ? Visibility.Collapsed : Visibility.Visible;
+
+        // Assembly version, not Assembly.Location / FileVersionInfo: those are empty or throw under
+        // PublishSingleFile (the shipped raw exe). ToString(3) drops the trailing revision.
+        VersionLabel.Text = $"Claude Battery v{typeof(App).Assembly.GetName().Version?.ToString(3)}";
 
         RebuildAccountList();
         RefreshUpdateRow();
@@ -165,6 +192,37 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>
+    /// Fire one toast through the host's real sink so a tester can confirm Windows accepts the app's
+    /// notifications right now, instead of waiting for usage to drop below a threshold. The sink
+    /// reports false (never throws) when Windows rejected or silently dropped the toast.
+    /// </summary>
+    private void OnTestNotificationClicked(object sender, RoutedEventArgs e)
+    {
+        if (_sendTestToast is null)
+        {
+            return;
+        }
+
+        bool delivered;
+        try
+        {
+            delivered = _sendTestToast();
+        }
+        catch (Exception)
+        {
+            delivered = false;
+        }
+
+        var text = delivered
+            ? "Sent."
+            : "Windows did not accept the toast. Check Settings > System > Notifications for a 'Claude Battery' entry.";
+        TestNotificationStatus.Text = text;
+        TestNotificationStatus.Foreground = (Brush)FindResource(delivered ? "SettingsSuccessTextBrush" : "SettingsErrorTextBrush");
+        TestNotificationStatus.Visibility = Visibility.Visible;
+        AutomationProperties.SetName(TestNotificationStatus, text);
+    }
+
+    /// <summary>
     /// Register the process AUMID so toasts resolve to the installed Start-menu shortcut's identity.
     /// Best-effort; isolated here so the WinRT-only call does not break the non-Windows author/test
     /// build (it is compiled in only on the Windows-versioned TFM).
@@ -177,6 +235,31 @@ public partial class SettingsWindow : Window
     }
 
     // MARK: - Account list
+
+    /// <summary>
+    /// Rebuild the account list from the store. Explicit hook for the integration layer (e.g. after
+    /// a login completes); the store's <see cref="AccountStore.ActiveAccountChanged"/> already
+    /// drives the same rebuild while the window is open.
+    /// </summary>
+    public void RefreshAccounts() => RebuildAccountList();
+
+    /// <summary>
+    /// Store change -> rebuild on the UI thread. The store raises synchronously on the caller's
+    /// thread (which can be a poll or login continuation), hence BeginInvoke. Skipped while a
+    /// nickname edit is in progress so a half-typed name is not thrown away by the rebuild.
+    /// </summary>
+    private void OnStoreChanged()
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!IsLoaded || _editingNicknameId is not null)
+            {
+                return;
+            }
+
+            RebuildAccountList();
+        }));
+    }
 
     private void RebuildAccountList()
     {
@@ -531,6 +614,12 @@ public partial class SettingsWindow : Window
             case ManualSignInResult.ResultKind.ConnectionError:
                 ShowManualStatus("Connection error. Please try again.", isError: true);
                 break;
+
+            case ManualSignInResult.ResultKind.SaveFailed:
+                ShowManualStatus(
+                    "Couldn't save the account. Check that your user folder is writable, then try again.",
+                    isError: true);
+                break;
         }
     }
 
@@ -544,29 +633,59 @@ public partial class SettingsWindow : Window
 
     // MARK: - Version / update row
 
-    private void RefreshUpdateRow()
+    /// The GitHub Releases page the raw-exe build points at, since it cannot self-update.
+    private const string ReleasesPageUrl = "https://github.com/Reebz/claude-battery/releases";
+
+    /// <summary>
+    /// Re-read the update service and repaint the About row. Internal so the integration layer can
+    /// call it when a background check completes while the window is open. The status text comes
+    /// from <see cref="UpdateService.UpdateRowText"/> (available > not-installed > checked > failed
+    /// > checking); the button is "Update to vX" for a known update, "Open releases page" on a build
+    /// the updater cannot manage, and hidden otherwise.
+    /// </summary>
+    internal void RefreshUpdateRow()
     {
         var available = _updateService.AvailableUpdate;
+        var installed = _updateService.IsUpdaterInstalled;
+
+        UpdateStatus.Text = UpdateService.UpdateRowText(
+            installed,
+            available?.Version,
+            _updateService.HasChecked,
+            _updateService.LastCheckFailed);
+
         if (available is not null)
         {
-            UpdateStatus.Text = $"Update available: v{available.Version}";
             UpdateActionButton.Content = $"Update to v{available.Version}";
             UpdateActionButton.Visibility = Visibility.Visible;
         }
-        else if (_updateService.HasChecked)
+        else if (!installed)
         {
-            UpdateStatus.Text = "Up to date.";
-            UpdateActionButton.Visibility = Visibility.Collapsed;
+            UpdateActionButton.Content = "Open releases page";
+            UpdateActionButton.Visibility = Visibility.Visible;
         }
         else
         {
-            UpdateStatus.Text = "Checking for updates...";
             UpdateActionButton.Visibility = Visibility.Collapsed;
         }
     }
 
     private async void OnUpdateActionClicked(object sender, RoutedEventArgs e)
     {
+        if (!_updateService.IsUpdaterInstalled)
+        {
+            // Raw exe: nothing to apply, hand the user to the download page instead.
+            try
+            {
+                Process.Start(new ProcessStartInfo(ReleasesPageUrl) { UseShellExecute = true });
+            }
+            catch (Exception)
+            {
+                UpdateStatus.Text = $"Couldn't open the browser. Visit {ReleasesPageUrl}";
+            }
+            return;
+        }
+
         UpdateActionButton.IsEnabled = false;
         try
         {
