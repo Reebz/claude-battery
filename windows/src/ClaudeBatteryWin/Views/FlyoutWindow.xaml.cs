@@ -58,6 +58,11 @@ public partial class FlyoutWindow : Window
     /// </summary>
     private long? _hiddenByDeactivationAtMs;
 
+    // The anchor resolved at the last ShowAtTray, in device pixels: the tray rect when the icon had
+    // an on-screen rect at click time, else null, plus the click-time cursor. Size-driven
+    // repositions reuse it (see ShowAtTray).
+    private (PlacementRect? TrayRect, PlacementPoint Cursor)? _openAnchor;
+
     private FlyoutViewModel? ViewModel => DataContext as FlyoutViewModel;
 
     public FlyoutWindow()
@@ -181,6 +186,13 @@ public partial class FlyoutWindow : Window
         // A successful show consumes any deactivation-hide stamp so it can never block a later click.
         _hiddenByDeactivationAtMs = null;
 
+        // Sample the anchor ONCE per show, before Show() (OnRenderSizeChanged fires inside it). When
+        // the icon sits in the hidden-icons overflow the tray rect lookup fails and the anchor is the
+        // cursor, which is on the icon now but wherever the user moved it by the time the content
+        // grows (Loading to Authenticated on the first poll). Reposition reuses this sample so a
+        // regrowth keeps the flyout where it opened instead of jumping under the mouse.
+        _openAnchor = (TryGetTrayRect(out var trayRect) ? trayRect : (PlacementRect?)null, GetCursorPosition());
+
         if (!IsVisible)
         {
             Show();
@@ -200,8 +212,9 @@ public partial class FlyoutWindow : Window
     /// open (Loading -> Authenticated on the first poll, for example). WPF keeps Left/Top on a resize,
     /// so growth would extend downward over the taskbar and off-screen; re-run the placement so the
     /// bottom edge stays anchored above the tray. The override also fires during ShowAtTray's own
-    /// Show()/UpdateLayout(), which just re-runs the same placement with identical inputs. No
-    /// Activate()/Topmost here: a size-driven reposition must not steal focus.
+    /// Show()/UpdateLayout(), which just re-runs the same placement against the anchor ShowAtTray
+    /// sampled (never the live cursor). No Activate()/Topmost here: a size-driven reposition must
+    /// not steal focus.
     /// </summary>
     protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
     {
@@ -221,15 +234,28 @@ public partial class FlyoutWindow : Window
     {
         var (sx, sy) = DeviceScale();
 
-        var hasTrayRect = TryGetTrayRect(out var trayRect);
-        var cursor = GetCursorPosition();
-        var anchorPoint = hasTrayRect
-            ? new PlacementPoint(trayRect.Left, trayRect.Top)
+        // Reuse the anchor sampled by ShowAtTray; sample live only if the window became visible some
+        // other way (defensive, the app always goes through ShowAtTray).
+        PlacementRect? trayRect;
+        PlacementPoint cursor;
+        if (_openAnchor is { } anchor)
+        {
+            trayRect = anchor.TrayRect;
+            cursor = anchor.Cursor;
+        }
+        else
+        {
+            trayRect = TryGetTrayRect(out var live) ? live : (PlacementRect?)null;
+            cursor = GetCursorPosition();
+        }
+
+        var anchorPoint = trayRect is { } rect
+            ? new PlacementPoint(rect.Left, rect.Top)
             : cursor;
         var workArea = GetWorkAreaForPoint(anchorPoint, sx, sy);
 
         var placed = FlyoutPlacement.Compute(
-            hasTrayRect ? trayRect : (PlacementRect?)null,
+            trayRect,
             cursor,
             workArea,
             FlyoutPlacement.ToDevice(dipSize, sx, sy));

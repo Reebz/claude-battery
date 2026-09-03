@@ -525,7 +525,29 @@ public partial class App : Application
             _settings?.ShowSessionCountdown ?? false,
             DateTimeOffset.UtcNow);
 
-        _trayIcon.ToolTipText = BuildTooltip(usage, countdown);
+        // Write the tooltip through the core TrayIcon, not the ToolTipText dependency property.
+        // (1) TrayIcon.UpdateToolTip throws InvalidOperationException when Shell_NotifyIcon(NIM_MODIFY)
+        //     returns FALSE (Explorer restarting or hung, or the new shell has not yet re-sent
+        //     TaskbarCreated) and nothing above RefreshIcon catches it, so the DP write would end the
+        //     process on an ordinary Explorer restart; the icon write below already tolerates the same
+        //     failure by returning false.
+        // (2) The DP commits its value before its change callback runs, so after a failed write an
+        //     identical next refresh would never retry. TrayIcon.ToolTip only advances on a successful
+        //     write (and is what TaskbarCreated's re-create passes to NIM_ADD), so comparing against it
+        //     retries until the shell accepts the text.
+        var tooltip = BuildTooltip(usage, countdown);
+        if (!string.Equals(_trayIcon.TrayIcon.ToolTip, tooltip, StringComparison.Ordinal))
+        {
+            try
+            {
+                _trayIcon.TrayIcon.UpdateToolTip(tooltip);
+            }
+            catch (InvalidOperationException)
+            {
+                // Shell unavailable (ObjectDisposedException derives from this too, covering a late
+                // refresh after Exit disposal). Retried on the next refresh.
+            }
+        }
 
         var size = Math.Max(16, GetSystemMetrics(SM_CXSMICON));
         var bitmap = _renderer.Render(state, theme, countdown, size);

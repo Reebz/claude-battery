@@ -232,6 +232,9 @@ public sealed class EvergreenBootstrapper : IWebView2Bootstrapper
     // 60 s covers the ~2 MB stub on a slow link.
     private static readonly HttpClient DownloadClient = new() { Timeout = TimeSpan.FromSeconds(60) };
 
+    /// <summary>Upper bound on the whole stub download, headers plus the ~2 MB body.</summary>
+    private static readonly TimeSpan DownloadDeadline = TimeSpan.FromMinutes(3);
+
     private readonly Func<CancellationToken, Task<string?>> _locateOrDownload;
     private readonly Func<string, CancellationToken, Task<int>> _runInstaller;
 
@@ -278,19 +281,35 @@ public sealed class EvergreenBootstrapper : IWebView2Bootstrapper
         }
 
         var downloadPath = Path.Combine(Path.GetTempPath(), BootstrapperFileName);
-        using var response = await DownloadClient
-            .GetAsync(BootstrapperDownloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-            .ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
 
-        // FileMode.Create truncates a torn file left by an earlier failed attempt, and the installer
-        // only runs after this write completes, so a partial download is never executed.
-        await using (var file = new FileStream(downloadPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        // HttpClient.Timeout only covers the request up to the headers under ResponseHeadersRead, so
+        // a body that stalls (captive portal, flaky Wi-Fi, a proxy that accepts then hangs) would sit
+        // on the modal "Installing..." dialog forever with no Cancel. One linked deadline bounds
+        // headers and body together; a deadline expiry is reported as a download failure so
+        // EnsureRuntimeAsync maps it to Failed and the window offers Retry.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(DownloadDeadline);
+        try
         {
-            await response.Content.CopyToAsync(file, cancellationToken).ConfigureAwait(false);
-        }
+            using var response = await DownloadClient
+                .GetAsync(BootstrapperDownloadUrl, HttpCompletionOption.ResponseHeadersRead, deadline.Token)
+                .ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
 
-        return downloadPath;
+            // FileMode.Create truncates a torn file left by an earlier failed attempt, and the installer
+            // only runs after this write completes, so a partial download is never executed. The file
+            // handle is released before the catch runs, so a later Retry does not hit a sharing violation.
+            await using (var file = new FileStream(downloadPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                await response.Content.CopyToAsync(file, deadline.Token).ConfigureAwait(false);
+            }
+
+            return downloadPath;
+        }
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new HttpRequestException("WebView2 bootstrapper download timed out.", ex);
+        }
     }
 
     /// <summary>Production run: launch the stub silently and return its exit code.</summary>
