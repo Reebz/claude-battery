@@ -94,6 +94,29 @@ jobs:
           Start-Sleep -Seconds 12
           Take-Screenshot 'after-launch'
 
+          # Windows hides a new tray icon behind the overflow chevron. Open it through UI Automation
+          # so the icon itself lands in a screenshot, then close it again with Escape.
+          try {
+            Add-Type -AssemblyName UIAutomationClient
+            Add-Type -AssemblyName UIAutomationTypes
+            $root = [System.Windows.Automation.AutomationElement]::RootElement
+            $cond = New-Object System.Windows.Automation.PropertyCondition(
+              [System.Windows.Automation.AutomationElement]::NameProperty, 'Show Hidden Icons')
+            $chevron = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+            if ($null -ne $chevron) {
+              $chevron.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+              Start-Sleep -Seconds 3
+              Take-Screenshot 'overflow-open'
+              Add-Type -AssemblyName System.Windows.Forms
+              [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+              Start-Sleep -Seconds 2
+            } else {
+              Write-Host "overflow chevron not found via UI Automation"
+            }
+          } catch {
+            Write-Host "overflow screenshot failed: $($_.Exception.Message)"
+          }
+
           # A second launch signals the running instance to show the flyout, then exits.
           $second = Start-Process -FilePath $exe -PassThru
           Start-Sleep -Seconds 8

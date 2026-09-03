@@ -372,21 +372,27 @@ public class IconRenderTests
                     string stem = $"icon-{name}-{themeName}-{size}";
                     bitmap.Save(Path.Combine(dir!, stem + ".png"), ImageFormat.Png);
 
-                    using Bitmap upscaled = UpscaleNearest(bitmap, factor: 8);
+                    // The upscale sits on the taskbar colour the theme bucket targets, because a
+                    // light outline on a transparent PNG is invisible in an image viewer.
+                    using Bitmap upscaled = UpscaleNearest(bitmap, factor: 8, TaskbarColorFor(theme));
                     upscaled.Save(Path.Combine(dir!, stem + "-x8.png"), ImageFormat.Png);
                 }
             }
         }
     }
 
+    /// <summary>The stock Windows 11 taskbar colour for each theme bucket, for artifact backgrounds.</summary>
+    private static Color TaskbarColorFor(ThemeBucket theme) =>
+        theme == ThemeBucket.Dark ? Color.FromArgb(0x20, 0x20, 0x20) : Color.FromArgb(0xF3, 0xF3, 0xF3);
+
     /// <summary>Blocky nearest-neighbour upscale so a 16 px icon is readable in a PR artifact.</summary>
-    private static Bitmap UpscaleNearest(Bitmap source, int factor)
+    private static Bitmap UpscaleNearest(Bitmap source, int factor, Color background)
     {
         var scaled = new Bitmap(source.Width * factor, source.Height * factor, PixelFormat.Format32bppArgb);
         using var g = Graphics.FromImage(scaled);
         g.InterpolationMode = InterpolationMode.NearestNeighbor;
         g.PixelOffsetMode = PixelOffsetMode.Half;
-        g.Clear(Color.Transparent);
+        g.Clear(background);
         g.DrawImage(source, new Rectangle(0, 0, scaled.Width, scaled.Height));
         return scaled;
     }
