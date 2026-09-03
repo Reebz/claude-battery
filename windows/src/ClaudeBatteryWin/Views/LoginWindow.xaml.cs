@@ -27,8 +27,14 @@ namespace ClaudeBatteryWin.Views;
 /// <item><b>Navigation gate.</b> <c>NavigationStarting</c> on the main WebView cancels anything the
 /// <see cref="AuthManager"/> rejects (exact-domain claude.ai + about: bootstrap).</item>
 /// <item><b>OAuth popups.</b> <c>NewWindowRequested</c> routes <c>window.open()</c> to a SEPARATE
-/// hosted WebView2 in the same environment, which gets its OWN <c>NavigationStarting</c> handler
-/// enforcing the popup allowlist so it cannot wander after the bootstrap.</item>
+/// WebView2 hosted in its own <see cref="OAuthPopupWindow"/>, initialised on the same environment
+/// AND the same InPrivate profile (the controller options kept in <c>_controllerOptions</c>).
+/// WebView2 requires a <c>NewWindow</c> to share the opener's profile, and without it the popup's
+/// cookies would land in a jar the main view's <c>CookieManager</c> never reads, so the callback
+/// that sets <c>sessionKey</c> would never be captured. The popup lives in a real window because a
+/// WebView2 control outside a visual tree never finishes initialising. It gets its OWN
+/// <c>NavigationStarting</c> handler enforcing the popup allowlist so it cannot wander after the
+/// bootstrap, and it is torn down when the page calls <c>window.close()</c> or the user closes it.</item>
 /// <item><b>UA capture.</b> After the first <c>NavigationCompleted</c>, the session UA is read from
 /// <c>CoreWebView2.Settings.UserAgent</c> and handed up for the U3 outbound poll UA.</item>
 /// </list>
@@ -52,7 +58,13 @@ public partial class LoginWindow : Window, ILoginWebView
     private readonly PendingNavigation _pendingNavigation = new();
 
     private CoreWebView2Environment? _environment;
-    private Microsoft.Web.WebView2.Wpf.WebView2? _popup;
+
+    // The controller options the main view was created with (IsInPrivateModeEnabled = true). Kept
+    // so an OAuth popup is initialised with the SAME options and therefore the same InPrivate
+    // profile - WebView2 rejects a NewWindow on a different profile, and a different profile would
+    // hold the popup's cookies where the main view's CookieManager cannot see them.
+    private CoreWebView2ControllerOptions? _controllerOptions;
+    private OAuthPopupWindow? _popup;
     private bool _hasCapturedUserAgent;
     private bool _disposed;
 
@@ -210,10 +222,10 @@ public partial class LoginWindow : Window, ILoginWebView
                 .CreateAsync(browserExecutableFolder: null, userDataFolder: _userDataFolder)
                 .ConfigureAwait(true);
 
-            var controllerOptions = _environment.CreateCoreWebView2ControllerOptions();
-            controllerOptions.IsInPrivateModeEnabled = true;
+            _controllerOptions = _environment.CreateCoreWebView2ControllerOptions();
+            _controllerOptions.IsInPrivateModeEnabled = true;
 
-            await WebView.EnsureCoreWebView2Async(_environment, controllerOptions).ConfigureAwait(true);
+            await WebView.EnsureCoreWebView2Async(_environment, _controllerOptions).ConfigureAwait(true);
 
             var core = WebView.CoreWebView2;
             core.NavigationStarting += OnCoreNavigationStarting;
@@ -383,10 +395,12 @@ public partial class LoginWindow : Window, ILoginWebView
                 return;
             }
 
-            // Route the popup into a separate hosted WebView2 in the SAME environment so window.opener
-            // is preserved and the OAuth callback can postMessage back to the claude.ai page. Setting
-            // e.NewWindow IS the handling here - do NOT also set Handled = true (that would suppress the
-            // window instead of hosting it). A deferral keeps the script blocked until NewWindow is set.
+            // Route the popup into a separate hosted WebView2 in the SAME environment AND the same
+            // InPrivate profile so window.opener is preserved, the OAuth callback can postMessage back
+            // to the claude.ai page, and any cookie the popup sets lands in the jar the main view's
+            // CookieManager reads. Setting e.NewWindow IS the handling here - do NOT also set
+            // Handled = true (that would suppress the window instead of hosting it). A deferral keeps
+            // the script blocked until NewWindow is set.
             // The gate travels as an argument (not a shared field) so a 2nd popup's TeardownPopup of the
             // 1st cannot null the gate the new popup's NavigationStarting closure depends on.
             _ = HostPopupAsync(e, decision.PopupNavigationGate);
@@ -412,27 +426,103 @@ public partial class LoginWindow : Window, ILoginWebView
             // Retire any prior popup before creating a new one.
             TeardownPopup();
 
-            var popup = new Microsoft.Web.WebView2.Wpf.WebView2();
-            await popup.EnsureCoreWebView2Async(_environment).ConfigureAwait(true);
+            // A popup can only come from the main view's NewWindowRequested, so its options must
+            // exist by now; a null here means init never completed and there is no profile to share.
+            if (_controllerOptions is null)
+            {
+                throw new InvalidOperationException("OAuth popup requested before the login WebView2 initialised.");
+            }
+
+            // Host the popup control in a real, shown window FIRST: the WPF WebView2 is an HwndHost
+            // whose EnsureCoreWebView2Async waits for the host HWND, so a control that is not in a
+            // visual tree never finishes initialising (the await below would hang forever).
+            var popupWindow = new OAuthPopupWindow();
+            // Field assignment before any await so the catch's TeardownPopup disposes it on failure.
+            _popup = popupWindow;
+
+            // The user closing the popup (title-bar X) must dispose its control and release the
+            // field, but only if it is still the CURRENT popup - a retired one was already torn
+            // down by TeardownPopup, whose Close raises this same event (Dispose is a no-op then).
+            popupWindow.Closed += (_, _) =>
+            {
+                if (ReferenceEquals(_popup, popupWindow))
+                {
+                    _popup = null;
+                }
+
+                popupWindow.Dispose();
+            };
+
+            // Owner keeps the popup above the login window and closes it with the owner. WPF only
+            // accepts an owner that already has a native handle, which the login window has once
+            // shown; a not-yet-shown owner (defensive) just leaves the popup unowned.
+            if (new System.Windows.Interop.WindowInteropHelper(this).Handle != IntPtr.Zero)
+            {
+                popupWindow.Owner = this;
+            }
+            else
+            {
+                popupWindow.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            }
+
+            popupWindow.Show();
+
+            // Same environment AND the same controller options as the main view, so both views share
+            // one InPrivate profile (WebView2 requires a NewWindow to share the opener's profile).
+            await popupWindow.WebView.EnsureCoreWebView2Async(_environment, _controllerOptions).ConfigureAwait(true);
+
+            var popupCore = popupWindow.WebView.CoreWebView2;
+            var mainCore = WebView.CoreWebView2
+                ?? throw new InvalidOperationException("Login WebView2 core is gone while hosting a popup.");
+
+            // Blind self-check before handing the view over: if the profiles differ, WebView2 would
+            // reject the NewWindow or the popup's cookies would be invisible to the main view's
+            // reads - either way sign-in silently never completes. Throwing here lands in the catch
+            // below, so a regression shows up as the "Could not open the sign-in popup" card.
+            var popupProfile = popupCore.Profile;
+            var mainProfile = mainCore.Profile;
+            if (popupProfile.IsInPrivateModeEnabled != mainProfile.IsInPrivateModeEnabled
+                || !string.Equals(popupProfile.ProfilePath, mainProfile.ProfilePath, StringComparison.OrdinalIgnoreCase))
+            {
+                DebugLog($"OAuth popup profile mismatch: inPrivate popup={popupProfile.IsInPrivateModeEnabled} main={mainProfile.IsInPrivateModeEnabled}, samePath={string.Equals(popupProfile.ProfilePath, mainProfile.ProfilePath, StringComparison.OrdinalIgnoreCase)}");
+                throw new InvalidOperationException("OAuth popup profile does not match the login view's profile.");
+            }
 
             // The popup gets its OWN navigation gate enforcing the same allowlist so it cannot
             // wander outside the OAuth providers after the bootstrap. Bind the gate captured for THIS
             // popup (the argument), never a shared field a later popup's teardown could null.
-            popup.CoreWebView2.NavigationStarting += (_, args) =>
+            popupCore.NavigationStarting += (_, args) =>
             {
                 var allowed = popupGate?.Invoke(args.Uri) ?? false;
                 args.Cancel = !allowed;
             };
 
-            e.NewWindow = popup.CoreWebView2;
-            _popup = popup;
+            // OAuth pages call window.close() once the callback has posted back to the opener.
+            // Tear the popup down then - off the COM callback frame (BeginInvoke), since disposing
+            // a CoreWebView2 from inside its own event handler is re-entrant - and only if it is
+            // still the current popup.
+            popupCore.WindowCloseRequested += (_, _) =>
+            {
+                Dispatcher.BeginInvoke(() =>
+                {
+                    if (ReferenceEquals(_popup, popupWindow))
+                    {
+                        TeardownPopup();
+                    }
+                });
+            };
+
+            // Never set Source or call Navigate on the popup: WebView2 performs its first navigation
+            // itself once NewWindow is assigned, and a NewWindow must not have been navigated.
+            e.NewWindow = popupCore;
         }
         catch (Exception ex)
         {
-            // EnsureCoreWebView2Async threw after the deferral was taken. Completing it with a null
-            // NewWindow and Handled==false would make WebView2 silently block the popup, so
-            // "Continue with Google" looks dead. Explicitly refuse (Handled = true) and surface a
-            // retry error instead of a silent no-op (U8).
+            // EnsureCoreWebView2Async threw (or the profile self-check failed) after the deferral was
+            // taken. Completing it with a null NewWindow and Handled==false would make WebView2
+            // silently block the popup, so "Continue with Google" looks dead. Explicitly refuse
+            // (Handled = true), close the half-built popup window, and surface a retry error instead
+            // of a silent no-op (U8).
             DebugLog($"OAuth popup host init failed: {ex.GetType().Name}");
             TeardownPopup();
             e.Handled = true;
@@ -451,16 +541,20 @@ public partial class LoginWindow : Window, ILoginWebView
             return;
         }
 
+        // Clear the field before disposing: Dispose closes the window, whose Closed handler checks
+        // the field to decide whether it is retiring the current popup.
+        var popup = _popup;
+        _popup = null;
+
         try
         {
-            _popup.Dispose();
+            // Disposes the hosted WebView2 control, then closes the window if it is still open.
+            popup.Dispose();
         }
         catch (Exception)
         {
             // Disposing an already-closed popup must not abort teardown.
         }
-
-        _popup = null;
     }
 
     // ---- Cookie reads --------------------------------------------------------------------------
