@@ -7,7 +7,7 @@
     <AssemblyName>ClaudeBatteryWin</AssemblyName>
     <!-- Single source of truth for the release version (mirrors the Mac MARKETING_VERSION). pack.ps1
          reads <Version> from here in its no-arg form (U17/#4); bump it per release. -->
-    <Version>1.50.3</Version>
+    <Version>1.50.4</Version>
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
