@@ -1,3 +1,5 @@
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Net;
@@ -37,6 +39,9 @@ namespace ClaudeBatteryWin;
 ///   R6, <see cref="SystemEvents.UserPreferenceChanged"/> for theme R3).</item>
 ///   <item>Tray-icon click -> <see cref="FlyoutWindow"/>; the flyout's update row -> the
 ///   <see cref="UpdateService"/>.</item>
+///   <item>The crash log (<c>%LocalAppData%\ClaudeBatteryWin\crash.log</c>): the process is
+///   windowless, so an unhandled exception would otherwise die with nothing a tester can attach.
+///   The CI smoke job and testers read this file.</item>
 /// </list>
 /// </summary>
 public partial class App : Application
@@ -66,6 +71,7 @@ public partial class App : Application
     private ThemeWatcher? _themeWatcher;
     private DualHorizontalRenderer? _renderer;
     private AppSettings? _settings;
+    private IToastSink? _toastSink;
     private Notifier? _notifier;
     private WebView2Runtime? _runtime;
     private AuthManager? _authManager;
@@ -113,6 +119,19 @@ public partial class App : Application
         // UI on the hook launch. No tray icon, no window, no service may precede it.
         VelopackApp.Build().Run();
 
+        // --- Crash log ------------------------------------------------------------------------
+        // The app is windowless: an unhandled exception kills the process with nothing a tester
+        // can attach. Record it first, before anything else here can throw. The dispatcher hook
+        // does NOT set Handled: the process still terminates, it just leaves a trace behind. The
+        // CI smoke job and testers read %LocalAppData%\ClaudeBatteryWin\crash.log.
+        DispatcherUnhandledException += (_, args) => WriteCrashLog("dispatcher", args.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, args) => WriteCrashLog("appdomain", args.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            WriteCrashLog("unobserved-task", args.Exception);
+            args.SetObserved();
+        };
+
         // --- Single-instance gate -------------------------------------------------------------
         // A null lock means another instance already holds the file lock.
         _singleInstanceLock = TryAcquireSingleInstanceLock();
@@ -139,7 +158,7 @@ public partial class App : Application
         // and marshal the show-flyout request back onto the dispatcher.
         _showFlyoutWaitRegistration = ThreadPool.RegisterWaitForSingleObject(
             _showFlyoutEvent,
-            (_, _) => Dispatcher.BeginInvoke(new Action(ShowFlyout)),
+            (_, _) => Dispatcher.BeginInvoke(new Action(() => ShowFlyout())),
             state: null,
             timeout: Timeout.InfiniteTimeSpan,
             executeOnlyOnce: false);
@@ -160,7 +179,10 @@ public partial class App : Application
 #endif
 
         BuildObjectGraph();
-        AcquireTrayIcon();
+        if (!AcquireTrayIcon())
+        {
+            return; // Shutdown() already requested; OnExit runs the ordered teardown.
+        }
         SubscribeSystemEvents();
         StartTimers();
 
@@ -238,7 +260,9 @@ public partial class App : Application
     {
         // Shared cookie jar: the SAME instance the AccountStore primes and the ClaudeApi transport
         // reads from, so cookie rotation (__cf_bm) and account switches are reflected in both.
-        _cookieJar = new CookieContainer();
+        // Built by the store so the per-domain capacity suits the claude.ai capture (the .NET
+        // default of 20 per domain silently drops cookies).
+        _cookieJar = AccountStore.CreateCookieJar();
 
         _secretStore = new SecretStore();
         _accountStore = new AccountStore(_cookieJar, _secretStore);
@@ -279,20 +303,24 @@ public partial class App : Application
         _renderer = new DualHorizontalRenderer();
 
         // ThemeWatcher debounce: coalesce a burst of General broadcasts onto one re-read after a
-        // short window on the UI thread. A real light/dark flip re-renders the icon + re-themes the
-        // open flyout; an unrelated broadcast that lands on the same bucket is suppressed (U9).
+        // short window on the UI thread. A real light/dark flip of EITHER bucket (taskbar or app
+        // windows: the two are independent settings) re-renders the icon for the taskbar bucket and
+        // re-themes the open flyout for the app bucket; an unrelated broadcast that lands on the
+        // same pair is suppressed (U9).
         _themeWatcher = new ThemeWatcher(ScheduleThemeDebounced);
-        _themeWatcher.BucketChanged += OnThemeBucketChanged;
+        _themeWatcher.BucketsChanged += OnThemeBucketsChanged;
 
         _settings = new AppSettings();
-        _settings.Changed += (_, _) => RefreshIcon(); // countdown toggle re-composes the cell
+        _settings.Changed += (_, _) => RefreshIcon(); // countdown toggle re-composes the tooltip
 
         // Notifier: weekly-low toasts, gated on the global enable flag (read live), latch on the
         // AccountStore, delivery through the WinRT sink (or a no-op sink off-Windows / in author build).
+        // The sink is kept so Settings can fire a test toast through the same path.
+        _toastSink = CreateToastSink();
         _notifier = new Notifier(
             notificationsEnabled: () => _settings.NotificationsEnabled,
             latch: new AccountStoreNotifyLatch(_accountStore),
-            toastSink: CreateToastSink());
+            toastSink: _toastSink);
 
         _runtime = new WebView2Runtime();
 
@@ -387,19 +415,57 @@ public partial class App : Application
     // Tray icon
     // ============================================================================================
 
-    private void AcquireTrayIcon()
+    /// <summary>
+    /// Resolve the App.xaml tray icon, give it its identity, and register it with the shell. Returns
+    /// false when the icon could not be created even after a fresh-GUID retry; the app has then
+    /// already requested <see cref="Application.Shutdown()"/> and the caller must stop.
+    ///
+    /// The Id is path-derived (<see cref="TrayIconIdentity"/>) rather than a fixed literal: Windows
+    /// binds an unsigned exe's tray GUID to the path that first registered it, so a fixed GUID makes
+    /// <c>Shell_NotifyIcon(NIM_ADD)</c> fail the moment the same exe runs from another path (a move,
+    /// a rename, a re-download saved as "ClaudeBatteryWin (1).exe"). That failure surfaces here as an
+    /// <see cref="InvalidOperationException"/> from <c>ForceCreate</c>; a stale registration for
+    /// the same path can still trip it, so one retry with a throwaway GUID (pinning lost, icon
+    /// present) precedes giving up. The flyout's <c>Shell_NotifyIconGetRect</c> keys on whichever Id
+    /// finally registered, so <see cref="FlyoutWindow.TrayIconGuid"/> is read back AFTER creation.
+    /// </summary>
+    private bool AcquireTrayIcon()
     {
         _trayIcon = (TaskbarIcon)FindResource("TrayIcon");
+        _trayIcon.Id = TrayIconIdentity.Current;
 
-        // Left-click opens the flyout. Wired in code (App.xaml declares no LeftClickCommand binding,
+        // Left-click toggles the flyout. Wired in code (App.xaml declares no LeftClickCommand binding,
         // since the resource has no DataContext) so the shell is self-consistent.
-        _trayIcon.TrayLeftMouseUp += (_, _) => ShowFlyout();
+        _trayIcon.TrayLeftMouseUp += (_, _) => ShowFlyout(fromTrayClick: true);
 
         _trayIcon.ContextMenu = BuildTrayContextMenu();
 
         // ForceCreate ensures the Win32 icon exists immediately at startup, with no taskbar window
         // present (R1). registerAlsoInWow64 = false: this is a 64-bit (win-x64) build.
-        _trayIcon.ForceCreate(enablesEfficiencyMode: false);
+        try
+        {
+            _trayIcon.ForceCreate(enablesEfficiencyMode: false);
+        }
+        catch (InvalidOperationException)
+        {
+            // Drop any half-registered icon, then retry once under a GUID no path can be bound to.
+            _trayIcon.TrayIcon.TryRemove();
+            _trayIcon.Id = Guid.NewGuid();
+            try
+            {
+                _trayIcon.ForceCreate(enablesEfficiencyMode: false);
+            }
+            catch (InvalidOperationException ex)
+            {
+                WriteCrashLog("tray-icon", new InvalidOperationException("tray icon could not be created", ex));
+                MessageBox.Show($"Claude Battery could not add its tray icon: {ex.Message}", "Claude Battery");
+                Shutdown();
+                return false;
+            }
+        }
+
+        FlyoutWindow.TrayIconGuid = _trayIcon.Id;
+        return true;
     }
 
     private System.Windows.Controls.ContextMenu BuildTrayContextMenu()
@@ -411,7 +477,18 @@ public partial class App : Application
         menu.Items.Add(settings);
 
         var checkUpdates = new System.Windows.Controls.MenuItem { Header = "Check for Updates…" };
-        checkUpdates.Click += async (_, _) => await CheckForUpdatesAsync().ConfigureAwait(true);
+        checkUpdates.Click += async (_, _) =>
+        {
+            if (_updateService?.IsUpdaterInstalled != true)
+            {
+                // Raw exe (not a Velopack install): a check would no-op, so hand the user the
+                // download page instead, matching the Settings update row.
+                OpenReleasesPage();
+                return;
+            }
+
+            await CheckForUpdatesAsync().ConfigureAwait(true);
+        };
         menu.Items.Add(checkUpdates);
 
         menu.Items.Add(new System.Windows.Controls.Separator());
@@ -424,10 +501,14 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Repaint the tray icon for the current usage/auth/theme/countdown state. The renderer's
-    /// signature cache short-circuits a redundant paint (issue #11 port), so calling this on every
-    /// poll, theme flip, and per-minute tick is cheap. A null return means "no change"; we keep the
-    /// current icon. A produced bitmap is converted to a System.Drawing.Icon for the tray.
+    /// Repaint the tray icon for the current usage/auth/taskbar-theme state and refresh its tooltip.
+    /// The renderer's signature cache short-circuits a redundant paint (issue #11 port), so calling
+    /// this on every poll, theme flip, and per-minute tick is cheap. A null return means "no
+    /// change"; we keep the current icon. A produced bitmap is converted to a System.Drawing.Icon
+    /// for the tray. The square icon draws no countdown; the numbers live in the tooltip, which is
+    /// set BEFORE the render so it updates even when the signature cache suppresses the repaint.
+    /// The icon is rasterized at the live small-icon cell size (SM_CXSMICON: 16 at 100% scaling,
+    /// 24 at 150%, 32 at 200%) so it is not upscaled by the shell.
     /// </summary>
     private void RefreshIcon()
     {
@@ -437,14 +518,17 @@ public partial class App : Application
         }
 
         var state = ResolveTrayState();
-        var theme = _themeWatcher.CurrentBucket;
+        var theme = _themeWatcher.CurrentTrayBucket;
         var usage = _usageService?.LatestUsage;
         var countdown = DualHorizontalRenderer.CountdownCellText(
             usage,
             _settings?.ShowSessionCountdown ?? false,
             DateTimeOffset.UtcNow);
 
-        var bitmap = _renderer.Render(state, theme, countdown);
+        _trayIcon.ToolTipText = BuildTooltip(usage, countdown);
+
+        var size = Math.Max(16, GetSystemMetrics(SM_CXSMICON));
+        var bitmap = _renderer.Render(state, theme, countdown, size);
         if (bitmap is null)
         {
             return; // signature matched; keep the current icon
@@ -466,6 +550,23 @@ public partial class App : Application
                 DestroyIcon(hicon);
             }
         }
+    }
+
+    /// <summary>
+    /// The tray tooltip: the app name alone when there is no usage snapshot, else the two remaining
+    /// percentages and, when the countdown toggle yields a value, the session reset countdown that
+    /// the square icon no longer draws. Stays well under the shell's 127-character tooltip limit.
+    /// Pure + internal so it is unit-tested directly.
+    /// </summary>
+    internal static string BuildTooltip(UsageSnapshot? usage, string countdown)
+    {
+        if (usage is null)
+        {
+            return "Claude Battery";
+        }
+
+        var text = $"Claude Battery - Session {Math.Round(usage.SessionRemaining)}% - Weekly {Math.Round(usage.WeeklyRemaining)}%";
+        return countdown.Length > 0 ? $"{text} - resets in {countdown}" : text;
     }
 
     /// <summary>
@@ -496,9 +597,16 @@ public partial class App : Application
     /// <summary>
     /// Surface the flyout anchored to the tray rect. The second-instance signal and the tray
     /// left-click both route here. Lazily constructs the window, binds the view-model, applies the
-    /// current theme, and positions it (U10).
+    /// current app-window theme, and positions it (U10).
+    ///
+    /// A tray click (<paramref name="fromTrayClick"/>) is a toggle: an open flyout closes instead of
+    /// re-showing. Usually the click has ALREADY deactivated and hidden the flyout before the icon's
+    /// mouse-up arrives, so the second guard swallows a show that lands within the flyout's toggle
+    /// window of that deactivation-hide. Neither guard applies while a login is in progress (the
+    /// flyout suppresses its deactivation dismiss then, and a click should bring it back). The
+    /// second-instance signal keeps the unguarded show.
     /// </summary>
-    private void ShowFlyout()
+    private void ShowFlyout(bool fromTrayClick = false)
     {
         if (_flyoutViewModel is null)
         {
@@ -508,12 +616,23 @@ public partial class App : Application
         if (_flyout is null)
         {
             _flyout = new FlyoutWindow { DataContext = _flyoutViewModel };
-            _flyout.ApplyTheme(_themeWatcher?.CurrentBucket ?? ThemeBucket.Light);
+            _flyout.ApplyTheme(_themeWatcher?.CurrentAppBucket ?? ThemeBucket.Light);
             WireFlyoutInteractions(_flyout);
         }
 
+        if (fromTrayClick && _flyout.IsVisible && !_flyoutViewModel.SuppressDismissOnDeactivate)
+        {
+            _flyout.Hide();
+            return;
+        }
+
+        if (fromTrayClick && _flyout.ConsumeRecentDeactivationHide(Environment.TickCount64))
+        {
+            return; // the click that just dismissed the flyout; not a request to reopen it
+        }
+
         SyncViewModelFromServices();
-        _flyout.ApplyTheme(_themeWatcher?.CurrentBucket ?? ThemeBucket.Light);
+        _flyout.ApplyTheme(_themeWatcher?.CurrentAppBucket ?? ThemeBucket.Light);
         _flyout.ShowAtTray();
     }
 
@@ -532,6 +651,10 @@ public partial class App : Application
         HookButton(flyout, "AddAccountLinkButton", BeginLogin);
         HookButton(flyout, "LoginErrorTryAgainButton", () => _authManager?.RetryLogin());
         HookButton(flyout, "UpdateLinkButton", () => _ = ApplyUpdateAsync());
+        // Error panel: sign in again, or retry now. HandleResume restarts polling with the one-shot
+        // no-network grace and is a no-op when auth has failed or nothing is being polled.
+        HookButton(flyout, "ErrorSignInButton", BeginLogin);
+        HookButton(flyout, "ErrorRetryButton", () => _usageService?.HandleResume());
     }
 
     /// <summary>
@@ -695,6 +818,8 @@ public partial class App : Application
 
             SyncViewModelFromServices();
             RefreshIcon();
+            // An open Settings window shows the new account without a reopen.
+            _settingsWindow?.RefreshAccounts();
         }));
     }
 
@@ -717,7 +842,14 @@ public partial class App : Application
 
         if (_settingsWindow is null)
         {
-            _settingsWindow = new SettingsWindow(_accountStore, _manualSignIn, _autostart, _settings, _updateService);
+            // The test-toast button goes through the SAME sink the Notifier delivers with, so a
+            // tester confirms the real path. A null sender hides the button.
+            var toastSink = _toastSink;
+            Func<bool>? sendTestToast = toastSink is null
+                ? null
+                : () => toastSink.TryShow("Claude Battery", "Notifications are working.", Guid.Empty);
+            _settingsWindow = new SettingsWindow(
+                _accountStore, _manualSignIn, _autostart, _settings, _updateService, sendTestToast);
             _settingsWindow.AddAccountRequested += (_, _) => BeginLogin();
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }
@@ -754,7 +886,29 @@ public partial class App : Application
             return;
         }
 
-        Dispatcher.BeginInvoke(new Action(SyncViewModelFromServices));
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            SyncViewModelFromServices();
+            // An open Settings window repaints its About row with the result.
+            _settingsWindow?.RefreshUpdateRow();
+        }));
+    }
+
+    /// <summary>
+    /// Open the GitHub Releases page in the default browser: the raw-exe build cannot self-update,
+    /// so "Check for Updates" hands the user the download page instead. A missing browser handler
+    /// (<see cref="Win32Exception"/>) is ignored; there is no surface on the tray menu to report it.
+    /// </summary>
+    private static void OpenReleasesPage()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(ReleasesPageUrl) { UseShellExecute = true });
+        }
+        catch (Win32Exception)
+        {
+            // No handler for https URLs; nothing to do from a tray menu.
+        }
     }
 
     private async Task ApplyUpdateAsync()
@@ -847,14 +1001,15 @@ public partial class App : Application
     // Theme (U9)
     // ============================================================================================
 
-    private void OnThemeBucketChanged(object? sender, ThemeBucket bucket)
+    private void OnThemeBucketsChanged(object? sender, ThemeBuckets buckets)
     {
         Dispatcher.BeginInvoke(new Action(() =>
         {
-            // A real light/dark flip: re-paint the tray (the signature now differs on the theme
-            // bucket) and re-theme the open flyout live without close/reopen (DynamicResource swap).
+            // A real light/dark flip of either bucket: re-paint the tray for the taskbar bucket (the
+            // renderer's signature cache makes an unchanged tray bucket a free no-op) and re-theme
+            // the open flyout for the app bucket live without close/reopen (DynamicResource swap).
             RefreshIcon();
-            _flyout?.ApplyTheme(bucket);
+            _flyout?.ApplyTheme(buckets.App);
         }));
     }
 
@@ -894,9 +1049,9 @@ public partial class App : Application
 
     private void StartTimers()
     {
-        // Per-minute tick: re-compose the countdown cell so the tray "Nh+"/"Nm" tag stays current.
-        // The renderer's signature cache means a tick that does not change the drawn string is a
-        // no-op render, so this never churns CPU (issue #11 port).
+        // Per-minute tick: re-compose the countdown so the tray tooltip's "Nh+"/"Nm" tag stays
+        // current. The countdown is not part of the drawn icon, so the renderer's signature cache
+        // makes the tick a no-op render and this never churns CPU (issue #11 port).
         _countdownTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
         {
             Interval = TimeSpan.FromSeconds(60),
@@ -988,6 +1143,10 @@ public partial class App : Application
         _trayIcon?.Dispose();
         _trayIcon = null;
 
+        if (_themeWatcher is not null)
+        {
+            _themeWatcher.BucketsChanged -= OnThemeBucketsChanged;
+        }
         _themeWatcher?.Dispose();
         _renderer?.Dispose();
         _usageService?.Dispose();
@@ -1046,6 +1205,56 @@ public partial class App : Application
     private const string DefaultUserAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
         + "Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
+
+    /// The GitHub Releases page the raw-exe build points at, since it cannot self-update.
+    private const string ReleasesPageUrl = "https://github.com/Reebz/claude-battery/releases";
+
+    /// <summary>
+    /// The shipped version for the crash log header. Assembly version, not Assembly.Location /
+    /// FileVersionInfo: those are empty or throw under PublishSingleFile (the shipped raw exe).
+    /// </summary>
+    private static string AppVersion => typeof(App).Assembly.GetName().Version?.ToString(3) ?? "unknown";
+
+    /// <summary>
+    /// Append one entry to <c>%LocalAppData%\ClaudeBatteryWin\crash.log</c>. Swallows everything: a
+    /// crash logger that throws while the process is already dying only hides the original fault.
+    /// Every line written stays free of session cookies and keys (only the exception text lands
+    /// here), so the redaction gate has nothing to flag.
+    /// </summary>
+    private static void WriteCrashLog(string source, Exception? ex)
+    {
+        try
+        {
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ClaudeBatteryWin");
+            Directory.CreateDirectory(dir);
+            File.AppendAllText(
+                Path.Combine(dir, "crash.log"),
+                FormatCrashEntry(DateTimeOffset.Now, AppVersion, source, ex));
+        }
+        catch
+        {
+            // Never throw from the crash logger.
+        }
+    }
+
+    /// <summary>
+    /// One crash-log block: a header line with the ISO-8601 timestamp, the app version and the
+    /// source tag, then the exception's full text (type, message, inner exceptions, stack frames),
+    /// then a blank separator line. Pure + internal so it is unit-tested directly.
+    /// </summary>
+    internal static string FormatCrashEntry(DateTimeOffset now, string version, string source, Exception? ex)
+        => $"==== {now:O} ClaudeBatteryWin v{version} [{source}] ===={Environment.NewLine}"
+            + (ex?.ToString() ?? "(null exception)") + Environment.NewLine
+            + Environment.NewLine;
+
+    // The shell's small-icon cell size (GetSystemMetrics(SM_CXSMICON)): 16 at 100% scaling, 24 at
+    // 150%, 32 at 200%. Rendering at this size keeps the tray icon crisp instead of shell-upscaled.
+    private const int SM_CXSMICON = 49;
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
