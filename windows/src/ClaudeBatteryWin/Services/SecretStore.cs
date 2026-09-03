@@ -190,10 +190,12 @@ public sealed class SecretStore
         Load(accountId, out secret) == SecretLoadResult.Loaded;
 
     /// <summary>
-    /// Read the blob, retrying a transient I/O failure up to <see cref="ReadAttempts"/> times with a
-    /// short pause. The last failure propagates so <see cref="Load"/> can classify it.
+    /// Read a file, retrying a transient I/O failure up to <see cref="ReadAttempts"/> times with a
+    /// short pause. The last failure propagates so the caller can classify it. Shared with
+    /// <see cref="AccountStore"/>, which gives accounts.json the same treatment as a blob: a scanner
+    /// holding the metadata file open at launch must not read as "no accounts".
     /// </summary>
-    private static byte[] ReadAllBytesWithRetry(string path)
+    internal static byte[] ReadAllBytesWithRetry(string path)
     {
         for (var attempt = 1; ; attempt++)
         {

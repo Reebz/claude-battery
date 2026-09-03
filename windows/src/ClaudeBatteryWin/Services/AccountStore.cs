@@ -68,6 +68,18 @@ public sealed class AccountStore
     /// </summary>
     private readonly List<Account> _deferredMetadata = new();
 
+    /// <summary>
+    /// Set by <see cref="ReadMetadata"/> when accounts.json exists but could not be read even after
+    /// retries (locked by another process, access denied). The session starts empty, but the list on
+    /// disk is intact and must never be replaced from memory: <see cref="PersistMetadata"/> checks
+    /// this flag before every write and first re-reads and merges the on-disk entries
+    /// (<see cref="TryAdoptOnDiskMetadata"/>), or skips the write while the file is still unreadable.
+    /// Without this, a transient read error at launch followed by one sign-in rewrote accounts.json
+    /// with only the new account and lost every other one for good - the metadata twin of the
+    /// Unreadable-blob case above. Reset at the top of every <see cref="Load"/>.
+    /// </summary>
+    private bool _metadataUnreadable;
+
     private Guid? _activeAccountId;
     private int _generation;
 
@@ -553,9 +565,17 @@ public sealed class AccountStore
     /// </list>
     /// Then the active account is resolved (falling back to the first loaded survivor when the
     /// persisted active id was dropped or deferred) and its cookies primed, mirroring the Mac init.
+    /// <para>
+    /// The metadata file itself gets the same transient-read treatment as a blob: the read is
+    /// retried, and when it still fails with an I/O or access error the store starts empty for this
+    /// session with <see cref="_metadataUnreadable"/> set, so no later write can replace the intact
+    /// list on disk (see <see cref="PersistMetadata"/>). A malformed file starts empty with no flag:
+    /// there is nothing on disk worth preserving.
+    /// </para>
     /// </summary>
     private void Load()
     {
+        _metadataUnreadable = false;
         var metadata = ReadMetadata();
         _accounts.Clear();
         _deferredMetadata.Clear();
@@ -642,8 +662,27 @@ public sealed class AccountStore
         });
     }
 
+    /// <summary>
+    /// Write the non-secret account list plus the active id to accounts.json (temp file, then an
+    /// atomic move). Entries deferred at <see cref="Load"/> ride along on every write. When the file
+    /// could not be read at load (<see cref="_metadataUnreadable"/>), the on-disk list is re-read and
+    /// merged into <see cref="_deferredMetadata"/> first; if it is STILL unreadable the write is
+    /// skipped outright, so a launch that never saw the list can never overwrite it. A failed write
+    /// is logged and ignored, as before.
+    /// </summary>
     private void PersistMetadata()
     {
+        if (_metadataUnreadable)
+        {
+            if (!TryAdoptOnDiskMetadata())
+            {
+                DebugLog("Account metadata still unreadable - write skipped so the on-disk list is not clobbered");
+                return;
+            }
+
+            _metadataUnreadable = false;
+        }
+
         var snapshot = new PersistedState
         {
             ActiveAccountId = _activeAccountId,
@@ -675,6 +714,74 @@ public sealed class AccountStore
         }
     }
 
+    /// <summary>
+    /// Recovery half of the <see cref="_metadataUnreadable"/> path, run by <see cref="PersistMetadata"/>
+    /// before it writes: re-run the retrying read of accounts.json and fold every on-disk entry this
+    /// session does not know about into <see cref="_deferredMetadata"/>, so the write carries it and
+    /// the next launch restores it. An on-disk entry is only ever deferred, never promoted to
+    /// <see cref="_accounts"/>: no secret was loaded for it, the same rule <see cref="Load"/> applies
+    /// to an Unreadable blob. An entry whose org was signed into again this session is superseded
+    /// (the fresh sign-in already holds that org) and its orphaned blob is deleted, exactly as
+    /// <see cref="UpsertAccount"/> does for a stale deferred entry.
+    /// </summary>
+    /// <returns>
+    /// <c>true</c> when the caller may write: the on-disk entries were merged, the file is gone, or
+    /// it is malformed (nothing to preserve). <c>false</c> when the file is still unreadable (locked,
+    /// access denied) and the write must be skipped.
+    /// </returns>
+    private bool TryAdoptOnDiskMetadata()
+    {
+        PersistedState onDisk;
+        try
+        {
+            if (!File.Exists(_metadataPath))
+            {
+                return true;
+            }
+
+            var json = SecretStore.ReadAllBytesWithRetry(_metadataPath);
+            onDisk = JsonSerializer.Deserialize<PersistedState>(json, MetadataJsonOptions) ?? new PersistedState();
+        }
+        catch (JsonException)
+        {
+            // Corrupt on disk: nothing worth preserving, let the write replace it.
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+
+        foreach (var entry in onDisk.Accounts)
+        {
+            if (_accounts.Any(a => a.Id == entry.Id) || _deferredMetadata.Any(a => a.Id == entry.Id))
+            {
+                continue;
+            }
+
+            if (_accounts.Any(a => a.OrganizationId == entry.OrganizationId))
+            {
+                // Signed into this org again under a fresh id this session: the on-disk entry is
+                // superseded, and carrying it would load two accounts for one org next launch.
+                _secretStore.Delete(entry.Id);
+                DebugLog($"Dropped superseded on-disk entry {entry.Id:N} - its org was signed into again this session");
+                continue;
+            }
+
+            _deferredMetadata.Add(entry);
+            DebugLog($"Adopted on-disk account {entry.Id:N} as deferred - metadata was unreadable at launch");
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Read accounts.json. Missing file: empty state. Malformed JSON: empty state (the file is
+    /// corrupt, so there is nothing to protect and the next write may replace it). An I/O or access
+    /// error that survives the retries: empty state AND <see cref="_metadataUnreadable"/> set, so the
+    /// intact-but-locked list on disk is merged back in or left alone by <see cref="PersistMetadata"/>
+    /// rather than overwritten. Never throws.
+    /// </summary>
     private PersistedState ReadMetadata()
     {
         try
@@ -684,12 +791,21 @@ public sealed class AccountStore
                 return new PersistedState();
             }
 
-            var json = File.ReadAllBytes(_metadataPath);
+            // Same retry as a secret blob: a scanner's sharing violation usually clears in the pause.
+            var json = SecretStore.ReadAllBytesWithRetry(_metadataPath);
             return JsonSerializer.Deserialize<PersistedState>(json, MetadataJsonOptions) ?? new PersistedState();
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (JsonException)
         {
-            DebugLog("Failed to read account metadata (starting empty)");
+            DebugLog("Account metadata is malformed (starting empty)");
+            return new PersistedState();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Locked or inaccessible right now, not corrupt. Start empty for this session but
+            // remember it, so no write this session can replace the list we never got to read.
+            _metadataUnreadable = true;
+            DebugLog("Account metadata unreadable after retries (locked or inaccessible) - starting empty, the next write re-reads and merges");
             return new PersistedState();
         }
     }

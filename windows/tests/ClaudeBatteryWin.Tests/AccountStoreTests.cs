@@ -352,6 +352,124 @@ public sealed class AccountStoreTests : IDisposable
         Assert.Contains(recovered.Accounts, x => x.Id == activeId && x.SessionKey == "sk-A");
     }
 
+    // ---- transient read failure (locked accounts.json) never lets a later write clobber the list ----
+
+    [Fact]
+    public void LockedMetadata_OnReload_StartsEmpty_ThenMergesOnDiskListIntoNextWrite()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-A", cookieHeader: "sessionKey=sk-A"));
+        var originalId = store.Accounts[0].Id;
+
+        // A second launch while something else holds accounts.json open (antivirus / backup / sync).
+        AccountStore locked;
+        using (new FileStream(_metadataPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            locked = NewStore(new CookieContainer());
+        }
+
+        // Starts empty and signed out, but nothing is dropped or flagged: the list is fine, just locked.
+        Assert.Empty(locked.Accounts);
+        Assert.False(locked.IsAuthenticated);
+        Assert.Empty(locked.DroppedAccountIds);
+        Assert.False(ClaudeBatteryWin.App.ShouldFlagSecurityDataUnreadable(locked));
+        Assert.Contains(originalId.ToString(), File.ReadAllText(_metadataPath)); // the launch itself wrote nothing
+
+        // Lock long gone; the user signs into a NEW org. Before the fix this write replaced
+        // accounts.json with only org-B and orphaned org-A for good.
+        Assert.True(locked.UpsertAccount(NewAccount("org-B", sessionKey: "sk-B")));
+        var rawMetadata = File.ReadAllText(_metadataPath);
+        Assert.Contains(originalId.ToString(), rawMetadata);
+        Assert.Contains("org-B", rawMetadata);
+
+        // The next launch has both, org-A with its untouched secret.
+        var recovered = NewStore(new CookieContainer());
+        Assert.Equal(2, recovered.Accounts.Count);
+        var a = recovered.Accounts.First(x => x.OrganizationId == "org-A");
+        Assert.Equal(originalId, a.Id);
+        Assert.Equal("sk-A", a.SessionKey);
+        Assert.Equal("sessionKey=sk-A", a.AllCookieHeader);
+        Assert.Contains(recovered.Accounts, x => x.OrganizationId == "org-B" && x.SessionKey == "sk-B");
+        Assert.Empty(recovered.DroppedAccountIds);
+    }
+
+    [Fact]
+    public void LockedMetadata_StillLockedAtFirstWrite_SignInSucceedsInMemory_DiskUntouched_ThenPersistsAfterRelease()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-A", cookieHeader: "sessionKey=sk-A"));
+        var originalId = store.Accounts[0].Id;
+
+        AccountStore locked;
+        var b = NewAccount("org-B", sessionKey: "sk-B");
+        using (new FileStream(_metadataPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            locked = NewStore(new CookieContainer());
+            Assert.Empty(locked.Accounts);
+
+            // The lock is still held when the user signs in. The sign-in must succeed in memory
+            // (blob written, account active, no exception) while the locked file is left alone.
+            Assert.True(locked.UpsertAccount(b));
+            Assert.Equal(b.Id, locked.ActiveAccountId);
+            Assert.True(locked.IsAuthenticated);
+        }
+
+        // On disk: still the original list and nothing about org-B (the accepted cost of a file
+        // locked through the write; the next write recovers it).
+        var rawMetadata = File.ReadAllText(_metadataPath);
+        Assert.Contains(originalId.ToString(), rawMetadata);
+        Assert.DoesNotContain(b.Id.ToString(), rawMetadata);
+        Assert.DoesNotContain("org-B", rawMetadata);
+
+        // A later write after release merges the on-disk list back in and persists both.
+        locked.UpdateNickname(b.Id, "Work");
+        rawMetadata = File.ReadAllText(_metadataPath);
+        Assert.Contains(originalId.ToString(), rawMetadata);
+        Assert.Contains(b.Id.ToString(), rawMetadata);
+
+        var recovered = NewStore(new CookieContainer());
+        Assert.Equal(2, recovered.Accounts.Count);
+        Assert.Contains(recovered.Accounts, x => x.Id == originalId && x.SessionKey == "sk-A");
+        Assert.Contains(recovered.Accounts, x => x.Id == b.Id && x.SessionKey == "sk-B" && x.Nickname == "Work");
+        Assert.Empty(recovered.DroppedAccountIds);
+    }
+
+    [Fact]
+    public void LockedMetadata_ResignInToSameOrg_MergeSupersedesOnDiskEntry_OneEntryAndStaleBlobGone()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-OLD"));
+        var staleId = store.Accounts[0].Id;
+        var secretStore = new SecretStore(_secretsDir);
+        Assert.True(File.Exists(secretStore.BlobPath(staleId)));
+
+        AccountStore locked;
+        using (new FileStream(_metadataPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            locked = NewStore(new CookieContainer());
+        }
+        Assert.Empty(locked.Accounts);
+
+        // The empty store sees the re-sign-in as a brand-new account under a fresh id. The merge must
+        // treat the on-disk org-A entry as superseded, not carry it along as a second org-A.
+        Assert.True(locked.UpsertAccount(NewAccount("org-A", sessionKey: "sk-NEW")));
+        var freshId = locked.Accounts[0].Id;
+        Assert.NotEqual(staleId, freshId);
+
+        var rawMetadata = File.ReadAllText(_metadataPath);
+        Assert.Contains(freshId.ToString(), rawMetadata);
+        Assert.DoesNotContain(staleId.ToString(), rawMetadata);
+        Assert.Equal(1, rawMetadata.Split("\"org-A\"").Length - 1); // exactly one entry for the org
+        Assert.False(File.Exists(secretStore.BlobPath(staleId))); // superseded blob deleted
+        Assert.True(File.Exists(secretStore.BlobPath(freshId)));
+
+        var recovered = NewStore(new CookieContainer());
+        Assert.Single(recovered.Accounts);
+        Assert.Equal(freshId, recovered.Accounts[0].Id);
+        Assert.Equal("sk-NEW", recovered.Accounts[0].SessionKey);
+        Assert.Empty(recovered.DroppedAccountIds);
+    }
+
     // ---- save failure: nothing changes in memory, the caller gets a typed exception ----
 
     [Fact]
