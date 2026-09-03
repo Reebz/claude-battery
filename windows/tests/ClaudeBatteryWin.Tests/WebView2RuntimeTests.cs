@@ -1,3 +1,4 @@
+using System.Net.Http;
 using ClaudeBatteryWin.Services;
 using Xunit;
 
@@ -180,5 +181,87 @@ public class WebView2RuntimeTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => runtime.EnsureRuntimeAsync(cts.Token));
+    }
+
+    // ---- EvergreenBootstrapper: the production runner's locate-or-download -> run -> exit-code
+    // contract, exercised through its delegate seams so no network, stub, or installer is touched.
+
+    /// <summary>Records the path the runner was handed and returns a scripted exit code.</summary>
+    private sealed class RecordingRunner
+    {
+        private readonly int _exitCode;
+
+        public List<string> Paths { get; } = new();
+
+        public RecordingRunner(int exitCode) => _exitCode = exitCode;
+
+        public Task<int> RunAsync(string path, CancellationToken cancellationToken)
+        {
+            Paths.Add(path);
+            return Task.FromResult(_exitCode);
+        }
+    }
+
+    [Fact]
+    public async Task EvergreenBootstrapper_RunsTheLocatedStub_AndReportsSuccess_OnZeroExit()
+    {
+        // The locate step (a bundled stub, or the downloaded one) hands its path to the runner; a
+        // zero exit code is the success signal InstallAsync reports upward.
+        const string stubPath = @"C:\tmp\MicrosoftEdgeWebView2Setup.exe";
+        var runner = new RecordingRunner(exitCode: 0);
+        var bootstrapper = new EvergreenBootstrapper(
+            locateOrDownload: _ => Task.FromResult<string?>(stubPath),
+            runInstaller: runner.RunAsync);
+
+        var installed = await bootstrapper.InstallAsync(CancellationToken.None);
+
+        Assert.True(installed);
+        Assert.Equal(new[] { stubPath }, runner.Paths);
+    }
+
+    [Fact]
+    public async Task EvergreenBootstrapper_ReportsFailure_OnNonZeroExit_AndEnsureRuntimeMapsItToFailed()
+    {
+        // The stub ran but exited non-zero: InstallAsync is false and the gate surfaces Failed (a
+        // retry), not a throw.
+        var runner = new RecordingRunner(exitCode: 1);
+        var bootstrapper = new EvergreenBootstrapper(
+            locateOrDownload: _ => Task.FromResult<string?>(@"C:\tmp\MicrosoftEdgeWebView2Setup.exe"),
+            runInstaller: runner.RunAsync);
+        var runtime = new WebView2Runtime(new FakeProbe(initialVersion: null), bootstrapper);
+
+        Assert.False(await bootstrapper.InstallAsync(CancellationToken.None));
+        Assert.Equal(RuntimeBootstrapResult.Failed, await runtime.EnsureRuntimeAsync());
+        Assert.Equal(2, runner.Paths.Count);
+    }
+
+    [Fact]
+    public async Task EvergreenBootstrapper_ReportsFailure_WithoutRunning_WhenNoStubIsObtainable()
+    {
+        // A null from locate means there is nothing to run: false, and the runner is never invoked.
+        var runner = new RecordingRunner(exitCode: 0);
+        var bootstrapper = new EvergreenBootstrapper(
+            locateOrDownload: _ => Task.FromResult<string?>(null),
+            runInstaller: runner.RunAsync);
+
+        Assert.False(await bootstrapper.InstallAsync(CancellationToken.None));
+        Assert.Empty(runner.Paths);
+    }
+
+    [Fact]
+    public async Task EvergreenBootstrapper_DownloadFailure_Propagates_AndEnsureRuntimeMapsItToFailed()
+    {
+        // An offline download throws HttpRequestException out of the locate step. The bootstrapper
+        // lets it propagate (so the "check your connection" text is true) and EnsureRuntimeAsync's
+        // catch maps it to Failed with no throw and no installer run.
+        var runner = new RecordingRunner(exitCode: 0);
+        var bootstrapper = new EvergreenBootstrapper(
+            locateOrDownload: _ => throw new HttpRequestException("offline"),
+            runInstaller: runner.RunAsync);
+        var runtime = new WebView2Runtime(new FakeProbe(initialVersion: null), bootstrapper);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => bootstrapper.InstallAsync(CancellationToken.None));
+        Assert.Equal(RuntimeBootstrapResult.Failed, await runtime.EnsureRuntimeAsync());
+        Assert.Empty(runner.Paths);
     }
 }

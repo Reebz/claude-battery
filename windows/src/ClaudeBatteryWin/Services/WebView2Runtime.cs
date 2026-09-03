@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Win32;
 
@@ -8,15 +9,15 @@ namespace ClaudeBatteryWin.Services;
 /// <summary>
 /// WebView2 Evergreen Runtime detection and bootstrap (U8). There is no Mac analog: WKWebView
 /// ships with macOS, but WebView2 is a separately-distributed runtime that can be absent (a clean
-/// box) or uninstalled later. The installer (U12) bootstraps the runtime at install time; this
-/// service is the uninstalled-later safety net.
+/// box) or uninstalled later. This service is the in-app safety net: it fetches and runs the
+/// Evergreen bootstrapper itself, so the raw exe does not depend on an installer to ship the stub.
 ///
 /// Before any login, the app asks <see cref="IsAvailable"/>. When the runtime is absent, login is
 /// blocked and a separate <c>RuntimeMissingWindow</c> (a distinct window, not a flyout/tray render
 /// state, which has no runtime-missing variant) intercepts the tray click and drives
-/// <see cref="EnsureRuntimeAsync"/>, which runs the Evergreen
-/// bootstrapper silently. A failed or offline bootstrap surfaces a retry, never a blank window or
-/// a crash.
+/// <see cref="EnsureRuntimeAsync"/>, which fetches and runs the Evergreen bootstrapper silently.
+/// A failed or offline bootstrap surfaces a retry plus a link to Microsoft's download page, never
+/// a blank window or a crash.
 ///
 /// Availability and bootstrap are both injected (<see cref="IWebView2RuntimeProbe"/>,
 /// <see cref="IWebView2Bootstrapper"/>) so the gate is unit-testable on any platform without a real
@@ -53,8 +54,8 @@ public sealed class WebView2Runtime
     /// runtime is already available (so a retry after a successful install is a no-op), runs the
     /// silent bootstrapper otherwise, and re-probes afterward to confirm.
     ///
-    /// Never throws for an install failure (a missing bootstrapper, an offline download, a non-zero
-    /// exit, or an OS error): those map to <see cref="RuntimeBootstrapResult.Failed"/> so the caller
+    /// Never throws for an install failure (an unobtainable bootstrapper, an offline download, a
+    /// non-zero exit, or an OS error): those map to <see cref="RuntimeBootstrapResult.Failed"/> so the caller
     /// can show a retry button rather than crashing the runtime-missing window.
     /// </summary>
     public async Task<RuntimeBootstrapResult> EnsureRuntimeAsync(CancellationToken cancellationToken = default)
@@ -122,9 +123,10 @@ public interface IWebView2RuntimeProbe
 }
 
 /// <summary>
-/// Injectable bootstrapper runner. The production path launches the Evergreen bootstrapper
-/// (<c>MicrosoftEdgeWebView2Setup.exe /silent /install</c>); tests substitute a fake to simulate a
-/// successful, failed, or offline install without touching the real installer.
+/// Injectable bootstrapper runner. The production path fetches (or finds beside the exe) and
+/// launches the Evergreen bootstrapper (<c>MicrosoftEdgeWebView2Setup.exe /silent /install</c>);
+/// tests substitute a fake to simulate a successful, failed, or offline install without touching
+/// the network or the real installer.
 /// </summary>
 public interface IWebView2Bootstrapper
 {
@@ -203,29 +205,97 @@ public sealed class CoreWebView2RuntimeProbe : IWebView2RuntimeProbe
 }
 
 /// <summary>
-/// Production bootstrapper runner. Launches the Evergreen bootstrapper
-/// (<c>MicrosoftEdgeWebView2Setup.exe /silent /install</c>) and awaits its exit. The bootstrapper
-/// is expected next to the app (the U12 installer ships it); if it is not present this returns
-/// false and the caller surfaces a retry.
+/// Production bootstrapper runner. Finds or fetches the Evergreen bootstrapper
+/// (<c>MicrosoftEdgeWebView2Setup.exe</c>), then runs it with <c>/silent /install</c> and awaits
+/// its exit. A stub dropped next to the app wins; when none is there (the raw single-file exe the
+/// test-build workflow ships is the exe alone, nothing sits beside it) the stub is downloaded from
+/// Microsoft's documented permalink (about 2 MB) into the temp folder first. A download failure
+/// (offline, DNS, disk) propagates so <see cref="WebView2Runtime.EnsureRuntimeAsync"/> maps it to
+/// <see cref="RuntimeBootstrapResult.Failed"/> and the window's "check your connection" text is true.
+///
+/// Both halves are injectable delegates so the locate-or-download -> run -> exit-code contract is
+/// unit-testable without a network, a real stub, or a real install.
 /// </summary>
 public sealed class EvergreenBootstrapper : IWebView2Bootstrapper
 {
-    // The Evergreen "bootstrapper" is a tiny stub that downloads and installs the full runtime; it
-    // is what the U12 installer bundles next to the app. /silent /install does an unattended,
-    // context-appropriate (per-machine when elevated, else per-user) install.
+    // The Evergreen "bootstrapper" is a tiny stub that downloads and installs the full runtime.
+    // /silent /install does an unattended, context-appropriate (per-machine when elevated, else
+    // per-user) install.
     private const string BootstrapperFileName = "MicrosoftEdgeWebView2Setup.exe";
     private static readonly string[] SilentInstallArguments = { "/silent", "/install" };
 
+    // Microsoft's documented Evergreen bootstrapper permalink (WebView2 distribution docs). It
+    // redirects to the current stub; HttpClient follows the redirect by default.
+    private const string BootstrapperDownloadUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
+
+    // One shared client for the process: a per-attempt client would leak sockets across retries.
+    // 60 s covers the ~2 MB stub on a slow link.
+    private static readonly HttpClient DownloadClient = new() { Timeout = TimeSpan.FromSeconds(60) };
+
+    private readonly Func<CancellationToken, Task<string?>> _locateOrDownload;
+    private readonly Func<string, CancellationToken, Task<int>> _runInstaller;
+
+    public EvergreenBootstrapper() : this(null, null)
+    {
+    }
+
+    /// <summary>
+    /// Test seam. <paramref name="locateOrDownload"/> returns the path of a bootstrapper to run
+    /// (null = none obtainable, reported as a non-throwing false); <paramref name="runInstaller"/>
+    /// runs it and returns the process exit code. Either null falls back to the production behavior.
+    /// </summary>
+    public EvergreenBootstrapper(
+        Func<CancellationToken, Task<string?>>? locateOrDownload = null,
+        Func<string, CancellationToken, Task<int>>? runInstaller = null)
+    {
+        _locateOrDownload = locateOrDownload ?? LocateOrDownloadAsync;
+        _runInstaller = runInstaller ?? RunInstallerAsync;
+    }
+
     public async Task<bool> InstallAsync(CancellationToken cancellationToken)
     {
-        var bootstrapperPath = ResolveBootstrapperPath();
+        var bootstrapperPath = await _locateOrDownload(cancellationToken).ConfigureAwait(false);
         if (bootstrapperPath is null)
         {
-            // No bundled bootstrapper to run (and we cannot reach the network from here to fetch
-            // one): a recoverable failure, surfaced as a retry by the caller.
+            // Nothing to run: a recoverable failure, surfaced as a retry by the caller.
             return false;
         }
 
+        var exitCode = await _runInstaller(bootstrapperPath, cancellationToken).ConfigureAwait(false);
+        return exitCode == 0;
+    }
+
+    /// <summary>
+    /// Production locate: a stub next to the app wins (a packaged install can ship one); otherwise
+    /// download the stub to the temp folder. Network and disk errors propagate to the caller.
+    /// </summary>
+    private static async Task<string?> LocateOrDownloadAsync(CancellationToken cancellationToken)
+    {
+        var bundled = ResolveBundledBootstrapperPath();
+        if (bundled is not null)
+        {
+            return bundled;
+        }
+
+        var downloadPath = Path.Combine(Path.GetTempPath(), BootstrapperFileName);
+        using var response = await DownloadClient
+            .GetAsync(BootstrapperDownloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+            .ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+
+        // FileMode.Create truncates a torn file left by an earlier failed attempt, and the installer
+        // only runs after this write completes, so a partial download is never executed.
+        await using (var file = new FileStream(downloadPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            await response.Content.CopyToAsync(file, cancellationToken).ConfigureAwait(false);
+        }
+
+        return downloadPath;
+    }
+
+    /// <summary>Production run: launch the stub silently and return its exit code.</summary>
+    private static async Task<int> RunInstallerAsync(string bootstrapperPath, CancellationToken cancellationToken)
+    {
         var startInfo = new ProcessStartInfo
         {
             FileName = bootstrapperPath,
@@ -240,16 +310,18 @@ public sealed class EvergreenBootstrapper : IWebView2Bootstrapper
         using var process = Process.Start(startInfo);
         if (process is null)
         {
-            return false;
+            // Process.Start handed back no process: report a failed run (non-zero), not a crash.
+            return -1;
         }
 
         await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        return process.ExitCode == 0;
+        return process.ExitCode;
     }
 
-    private static string? ResolveBootstrapperPath()
+    private static string? ResolveBundledBootstrapperPath()
     {
-        // The bootstrapper ships next to the app (the single-file extraction dir at run time).
+        // Under PublishSingleFile, AppContext.BaseDirectory is the exe's own directory (not an
+        // extraction dir), so this finds a stub a packager or the user dropped beside the exe.
         var baseDir = AppContext.BaseDirectory;
         var candidate = Path.Combine(baseDir, BootstrapperFileName);
         return File.Exists(candidate) ? candidate : null;

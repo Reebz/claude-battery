@@ -28,8 +28,9 @@ jobs:
 
       # The csproj already declares SelfContained + PublishSingleFile + win-x64, so the output is one
       # ClaudeBatteryWin.exe with the .NET runtime and WebView2Loader.dll bundled in - no .NET install
-      # needed on the tester's box. WebView2 Evergreen Runtime is still required (the app prompts to
-      # install it if missing). This build is UNSIGNED, so SmartScreen warns; that is expected.
+      # needed on the tester's box. WebView2 Evergreen Runtime is still required (the app downloads
+      # and runs the Evergreen bootstrapper itself if it is missing; the zip ships only the exe, no
+      # stub beside it). This build is UNSIGNED, so SmartScreen warns; that is expected.
       - name: Publish self-contained single-file exe
         run: dotnet publish src/ClaudeBatteryWin/ClaudeBatteryWin.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
 
@@ -48,7 +49,7 @@ jobs:
           How to run:
           1. Download and unzip ClaudeBattery-${{ github.ref_name }}-win-x64.zip.
           2. Windows SmartScreen will warn (the build is not code-signed): click "More info" then "Run anyway".
-          3. The app needs the WebView2 Evergreen Runtime (preinstalled on Windows 11 and most Windows 10); if it is missing the app will prompt to install it.
+          3. The app needs the WebView2 Evergreen Runtime (preinstalled on Windows 11 and most Windows 10); if it is missing the app will download and install it (about 2 MB); if that fails, install it from Microsoft's WebView2 page (https://developer.microsoft.com/microsoft-edge/webview2/) and click Retry.
 
           Notes:
           - This is a raw exe, not an installer: no Start-menu shortcut and no auto-update.

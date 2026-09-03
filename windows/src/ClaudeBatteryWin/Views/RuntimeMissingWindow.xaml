@@ -11,7 +11,8 @@
     <!-- A SEPARATE window, not a flyout state (RenderState has no runtime-missing variant by
          design). It gates login: the tray click routes here while the WebView2 runtime is absent,
          and login stays blocked until a bootstrap succeeds. A failed/offline install surfaces the
-         retry button below rather than a blank window or a crash. -->
+         retry button below plus a link to Microsoft's download page (the manual route) rather
+         than a blank window or a crash. -->
     <Window.Resources>
         <!-- Directional fallbacks; the merged light/dark token dictionaries (U9/U10) override these
              keys when present so this window honors the system theme like the rest of the app. -->
@@ -40,7 +41,7 @@
                    Margin="0,12,0,0"
                    TextWrapping="Wrap"
                    Foreground="{DynamicResource RuntimeMissingMutedBrush}"
-                   Text="Claude Battery signs in to claude.ai through the Microsoft WebView2 runtime. It is not installed on this PC. Install it to sign in." />
+                   Text="Claude Battery signs in to claude.ai through the Microsoft WebView2 runtime. It is not installed on this PC. Install it to sign in (about 2 MB download, then Microsoft's installer runs)." />
 
         <!-- Status line: shows install progress or the failure reason. Hidden until an attempt runs. -->
         <TextBlock x:Name="StatusText"
@@ -61,6 +62,16 @@
                     Orientation="Horizontal"
                     HorizontalAlignment="Right"
                     Margin="0,20,0,0">
+            <!-- Manual fallback, shown only after an in-app install fails: opens Microsoft's WebView2
+                 download page in the default browser. Retry then re-probes for the hand-installed
+                 runtime. -->
+            <Button x:Name="GetFromMicrosoftButton"
+                    Content="Get it from Microsoft"
+                    MinWidth="88"
+                    Margin="0,0,8,0"
+                    Padding="12,6"
+                    Visibility="Collapsed"
+                    Click="OnGetFromMicrosoftClicked" />
             <Button x:Name="CancelButton"
                     Content="Not now"
                     MinWidth="88"
