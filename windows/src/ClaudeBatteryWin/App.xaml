@@ -15,11 +15,15 @@
                 <!-- Tray icon resource dictionary. Kept inline here for U1; theme token
                      dictionaries (light/dark) merge in later (U9/U10). -->
                 <ResourceDictionary>
-                    <!-- The tray icon. Registered with a stable GUID so Shell_NotifyIconGetRect
-                         (U10 flyout placement) can key on it. The Id GUID MUST stay constant
-                         across versions or Windows treats it as a new icon and loses pinning. -->
+                    <!-- The tray icon. No Id here on purpose: the Id is assigned in code from
+                         TrayIconIdentity (a hash of the exe path) before ForceCreate, and
+                         Shell_NotifyIconGetRect (flyout placement) keys on that same live value.
+                         Windows binds an unsigned exe's tray GUID to the path that first registered
+                         it, so a fixed GUID makes Shell_NotifyIcon(NIM_ADD) fail after any move,
+                         rename or re-download ("ClaudeBatteryWin (1).exe") and the process dies
+                         before any UI exists. Revisit a fixed GUID only once the exe is
+                         Authenticode-signed; under a Velopack install the path is stable anyway. -->
                     <tb:TaskbarIcon x:Key="TrayIcon"
-                                    Id="7E2C1B44-9F3A-4D21-B8E6-0C5A1F2D3E40"
                                     ToolTipText="Claude Battery"
                                     Visibility="Visible"
                                     NoLeftClickDelay="True"

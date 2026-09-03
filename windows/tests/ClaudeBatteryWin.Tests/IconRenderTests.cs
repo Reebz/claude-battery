@@ -1,4 +1,7 @@
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
 using ClaudeBatteryWin.Icons;
 using ClaudeBatteryWin.Models;
 using Xunit;
@@ -7,15 +10,59 @@ namespace ClaudeBatteryWin.Tests;
 
 /// <summary>
 /// U9 tray-renderer tests: color thresholds at the 20/45 boundaries, the issue-#11 signature
-/// short-circuit (suppressed-counter increments on a duplicate tuple), and the compact countdown
-/// saturation/floor. These exercise the renderer's pure surface (<c>BatteryColor</c>,
-/// <c>CountdownCellText</c>) and the cache (<c>Render</c> returning null + <c>SuppressedCount</c>),
-/// none of which require pixel inspection -- the bitmaps the rasterizing tests produce are only
-/// checked for non-null so GDI+ runs on the Windows CI host.
+/// short-circuit (suppressed-counter increments on a duplicate tuple), the compact countdown
+/// saturation/floor, and the square-cell geometry (every branch renders size x size at 16/24/32,
+/// the fill run grows with remaining percent). These exercise the renderer's pure surface
+/// (<c>BatteryColor</c>, <c>CountdownCellText</c>), the cache (<c>Render</c> returning null +
+/// <c>SuppressedCount</c>), and the bitmap dimensions; GDI+ runs on the Windows CI host.
+///
+/// <see cref="RenderAllStates_WritesArtifactsWhenRequested"/> doubles as the developer's only way to
+/// SEE the icon without a Windows box: set <c>CLAUDE_BATTERY_ICON_ARTIFACTS</c> to a directory and
+/// CI writes one PNG per state x theme x size plus an 8x nearest-neighbour upscale of each.
 /// </summary>
 public class IconRenderTests
 {
     private static readonly DateTimeOffset Now = new(2026, 6, 19, 12, 0, 0, TimeSpan.Zero);
+
+    private static readonly int[] CellSizes = { 16, 24, 32 };
+
+    /// <summary>Every render branch, named, for the geometry theories and the artifact dump.</summary>
+    private static IEnumerable<(string Name, TrayRenderState State)> AllStates()
+    {
+        yield return ("battery-100-100", new TrayRenderState.Battery(Snapshot(100, 100)));
+        yield return ("battery-75-40", new TrayRenderState.Battery(Snapshot(75, 40)));
+        yield return ("battery-44-19", new TrayRenderState.Battery(Snapshot(44, 19)));
+        yield return ("battery-10-5", new TrayRenderState.Battery(Snapshot(10, 5)));
+        yield return ("battery-0-0", new TrayRenderState.Battery(Snapshot(0, 0)));
+        yield return ("unauthenticated", new TrayRenderState.Unauthenticated());
+        yield return ("authfailed", new TrayRenderState.AuthFailed());
+        yield return ("statuserror", new TrayRenderState.StatusError());
+        yield return ("statusstale", new TrayRenderState.StatusStale());
+        yield return ("statusloading", new TrayRenderState.StatusLoading());
+    }
+
+    public static IEnumerable<object[]> StateNamesBySize()
+    {
+        foreach (int size in CellSizes)
+        {
+            foreach (var (name, _) in AllStates())
+            {
+                yield return new object[] { name, size };
+            }
+        }
+    }
+
+    private static TrayRenderState StateNamed(string name)
+    {
+        foreach (var (candidate, state) in AllStates())
+        {
+            if (candidate == name)
+            {
+                return state;
+            }
+        }
+        throw new ArgumentOutOfRangeException(nameof(name), name, "unknown state name");
+    }
 
     private static UsageSnapshot Snapshot(double session, double weekly, DateTimeOffset? sessionReset = null) =>
         new()
@@ -84,23 +131,23 @@ public class IconRenderTests
     }
 
     [Fact]
-    public void Render_ChangedCountdownString_ReRendersExactlyOnce()
+    public void Render_ChangedCountdownString_OnBattery_IsSuppressed()
     {
+        // The square icon draws no countdown cell, so a per-minute tick that changes only the
+        // countdown string must NOT re-rasterize the battery: every such call is suppressed.
         using var renderer = new DualHorizontalRenderer();
         var state = new TrayRenderState.Battery(Snapshot(session: 75, weekly: 43));
 
         using Bitmap? first = renderer.Render(state, ThemeBucket.Dark, countdown: "32m");
         Assert.NotNull(first);
 
-        // A per-minute tick changes only the countdown string -> a single re-render, not suppressed.
-        using Bitmap? next = renderer.Render(state, ThemeBucket.Dark, countdown: "31m");
-        Assert.NotNull(next);
-        Assert.Equal(0, renderer.SuppressedCount);
-
-        // Holding the new string suppresses again.
-        Bitmap? held = renderer.Render(state, ThemeBucket.Dark, countdown: "31m");
-        Assert.Null(held);
+        Bitmap? next = renderer.Render(state, ThemeBucket.Dark, countdown: "31m");
+        Assert.Null(next);
         Assert.Equal(1, renderer.SuppressedCount);
+
+        Bitmap? cleared = renderer.Render(state, ThemeBucket.Dark, countdown: "");
+        Assert.Null(cleared);
+        Assert.Equal(2, renderer.SuppressedCount);
     }
 
     [Fact]
@@ -199,19 +246,149 @@ public class IconRenderTests
     }
 
     [Fact]
-    public void Render_BatteryCountdownChange_StillReRenders_ContrastToNonBattery()
+    public void Render_SizeOnlyChange_ReRenders_ContrastToCountdown()
     {
-        // R6 contrast: the battery branch DOES re-render when the countdown changes (the cell rides
-        // the battery), so the non-battery short-circuit above must not over-suppress the battery.
+        // The cell size (SM_CXSMICON, a DPI-scaling change) IS part of the signature: the same
+        // state/theme/countdown at a new size must repaint, while (above) a countdown-only change on
+        // the same battery state must not.
         using var renderer = new DualHorizontalRenderer();
         var state = new TrayRenderState.Battery(Snapshot(session: 75, weekly: 43));
 
-        using Bitmap? first = renderer.Render(state, ThemeBucket.Dark, "5h+");
-        Assert.NotNull(first);
+        using Bitmap? at16 = renderer.Render(state, ThemeBucket.Dark, "5h+", size: 16);
+        Assert.NotNull(at16);
 
-        using Bitmap? second = renderer.Render(state, ThemeBucket.Dark, "3h+");
-        Assert.NotNull(second); // a changed countdown on the battery branch repaints
+        using Bitmap? at24 = renderer.Render(state, ThemeBucket.Dark, "5h+", size: 24);
+        Assert.NotNull(at24); // a scaling change repaints
+        Assert.Equal(24, at24!.Width);
         Assert.Equal(0, renderer.SuppressedCount);
+
+        Bitmap? held = renderer.Render(state, ThemeBucket.Dark, "3h+", size: 24);
+        Assert.Null(held); // same size, countdown-only change -> suppressed
+        Assert.Equal(1, renderer.SuppressedCount);
+    }
+
+    // --- Square cell geometry ---
+
+    [Theory]
+    [MemberData(nameof(StateNamesBySize))]
+    public void Render_EveryBranch_IsSquareAtTheRequestedCellSize(string stateName, int size)
+    {
+        // The Windows notification area draws each icon into a square SM_CXSMICON cell and stretches
+        // whatever it gets; a non-square bitmap is squashed, so every branch must be size x size.
+        foreach (ThemeBucket theme in new[] { ThemeBucket.Light, ThemeBucket.Dark })
+        {
+            using var renderer = new DualHorizontalRenderer();
+            using Bitmap? bitmap = renderer.Render(StateNamed(stateName), theme, "", size);
+            Assert.NotNull(bitmap);
+            Assert.Equal(size, bitmap!.Width);
+            Assert.Equal(size, bitmap.Height);
+        }
+    }
+
+    [Fact]
+    public void Render_DefaultSize_Is16()
+    {
+        using var renderer = new DualHorizontalRenderer();
+        using Bitmap? bitmap = renderer.Render(new TrayRenderState.Battery(Snapshot(50, 50)), ThemeBucket.Dark, "");
+        Assert.NotNull(bitmap);
+        Assert.Equal(16, bitmap!.Width);
+        Assert.Equal(16, bitmap.Height);
+    }
+
+    [Fact]
+    public void Render_TopBarFillRun_GrowsWithSessionRemaining()
+    {
+        // At 32 px the session bar is the top bar; count the fill pixels (opaque, not the white
+        // outline/nub) along its middle row. 75% remaining must paint a longer run than 25%.
+        const int size = 32;
+        int run25 = TopBarFillRun(Snapshot(session: 25, weekly: 50), size);
+        int run75 = TopBarFillRun(Snapshot(session: 75, weekly: 50), size);
+
+        Assert.True(run25 > 0, $"25% painted no fill pixels (run {run25})");
+        Assert.True(run75 > run25, $"75% run ({run75}) is not longer than 25% run ({run25})");
+    }
+
+    [Fact]
+    public void Render_ZeroRemaining_PaintsNoFillOnTopBar()
+    {
+        Assert.Equal(0, TopBarFillRun(Snapshot(session: 0, weekly: 0), 32));
+    }
+
+    private static int TopBarFillRun(UsageSnapshot usage, int size)
+    {
+        using var renderer = new DualHorizontalRenderer(); // fresh: the signature cache must not suppress
+        using Bitmap? bitmap = renderer.Render(new TrayRenderState.Battery(usage), ThemeBucket.Dark, "", size);
+        Assert.NotNull(bitmap);
+
+        // Top bar: y = round(0.08 * size), height = round(0.36 * size); sample its middle row.
+        int barTop = (int)Math.Round(size * 0.08);
+        int barHeight = (int)Math.Round(size * 0.36);
+        int row = barTop + barHeight / 2;
+
+        int fill = 0;
+        for (int x = 0; x < size; x++)
+        {
+            Color px = bitmap!.GetPixel(x, row);
+            bool opaque = px.A > 127;
+            bool baseWhite = px.R > 200 && px.G > 200 && px.B > 200; // the dark-taskbar outline/nub
+            if (opaque && !baseWhite)
+            {
+                fill++;
+            }
+        }
+        return fill;
+    }
+
+    // --- Icon artifacts for CI (the developer has no Windows box; this is how the icon is seen) ---
+
+    [Fact]
+    public void RenderAllStates_WritesArtifactsWhenRequested()
+    {
+        string? dir = Environment.GetEnvironmentVariable("CLAUDE_BATTERY_ICON_ARTIFACTS");
+        bool write = !string.IsNullOrEmpty(dir);
+        if (write)
+        {
+            Directory.CreateDirectory(dir!);
+        }
+
+        foreach (int size in CellSizes)
+        {
+            foreach (ThemeBucket theme in new[] { ThemeBucket.Light, ThemeBucket.Dark })
+            {
+                foreach (var (name, state) in AllStates())
+                {
+                    using var renderer = new DualHorizontalRenderer(); // fresh per state: no cache suppression
+                    using Bitmap? bitmap = renderer.Render(state, theme, "", size);
+                    Assert.NotNull(bitmap);
+                    Assert.Equal(size, bitmap!.Width);
+                    Assert.Equal(size, bitmap.Height);
+
+                    if (!write)
+                    {
+                        continue;
+                    }
+
+                    string themeName = theme.ToString().ToLowerInvariant();
+                    string stem = $"icon-{name}-{themeName}-{size}";
+                    bitmap.Save(Path.Combine(dir!, stem + ".png"), ImageFormat.Png);
+
+                    using Bitmap upscaled = UpscaleNearest(bitmap, factor: 8);
+                    upscaled.Save(Path.Combine(dir!, stem + "-x8.png"), ImageFormat.Png);
+                }
+            }
+        }
+    }
+
+    /// <summary>Blocky nearest-neighbour upscale so a 16 px icon is readable in a PR artifact.</summary>
+    private static Bitmap UpscaleNearest(Bitmap source, int factor)
+    {
+        var scaled = new Bitmap(source.Width * factor, source.Height * factor, PixelFormat.Format32bppArgb);
+        using var g = Graphics.FromImage(scaled);
+        g.InterpolationMode = InterpolationMode.NearestNeighbor;
+        g.PixelOffsetMode = PixelOffsetMode.Half;
+        g.Clear(Color.Transparent);
+        g.DrawImage(source, new Rectangle(0, 0, scaled.Width, scaled.Height));
+        return scaled;
     }
 
     // --- Compact countdown saturation / floor ---
