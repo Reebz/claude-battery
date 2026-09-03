@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using ClaudeBatteryWin.Models;
+using Microsoft.Win32;
 
 namespace ClaudeBatteryWin.Services;
 
@@ -211,9 +212,10 @@ public interface INotifyLatch
 
 /// <summary>
 /// Toast delivery seam. The production implementation is <see cref="WinRtToastSink"/> (WinRT
-/// <c>ToastNotificationManager</c> behind an AUMID-bearing Start-menu shortcut); tests supply a fake
-/// that can report delivery success OR simulate OS-level suppression (return false), which is the
-/// scenario the delivery-order fix guards.
+/// <c>ToastNotificationManager</c> behind an AUMID registered under the per-user
+/// <c>HKCU\Software\Classes\AppUserModelId</c> key, see <see cref="AumidRegistration"/>); tests
+/// supply a fake that can report delivery success OR simulate OS-level suppression (return false),
+/// which is the scenario the delivery-order fix guards.
 ///
 /// <see cref="TryShow"/> returns <c>true</c> only when the toast was handed to the OS without the
 /// notifier being able to detect an immediate failure. It must return <c>false</c> when delivery is
@@ -233,12 +235,93 @@ public interface IToastSink
     bool TryShow(string title, string body, Guid tag);
 }
 
+/// <summary>
+/// The minimal registry surface the AUMID registration needs: write one named string value under
+/// the app's <c>AppUserModelId</c> key. Injected so the values <see cref="AumidRegistration.Write"/>
+/// stamps are unit-testable against a recording fake without touching the real <c>HKCU</c> hive.
+/// Deliberately NOT <c>IRunKey</c>: that seam hard-codes the autostart Run key path. Production is
+/// <see cref="HkcuAumidRegistration"/>.
+/// </summary>
+public interface IAumidRegistration
+{
+    /// Create or overwrite the value as a string (REG_SZ).
+    void SetValue(string name, string value);
+}
+
+/// <summary>
+/// The unpackaged-app toast registration. The shipped Windows build is a raw single-file exe: no
+/// installer, no Start-menu shortcut, no package identity. WinRT <c>ToastNotificationManager</c>
+/// drops every toast for an AUMID the shell has no record of, so
+/// <c>SetCurrentProcessExplicitAppUserModelID</c> alone is not enough - the AUMID must also be
+/// registered. The registry-only alternative to a shortcut is the per-user
+/// <c>HKCU\Software\Classes\AppUserModelId\&lt;aumid&gt;</c> key, which is what Microsoft's own
+/// unpackaged-app compat library (<c>ToastNotificationManagerCompat</c>) writes.
+///
+/// <para>
+/// Only <c>DisplayName</c> (the name Windows shows in Settings &gt; Notifications and on the toast)
+/// and <c>IconBackgroundColor</c> are written. <c>IconUri</c> is deliberately omitted: Windows
+/// expects an image file there and no icon file ships with the exe (the compat library deletes the
+/// value when it has none). <c>CustomActivator</c> is likewise omitted: it is only needed for
+/// click-activation through a COM server, which this app does not have.
+/// </para>
+///
+/// The key path and the written values are pure data, so they unit-test without WinRT or the
+/// registry; the real HKCU write lives in <see cref="HkcuAumidRegistration"/>.
+/// </summary>
+public static class AumidRegistration
+{
+    /// <summary>
+    /// The Application User Model ID. Must EXACTLY match the AUMID the process sets on itself
+    /// (<c>SetCurrentProcessExplicitAppUserModelID</c>) and the registry subkey the registration
+    /// is written under, or toasts are dropped. Stable across versions.
+    /// </summary>
+    public const string Aumid = "com.reebz.claudebatterywin";
+
+    /// HKCU subkey path the AUMID is registered under. Per-user, so no elevation is needed.
+    public const string KeyPath = @"Software\Classes\AppUserModelId\" + Aumid;
+
+    /// The name Windows shows for this app's toasts (Settings &gt; System &gt; Notifications).
+    public const string DisplayName = "Claude Battery";
+
+    /// The toast icon backdrop, as ARGB hex. The same neutral light grey the compat library writes.
+    public const string IconBackgroundColor = "FFDDDDDD";
+
+    /// <summary>
+    /// Stamp the registration values. Idempotent: every value is a plain overwrite, so calling it on
+    /// every startup (and again when the Settings toggle turns notifications on) is safe.
+    /// </summary>
+    public static void Write(IAumidRegistration reg)
+    {
+        ArgumentNullException.ThrowIfNull(reg);
+        reg.SetValue("DisplayName", DisplayName);
+        reg.SetValue("IconBackgroundColor", IconBackgroundColor);
+    }
+}
+
+/// <summary>
+/// Production <see cref="IAumidRegistration"/> over the real
+/// <c>HKEY_CURRENT_USER\Software\Classes\AppUserModelId\com.reebz.claudebatterywin</c> key. Opens
+/// (creating if absent) the key per-operation, mirroring <c>HkcuRunKey</c>. Not unit-tested.
+/// </summary>
+public sealed class HkcuAumidRegistration : IAumidRegistration
+{
+    public void SetValue(string name, string value)
+    {
+        // CreateSubKey returns the existing key when present, so this both creates the AUMID key on
+        // first run and opens it writable on every later run.
+        using RegistryKey key = Registry.CurrentUser.CreateSubKey(AumidRegistration.KeyPath, writable: true)
+            ?? throw new InvalidOperationException("Could not open the HKCU AppUserModelId key for writing.");
+        key.SetValue(name, value, RegistryValueKind.String);
+    }
+}
+
 #if WINDOWS10_0_19041_0_OR_GREATER
 /// <summary>
 /// Production <see cref="IToastSink"/> over WinRT <c>ToastNotificationManager</c>. Requires the
 /// Windows-versioned TFM (<c>net8.0-windows10.0.19041.0</c>) so <c>Windows.UI.Notifications</c> is
-/// reachable, and an AUMID registered through an installed Start-menu shortcut (the installer, U12,
-/// creates the shortcut; <see cref="EnsureRegistered"/> sets the process AUMID at startup).
+/// reachable, and an AUMID registered under the per-user <c>HKCU\Software\Classes\AppUserModelId</c>
+/// key (<see cref="EnsureRegistered"/> sets the process AUMID and writes that key at startup; the
+/// shipped build is a raw exe with no installer or Start-menu shortcut to carry the AUMID).
 ///
 /// <para>
 /// <b>Why <see cref="TryShow"/> can return false (the delivery-order fix's reason for existing).</b>
@@ -256,21 +339,26 @@ public interface IToastSink
 public sealed class WinRtToastSink : IToastSink
 {
     /// <summary>
-    /// The Application User Model ID. Must EXACTLY match the AUMID stamped on the installed
-    /// Start-menu shortcut (U12) or toasts are dropped. Stable across versions.
+    /// The Application User Model ID. Must EXACTLY match the registry subkey
+    /// <see cref="AumidRegistration"/> writes (<see cref="AumidRegistration.KeyPath"/>) or toasts
+    /// are dropped. Stable across versions.
     /// </summary>
-    public const string Aumid = "com.reebz.claudebatterywin";
+    public const string Aumid = AumidRegistration.Aumid;
 
     /// <summary>
-    /// Register this process's AUMID so toasts resolve to the installed shortcut's identity. Call
-    /// once at startup (after Velopack, before the first poll). Best-effort: a failure leaves the
-    /// sink unable to deliver, and <see cref="TryShow"/> then returns false rather than throwing.
+    /// Register this process's AUMID so toasts resolve to a shell-known identity: set the process
+    /// AUMID, then write the per-user <c>AppUserModelId</c> registry key
+    /// (<see cref="AumidRegistration.Write"/>). Call once at startup (after Velopack, before the
+    /// first poll); idempotent, so the Settings toggle calls it again on enable. Best-effort: a
+    /// failure leaves the sink unable to deliver, and <see cref="TryShow"/> then returns false
+    /// rather than throwing.
     /// </summary>
     public static void EnsureRegistered()
     {
         try
         {
             SetCurrentProcessExplicitAppUserModelID(Aumid);
+            AumidRegistration.Write(new HkcuAumidRegistration());
         }
         catch
         {

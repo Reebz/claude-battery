@@ -10,7 +10,9 @@ namespace ClaudeBatteryWin.Tests;
 /// Covers the plan's scenarios: crossing below threshold fires exactly one toast; staying below
 /// does not re-fire; climbing back resets the dedup latch; a toast suppressed at the OS level does
 /// NOT latch the flag (so it fires once delivery is possible); and the pure
-/// <see cref="Notifier.Decide"/> rule including notifications-off-by-default.
+/// <see cref="Notifier.Decide"/> rule including notifications-off-by-default. Also pins the
+/// unpackaged-exe AUMID registration (<see cref="AumidRegistration"/>): the HKCU key path and the
+/// exact values written, against a recording fake so no real registry is touched.
 ///
 /// The dedup latch and delivery sink are faked so the whole flow runs without WinRT. The fake latch
 /// mirrors AccountStore.UpdateDidNotify; because <see cref="Account"/> is immutable, each successive
@@ -275,6 +277,68 @@ public sealed class NotifierTests
         var reloaded = new AppSettings(temp.Path);
         Assert.True(reloaded.NotificationsEnabled);
         Assert.True(reloaded.ShowSessionCountdown);
+    }
+
+    // ---- unpackaged-exe AUMID registration ----
+
+    /// Records every value <see cref="AumidRegistration.Write"/> stamps, in call order, so the exact
+    /// set (and nothing more) is asserted without touching the real HKCU hive.
+    private sealed class RecordingAumidRegistration : IAumidRegistration
+    {
+        public readonly List<KeyValuePair<string, string>> Values = new();
+
+        public void SetValue(string name, string value) => Values.Add(new(name, value));
+    }
+
+    [Fact]
+    public void AumidRegistration_KeyPath_IsHkcuAppUserModelIdSubkeyForTheAumid()
+    {
+        // The raw exe has no shortcut or package identity, so the AUMID must be registered under
+        // the per-user AppUserModelId key; the subkey name is the AUMID itself.
+        Assert.Equal("com.reebz.claudebatterywin", AumidRegistration.Aumid);
+        Assert.Equal(@"Software\Classes\AppUserModelId\" + AumidRegistration.Aumid, AumidRegistration.KeyPath);
+        Assert.Equal(@"Software\Classes\AppUserModelId\com.reebz.claudebatterywin", AumidRegistration.KeyPath);
+    }
+
+    [Fact]
+    public void AumidRegistration_Write_StampsExactlyDisplayNameAndIconBackgroundColor()
+    {
+        var reg = new RecordingAumidRegistration();
+
+        AumidRegistration.Write(reg);
+
+        // Exactly these two values: DisplayName (what Windows shows in Settings > Notifications and
+        // on the toast) and the icon backdrop. No IconUri (no icon file ships) and no CustomActivator
+        // (no COM activation server).
+        Assert.Equal(
+            new[]
+            {
+                new KeyValuePair<string, string>("DisplayName", "Claude Battery"),
+                new KeyValuePair<string, string>("IconBackgroundColor", "FFDDDDDD"),
+            },
+            reg.Values);
+        Assert.DoesNotContain(reg.Values, kv => kv.Key == "IconUri");
+        Assert.DoesNotContain(reg.Values, kv => kv.Key == "CustomActivator");
+    }
+
+    [Fact]
+    public void AumidRegistration_Write_IsIdempotent_RewritesSameValues()
+    {
+        // EnsureRegistered runs on every startup and again when the Settings toggle enables
+        // notifications; a second write must be a plain overwrite with the same values.
+        var reg = new RecordingAumidRegistration();
+
+        AumidRegistration.Write(reg);
+        AumidRegistration.Write(reg);
+
+        Assert.Equal(4, reg.Values.Count);
+        Assert.Equal(reg.Values.Take(2), reg.Values.Skip(2));
+    }
+
+    [Fact]
+    public void AumidRegistration_Write_NullSurface_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(() => AumidRegistration.Write(null!));
     }
 
     private sealed class TempSettings : IDisposable
