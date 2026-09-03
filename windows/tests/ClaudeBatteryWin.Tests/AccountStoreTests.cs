@@ -287,6 +287,161 @@ public sealed class AccountStoreTests : IDisposable
         Assert.Contains(activeId, reloaded.DroppedAccountIds);
     }
 
+    // ---- transient read failure (locked blob) defers the account, never drops it ----
+
+    [Fact]
+    public void LockedBlob_OnReload_IsDeferred_NotDropped_MetadataKept_ThenLoadsOnceReleased()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-A", cookieHeader: "sessionKey=sk-A"));
+        var id = store.Accounts[0].Id;
+        var blobPath = new SecretStore(_secretsDir).BlobPath(id);
+
+        // A second launch while something else holds the blob open (antivirus / backup / sync).
+        using (new FileStream(blobPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var locked = NewStore(new CookieContainer());
+
+            // Not an account this session (no session key to poll with)...
+            Assert.Empty(locked.Accounts);
+            Assert.False(locked.IsAuthenticated);
+            // ...but NOT dropped either: no re-auth flag, and the metadata entry is still on disk.
+            Assert.Empty(locked.DroppedAccountIds);
+            Assert.Contains(id.ToString(), File.ReadAllText(_metadataPath));
+            Assert.False(ClaudeBatteryWin.App.ShouldFlagSecurityDataUnreadable(locked));
+
+            // A write in the same session (adding another account) must carry the deferred entry
+            // along instead of rewriting accounts.json without it.
+            store = locked;
+            store.UpsertAccount(NewAccount("org-B", sessionKey: "sk-B"));
+            Assert.Contains(id.ToString(), File.ReadAllText(_metadataPath));
+            Assert.Contains("org-A", File.ReadAllText(_metadataPath));
+        }
+
+        // Lock released: the next launch loads the deferred account with its secret intact.
+        var recovered = NewStore(new CookieContainer());
+        Assert.Equal(2, recovered.Accounts.Count);
+        var a = recovered.Accounts.First(x => x.OrganizationId == "org-A");
+        Assert.Equal(id, a.Id);
+        Assert.Equal("sk-A", a.SessionKey);
+        Assert.Equal("sessionKey=sk-A", a.AllCookieHeader);
+        Assert.Empty(recovered.DroppedAccountIds);
+        Assert.True(File.Exists(blobPath));
+    }
+
+    [Fact]
+    public void LockedBlob_OfActiveAccount_FallsBackToSurvivor_ThisSessionOnly()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-A")); // active (first)
+        store.UpsertAccount(NewAccount("org-B", sessionKey: "sk-B"));
+        var activeId = store.ActiveAccountId!.Value;
+        var blobPath = new SecretStore(_secretsDir).BlobPath(activeId);
+
+        using (new FileStream(blobPath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var locked = NewStore(new CookieContainer());
+
+            Assert.Single(locked.Accounts);
+            Assert.Equal("org-B", locked.ActiveAccount!.OrganizationId); // survivor active for now
+            Assert.Empty(locked.DroppedAccountIds);
+        }
+
+        var recovered = NewStore(new CookieContainer());
+        Assert.Equal(2, recovered.Accounts.Count); // A is back
+        Assert.Contains(recovered.Accounts, x => x.Id == activeId && x.SessionKey == "sk-A");
+    }
+
+    // ---- save failure: nothing changes in memory, the caller gets a typed exception ----
+
+    [Fact]
+    public void SaveFailure_OnAdd_ThrowsTyped_LeavesAccountsActiveAndJarUntouched()
+    {
+        // Occupy the secrets directory path with a FILE so the blob can never be written.
+        File.WriteAllText(_secretsDir, "not a directory");
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+
+        Assert.Throws<AccountPersistenceException>(
+            () => store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-A", cookieHeader: "sessionKey=sk-A; __cf_bm=cf")));
+
+        Assert.Empty(store.Accounts);         // no phantom account
+        Assert.Null(store.ActiveAccount);
+        Assert.False(store.IsAuthenticated);
+        Assert.Equal(0, CountClaudeCookies(jar)); // jar never primed
+        Assert.False(File.Exists(_metadataPath)); // metadata never written for it either
+    }
+
+    [Fact]
+    public void SaveFailure_OnReauth_ThrowsTyped_KeepsExistingSessionAndJar()
+    {
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-OLD", cookieHeader: "sessionKey=sk-OLD"));
+        var id = store.Accounts[0].Id;
+        var genBefore = store.CurrentGeneration;
+        var notified = 0;
+        store.ActiveAccountChanged += () => notified++;
+
+        // Lock the existing blob so the atomic move-into-place of the re-auth's new blob fails.
+        using (new FileStream(new SecretStore(_secretsDir).BlobPath(id), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.Throws<AccountPersistenceException>(
+                () => store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-NEW", cookieHeader: "sessionKey=sk-NEW")));
+        }
+
+        // The in-memory account, the jar, and the generation are exactly as before the attempt.
+        Assert.Single(store.Accounts);
+        Assert.Equal("sk-OLD", store.Accounts[0].SessionKey);
+        Assert.Equal("sk-OLD", jar.GetCookies(ClaudeUri)["sessionKey"]!.Value);
+        Assert.Equal(genBefore, store.CurrentGeneration);
+        Assert.Equal(0, notified);
+    }
+
+    // ---- cookie-jar per-domain cap: a large capture must not evict sessionKey ----
+
+    [Fact]
+    public void LargeCookieSet_SurvivesUpsertAndReload_SessionKeyNotEvicted()
+    {
+        // 25 distinct names with sessionKey FIRST (the first evicted on a default jar) and no
+        // __cf_bm (so the restore path drops nothing). Every cookie lands under the one .claude.ai
+        // domain key; .NET's default per-domain cap of 20 would silently evict the first five.
+        var names = new List<string> { "sessionKey" };
+        for (var i = 1; i < 25; i++)
+        {
+            names.Add($"cookie{i:D2}");
+        }
+        var header = string.Join("; ", names.Select(n => $"{n}={n}-value"));
+
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sessionKey-value", cookieHeader: header));
+
+        Assert.Equal(25, CountClaudeCookies(jar));
+        Assert.NotNull(jar.GetCookies(ClaudeUri)["sessionKey"]);
+
+        // Cold-start restore into a fresh jar over the same paths: still all 25.
+        var restoreJar = new CookieContainer();
+        _ = NewStore(restoreJar);
+
+        Assert.Equal(25, CountClaudeCookies(restoreJar));
+        Assert.Equal("sessionKey-value", restoreJar.GetCookies(ClaudeUri)["sessionKey"]!.Value);
+    }
+
+    [Fact]
+    public void CookieJar_PerDomainCapacity_IsRaisedOnAnyJarTheStoreIsGiven()
+    {
+        // The factory the app uses is pre-configured...
+        Assert.Equal(AccountStore.CookieJarPerDomainCapacity, AccountStore.CreateCookieJar().PerDomainCapacity);
+
+        // ...and a default jar handed to the store is raised in place, so the fix rides the
+        // injection path rather than one construction site.
+        var jar = new CookieContainer();
+        Assert.True(jar.PerDomainCapacity < AccountStore.CookieJarPerDomainCapacity);
+        _ = NewStore(jar);
+        Assert.Equal(AccountStore.CookieJarPerDomainCapacity, jar.PerDomainCapacity);
+    }
+
     // ---- U6: App startup latch predicate (producer -> latch chain, R4) ----
 
     [Fact]

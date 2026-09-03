@@ -30,6 +30,11 @@ public sealed class SecretStoreTests : IDisposable
             {
                 Directory.Delete(_dir, recursive: true);
             }
+            else if (File.Exists(_dir))
+            {
+                // The save-failure test occupies the directory path with a FILE.
+                File.Delete(_dir);
+            }
         }
         catch (IOException)
         {
@@ -122,5 +127,69 @@ public sealed class SecretStoreTests : IDisposable
         // Second delete must not throw.
         _store.Delete(id);
         Assert.False(_store.TryLoad(id, out _));
+    }
+
+    // ---- Load tri-state: the caller must be able to tell "gone" from "locked right now" ----
+
+    [Fact]
+    public void Load_MissingBlob_ReturnsMissing()
+    {
+        var result = _store.Load(Guid.NewGuid(), out var loaded);
+
+        Assert.Equal(SecretLoadResult.Missing, result);
+        Assert.Null(loaded);
+    }
+
+    [Fact]
+    public void Load_CorruptBlob_ReturnsCorrupt()
+    {
+        var id = Guid.NewGuid();
+        _store.Save(id, new AccountSecret { SessionKey = "sk-real" });
+        File.WriteAllBytes(_store.BlobPath(id), new byte[] { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 });
+
+        var result = _store.Load(id, out var loaded);
+
+        Assert.Equal(SecretLoadResult.Corrupt, result);
+        Assert.Null(loaded);
+    }
+
+    [Fact]
+    public void Load_LockedBlob_ReturnsUnreadable_NotCorrupt_AndLeavesFile()
+    {
+        var id = Guid.NewGuid();
+        _store.Save(id, new AccountSecret { SessionKey = "sk-locked" });
+        var path = _store.BlobPath(id);
+
+        // Hold the blob open with no sharing (an antivirus / backup agent mid-scan). ReadAllBytes
+        // then fails with a sharing violation on Windows, which is where this suite runs.
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var result = _store.Load(id, out var loaded);
+
+            Assert.Equal(SecretLoadResult.Unreadable, result);
+            Assert.Null(loaded);
+        }
+
+        // Once the lock is gone the same blob loads normally - it was never corrupt.
+        Assert.Equal(SecretLoadResult.Loaded, _store.Load(id, out var recovered));
+        Assert.Equal("sk-locked", recovered!.SessionKey);
+        Assert.True(File.Exists(path));
+    }
+
+    // ---- Save wraps disk/DPAPI failures in a typed exception, never a bare fault ----
+
+    [Fact]
+    public void Save_DirectoryPathOccupiedByFile_ThrowsAccountPersistenceException()
+    {
+        // Occupy the store's directory path with a FILE so Directory.CreateDirectory fails.
+        Directory.CreateDirectory(Path.GetDirectoryName(_dir)!);
+        File.WriteAllText(_dir, "not a directory");
+        var store = new SecretStore(_dir);
+
+        var ex = Assert.Throws<AccountPersistenceException>(
+            () => store.Save(Guid.NewGuid(), new AccountSecret { SessionKey = "sk" }));
+
+        Assert.NotNull(ex.InnerException);
+        Assert.True(ex.InnerException is IOException or UnauthorizedAccessException);
     }
 }

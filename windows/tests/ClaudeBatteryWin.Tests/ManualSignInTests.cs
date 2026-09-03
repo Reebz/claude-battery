@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -61,6 +62,12 @@ public sealed class ManualSignInTests : IDisposable
         public CookieContainer? JarToObserve;
         public string? SessionKeySeenAtDiscovery;
 
+        // When set, the org fetch completes on a thread-pool thread (like the real transport after a
+        // network round trip) instead of synchronously via Task.FromResult, so a test can prove where
+        // SignInAsync's continuation lands. A synchronously-completed fake never yields, so it cannot
+        // tell ConfigureAwait(true) from ConfigureAwait(false).
+        public bool CompleteOffThread;
+
         public Task<UsageApiResponse> GetUsageAsync(string organizationId, CancellationToken cancellationToken)
             => Task.FromResult(new UsageApiResponse());
 
@@ -82,8 +89,60 @@ public sealed class ManualSignInTests : IDisposable
             {
                 throw new HttpRequestException("simulated transport failure");
             }
+            if (CompleteOffThread)
+            {
+                return CompleteOffThreadAsync();
+            }
             return Task.FromResult(Orgs);
         }
+
+        private async Task<IReadOnlyList<Organization>> CompleteOffThreadAsync()
+        {
+            // Task.Delay always goes async (timer), and ConfigureAwait(false) keeps the completion on
+            // the timer's pool thread rather than posting back to the test's context.
+            await Task.Delay(10).ConfigureAwait(false);
+            return Orgs;
+        }
+    }
+
+    /// <summary>
+    /// A stand-in for the WPF dispatcher: a <see cref="SynchronizationContext"/> that runs every
+    /// posted callback on ONE dedicated thread. Lets a test assert that a continuation came back to
+    /// "the UI thread" (this thread) rather than running wherever the awaited task completed.
+    /// </summary>
+    private sealed class SingleThreadSyncContext : SynchronizationContext, IDisposable
+    {
+        private readonly BlockingCollection<(SendOrPostCallback Callback, object? State)> _queue = new();
+        private readonly Thread _thread;
+        private int _postCount;
+
+        public int ThreadId => _thread.ManagedThreadId;
+        public int PostCount => Volatile.Read(ref _postCount);
+
+        public SingleThreadSyncContext()
+        {
+            _thread = new Thread(Pump) { IsBackground = true, Name = "test-ui-thread" };
+            _thread.Start();
+        }
+
+        private void Pump()
+        {
+            SetSynchronizationContext(this);
+            foreach (var (callback, state) in _queue.GetConsumingEnumerable())
+            {
+                callback(state);
+            }
+        }
+
+        public override void Post(SendOrPostCallback d, object? state)
+        {
+            Interlocked.Increment(ref _postCount);
+            _queue.Add((d, state));
+        }
+
+        public override void Send(SendOrPostCallback d, object? state) => throw new NotSupportedException();
+
+        public void Dispose() => _queue.CompleteAdding();
     }
 
     private static Organization Org(string uuid, string? name = null, string? email = null)
@@ -402,5 +461,94 @@ public sealed class ManualSignInTests : IDisposable
         // No prior SignInAsync that needed a choice -> no pending context.
         var result = manual.CompleteWithChosenOrg(Org("o1"));
         Assert.Equal(ManualSignInResult.ResultKind.InvalidInput, result.Kind);
+    }
+
+    // ---- save failure: a distinct result, no throw, the active jar restored ----
+
+    [Fact]
+    public async Task SignIn_FirstAccount_SaveFailure_ReturnsSaveFailed_NoThrow_JarCleared()
+    {
+        // Occupy the secrets directory path with a FILE so the blob can never be written.
+        File.WriteAllText(_secretsDir, "not a directory");
+        var api = new FakeApi { Orgs = new[] { Org("o1", email: "u@acme.com") } };
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        var manual = new ManualSignIn(api, store);
+
+        var result = await manual.SignInAsync("sessionKey=sk-1; __cf_bm=cf-1");
+
+        Assert.Equal(ManualSignInResult.ResultKind.SaveFailed, result.Kind);
+        Assert.Empty(store.Accounts);
+        Assert.Null(store.ActiveAccount);
+        // No active account to restore, so the pasted credential is cleared out of the jar.
+        Assert.Empty(jar.GetCookies(new Uri("https://claude.ai")));
+    }
+
+    [Fact]
+    public async Task SignIn_Reauth_SaveFailure_ReturnsSaveFailed_RestoresActiveAccountJar()
+    {
+        // A healthy active account A, primed into the jar.
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "sk-A", OrganizationId = "org-A",
+            AllCookieHeader = "sessionKey=sk-A; __cf_bm=cfA",
+        });
+        var id = store.Accounts[0].Id;
+
+        // Re-auth the same org by paste while A's blob is locked, so the re-auth's blob write fails.
+        var api = new FakeApi { Orgs = new[] { Org("org-A", email: "a@x.com") }, JarToObserve = jar };
+        var manual = new ManualSignIn(api, store);
+        ManualSignInResult result;
+        using (new FileStream(new SecretStore(_secretsDir).BlobPath(id), FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            result = await manual.SignInAsync("sessionKey=sk-NEW; __cf_bm=cfNEW");
+        }
+
+        Assert.Equal(ManualSignInResult.ResultKind.SaveFailed, result.Kind);
+        Assert.Equal("sk-NEW", api.SessionKeySeenAtDiscovery); // discovery did run with the paste
+        // ...but the store is unchanged and the jar holds the prior active account's cookies again.
+        Assert.Single(store.Accounts);
+        Assert.Equal("sk-A", store.Accounts[0].SessionKey);
+        Assert.Equal("sk-A", jar.GetCookies(new Uri("https://claude.ai"))["sessionKey"]!.Value);
+        Assert.Equal("cfA", jar.GetCookies(new Uri("https://claude.ai"))["__cf_bm"]!.Value);
+    }
+
+    // ---- thread affinity: the commit runs on the caller's context, not the transport's thread ----
+
+    [Fact]
+    public async Task SignIn_CommitsOnCallerSynchronizationContext_NotOnTransportThread()
+    {
+        var api = new FakeApi { Orgs = new[] { Org("o1", email: "u@acme.com") }, CompleteOffThread = true };
+        var store = NewStore(new CookieContainer());
+        var manual = new ManualSignIn(api, store);
+
+        var commitThreadId = -1;
+        store.ActiveAccountChanged += () => commitThreadId = Environment.CurrentManagedThreadId;
+
+        using var uiContext = new SingleThreadSyncContext();
+        var previous = SynchronizationContext.Current;
+        Task<ManualSignInResult> signIn;
+        SynchronizationContext.SetSynchronizationContext(uiContext);
+        try
+        {
+            // Start the call with the "UI" context current so SignInAsync captures it at its await;
+            // the fake then completes on a pool thread, which is where the commit used to run.
+            signIn = manual.SignInAsync("sessionKey=sk-1; __cf_bm=cf-1");
+        }
+        finally
+        {
+            // Restore this thread's context BEFORE awaiting so the test's own continuation goes
+            // back through xUnit's context, not ours.
+            SynchronizationContext.SetSynchronizationContext(previous);
+        }
+
+        var result = await signIn;
+
+        Assert.Equal(ManualSignInResult.ResultKind.Success, result.Kind);
+        Assert.True(uiContext.PostCount >= 1);                // the continuation was posted back...
+        Assert.Equal(uiContext.ThreadId, commitThreadId);      // ...and the store mutated on that thread
+        Assert.Single(store.Accounts);
     }
 }

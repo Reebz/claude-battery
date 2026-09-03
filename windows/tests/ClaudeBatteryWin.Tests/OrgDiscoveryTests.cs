@@ -279,6 +279,30 @@ public sealed class OrgDiscoveryTests : IDisposable
         Assert.Empty(store.Accounts);
     }
 
+    // ---- save failure surfaces a visible error instead of a silently faulted task ---------------
+
+    [Fact]
+    public async Task SaveFailure_SurfacesSaveError_ResetsGuard_NoPhantomAccount_KeepsWindowOpen()
+    {
+        // Occupy the secrets directory path with a FILE so the blob write in UpsertAccount fails.
+        // Before the commit tail was guarded, this faulted the un-awaited discovery task and left
+        // the signing-in overlay up until the inactivity timeout with no error at all.
+        File.WriteAllText(Path.Combine(_root, "secrets"), "not a directory");
+        var api = new FakeClaudeApi { Orgs = new[] { Org("solo", email: "user@x.com") } };
+        var (manager, web, _, store) = NewManager(api);
+
+        manager.PresentLogin();
+        web.RaiseCookiesObserved(SessionCookies());
+        await manager.LastDiscoveryTask!; // completes normally: the throw was caught, not faulted
+
+        Assert.Equal(LoginStateKind.Error, manager.LoginState.Kind);
+        Assert.Contains("Could not save sign-in data", manager.LoginState.Message);
+        Assert.False(manager.HasCapturedSession);   // guard reset so a retry can capture again
+        Assert.Empty(store.Accounts);               // no phantom account
+        Assert.False(store.IsAuthenticated);
+        Assert.True(manager.HasActiveLoginWebView); // window stays open showing the error
+    }
+
     // ---- picker label disambiguation (pure) ----------------------------------------------------
 
     [Fact]

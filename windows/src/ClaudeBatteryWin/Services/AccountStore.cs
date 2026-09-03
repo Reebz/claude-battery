@@ -42,11 +42,32 @@ public sealed class AccountStore
 {
     public const int MaxAccounts = 5;
 
+    /// <summary>
+    /// Per-domain cookie cap applied to the shared jar. <see cref="InjectCookies"/> files EVERY
+    /// captured cookie under the single <c>.claude.ai</c> domain key, and .NET's default cap for one
+    /// domain is 20: the 21st add silently evicts the oldest entries (no exception) - a real
+    /// claude.ai capture is already 17 cookies, with <c>cf_clearance</c> and <c>sessionKey</c> among
+    /// the earliest. 100 is far above any realistic capture and below the container's default
+    /// total Capacity of 300, so the setter never throws.
+    /// </summary>
+    public const int CookieJarPerDomainCapacity = 100;
+
     private readonly CookieContainer _cookieJar;
     private readonly SecretStore _secretStore;
     private readonly string _metadataPath;
 
     private readonly List<Account> _accounts = new();
+
+    /// <summary>
+    /// Metadata entries whose secret blob was <see cref="SecretLoadResult.Unreadable"/> at
+    /// <see cref="Load"/> time (locked by another process, access denied). They are NOT accounts this
+    /// session - no session key, so nothing to poll - but <see cref="PersistMetadata"/> writes them
+    /// back on every save so a later launch can read the blob and restore the account. Without this
+    /// list any mutation this session would rewrite accounts.json without them and lose the account
+    /// for good. Cleared at the top of every <see cref="Load"/>.
+    /// </summary>
+    private readonly List<Account> _deferredMetadata = new();
+
     private Guid? _activeAccountId;
     private int _generation;
 
@@ -73,6 +94,14 @@ public sealed class AccountStore
     public AccountStore(CookieContainer cookieJar, SecretStore secretStore, string? metadataPath = null)
     {
         _cookieJar = cookieJar;
+        // Raise the per-domain cap on whatever jar we are handed (the app's shared instance or a
+        // test's fresh container), so the fix applies on the injection path itself and not only
+        // where the production jar happens to be constructed. See CookieJarPerDomainCapacity.
+        if (cookieJar.PerDomainCapacity < CookieJarPerDomainCapacity)
+        {
+            cookieJar.PerDomainCapacity = CookieJarPerDomainCapacity;
+        }
+
         _secretStore = secretStore;
         _metadataPath = metadataPath ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -81,6 +110,13 @@ public sealed class AccountStore
 
         Load();
     }
+
+    /// <summary>
+    /// Build a cookie jar already configured for the claude.ai capture (see
+    /// <see cref="CookieJarPerDomainCapacity"/>). The app's object graph and tests use this so the
+    /// shared jar never runs on the .NET default of 20 cookies per domain.
+    /// </summary>
+    public static CookieContainer CreateCookieJar() => new() { PerDomainCapacity = CookieJarPerDomainCapacity };
 
     // MARK: - Observable state
 
@@ -124,6 +160,12 @@ public sealed class AccountStore
     /// <c>true</c> when the account was added or an existing org was updated; <c>false</c> when a
     /// new account was rejected for hitting the 5-account limit.
     /// </returns>
+    /// <exception cref="AccountPersistenceException">
+    /// The secret blob could not be written. The secret is saved BEFORE the in-memory list is
+    /// touched, so on this exception nothing changed: no phantom account, no activation, no jar
+    /// re-prime, no generation bump. Callers surface a "could not save sign-in data" message; the
+    /// <c>false</c> return stays reserved for the account limit so the two cannot be confused.
+    /// </exception>
     public bool UpsertAccount(Account account)
     {
         var existingIndex = _accounts.FindIndex(a => a.OrganizationId == account.OrganizationId);
@@ -144,8 +186,10 @@ public sealed class AccountStore
                 // (mirrors UpdateSession, which preserves it).
                 UserAgent = account.UserAgent ?? existing.UserAgent,
             };
-            _accounts[existingIndex] = updated;
+            // Write-then-commit: persist the secret first so a save failure leaves the existing
+            // account (and its still-valid jar) exactly as it was.
             SaveSecret(updated);
+            _accounts[existingIndex] = updated;
             PersistMetadata();
 
             // If the re-authed account is the active one, re-prime the jar with the fresh cookies
@@ -166,8 +210,21 @@ public sealed class AccountStore
             return false;
         }
 
-        _accounts.Add(account);
+        // Write-then-commit: persist the secret first so a save failure never leaves a phantom
+        // account in the list (grey row in Settings, no active id, every retry taking the
+        // re-auth branch and failing the same way).
         SaveSecret(account);
+        _accounts.Add(account);
+
+        // A deferred (unreadable-at-launch) entry for the same org is superseded by this fresh
+        // sign-in: drop it from the carry-over list and its orphaned blob, or the next launch would
+        // load two accounts for one org.
+        foreach (var stale in _deferredMetadata.Where(a => a.OrganizationId == account.OrganizationId).ToList())
+        {
+            _deferredMetadata.Remove(stale);
+            _secretStore.Delete(stale.Id);
+        }
+
         PersistMetadata();
 
         // First account becomes active (mirrors the Mac: accounts.count == 1 → switchTo).
@@ -256,8 +313,9 @@ public sealed class AccountStore
             SessionKey = sessionKey,
             AllCookieHeader = cookieHeader ?? _accounts[index].AllCookieHeader,
         };
-        _accounts[index] = updated;
+        // Same write-then-commit order as UpsertAccount: a failed save changes nothing in memory.
         SaveSecret(updated);
+        _accounts[index] = updated;
         PersistMetadata();
 
         if (_activeAccountId == id)
@@ -483,43 +541,66 @@ public sealed class AccountStore
 
     /// <summary>
     /// Load account metadata from disk and re-hydrate each account's secrets from the SecretStore.
-    /// An account whose secret blob is missing or will not decrypt is DROPPED (its blob deleted) and
-    /// flagged for re-auth via <see cref="DroppedAccountIds"/> - never a crash. Then the active
-    /// account is resolved and its cookies primed, mirroring the Mac init.
+    /// Three outcomes per entry, keyed on <see cref="SecretStore.Load"/>:
+    /// <list type="bullet">
+    /// <item>Loaded: the account is added.</item>
+    /// <item>Missing or Corrupt: the account is DROPPED (its blob deleted, the metadata rewritten
+    /// without it) and flagged for re-auth via <see cref="DroppedAccountIds"/> - never a crash.</item>
+    /// <item>Unreadable (locked / access denied right now): the account is SKIPPED for this session
+    /// only. Nothing is deleted, nothing is flagged, and the metadata entry is kept in
+    /// <see cref="_deferredMetadata"/> so every later write keeps it on disk for the next launch.
+    /// A transient read error must never sign the user out for good.</item>
+    /// </list>
+    /// Then the active account is resolved (falling back to the first loaded survivor when the
+    /// persisted active id was dropped or deferred) and its cookies primed, mirroring the Mac init.
     /// </summary>
     private void Load()
     {
         var metadata = ReadMetadata();
         _accounts.Clear();
+        _deferredMetadata.Clear();
         DroppedAccountIds.Clear();
 
         var droppedActive = false;
         foreach (var meta in metadata.Accounts)
         {
-            if (_secretStore.TryLoad(meta.Id, out var secret) && secret is not null)
+            switch (_secretStore.Load(meta.Id, out var secret))
             {
-                _accounts.Add(meta with
-                {
-                    SessionKey = secret.SessionKey,
-                    AllCookieHeader = secret.AllCookieHeader,
-                });
-            }
-            else
-            {
-                // Corrupt/missing blob: delete it, drop the account, flag re-auth. Never crash.
-                _secretStore.Delete(meta.Id);
-                DroppedAccountIds.Add(meta.Id);
-                if (metadata.ActiveAccountId == meta.Id)
-                {
-                    droppedActive = true;
-                }
-                DebugLog($"Dropped account {meta.Id:N} - secret unavailable (re-auth required)");
+                case SecretLoadResult.Loaded when secret is not null:
+                    _accounts.Add(meta with
+                    {
+                        SessionKey = secret.SessionKey,
+                        AllCookieHeader = secret.AllCookieHeader,
+                    });
+                    break;
+
+                case SecretLoadResult.Unreadable:
+                    // Locked or inaccessible right now, not corrupt: keep the entry for the next
+                    // launch. No Delete, no DroppedAccountIds (that would raise the "security data
+                    // could not be read" panel for a blob that is fine), no _accounts entry (there is
+                    // no session key to poll with). The active-id fallback below covers the case
+                    // where this was the persisted active account.
+                    _deferredMetadata.Add(meta);
+                    DebugLog($"Deferred account {meta.Id:N} - secret blob unreadable this launch (kept)");
+                    break;
+
+                default:
+                    // Missing/corrupt blob: delete it, drop the account, flag re-auth. Never crash.
+                    _secretStore.Delete(meta.Id);
+                    DroppedAccountIds.Add(meta.Id);
+                    if (metadata.ActiveAccountId == meta.Id)
+                    {
+                        droppedActive = true;
+                    }
+                    DebugLog($"Dropped account {meta.Id:N} - secret unavailable (re-auth required)");
+                    break;
             }
         }
 
         _activeAccountId = metadata.ActiveAccountId;
 
-        // If the persisted active account was dropped or absent, fall back to the first survivor.
+        // If the persisted active account was dropped, deferred, or absent, fall back to the first
+        // survivor (a deferred id is not in _accounts, so the All() clause catches it).
         if (droppedActive || _activeAccountId is null ||
             _accounts.All(a => a.Id != _activeAccountId))
         {
@@ -544,9 +625,11 @@ public sealed class AccountStore
     }
 
     /// <summary>
-    /// Account ids dropped during <see cref="Load"/> because their DPAPI blob would not decrypt
-    /// (corrupt blob, copied profile, SID change). The UI surfaces these as "re-auth required". The
-    /// metadata for these is also removed from disk by <see cref="Load"/>. Cleared on each load.
+    /// Account ids dropped during <see cref="Load"/> because their DPAPI blob was missing or would
+    /// not decrypt (corrupt blob, copied profile, SID change). The UI surfaces these as "re-auth
+    /// required". The metadata for these is also removed from disk by <see cref="Load"/>. Cleared on
+    /// each load. An entry whose blob was merely unreadable (locked) is NOT listed here - it is
+    /// deferred to the next launch instead (see <see cref="_deferredMetadata"/>).
     /// </summary>
     public List<Guid> DroppedAccountIds { get; } = new();
 
@@ -565,7 +648,10 @@ public sealed class AccountStore
         {
             ActiveAccountId = _activeAccountId,
             // Persist only the non-secret fields; SessionKey / AllCookieHeader live in the SecretStore.
+            // Entries deferred at Load (blob unreadable this launch) ride along on every write so
+            // they are still there for the next launch to retry.
             Accounts = _accounts
+                .Concat(_deferredMetadata)
                 .Select(a => a with { SessionKey = string.Empty, AllCookieHeader = null })
                 .ToList(),
         };

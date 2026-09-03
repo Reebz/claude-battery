@@ -721,8 +721,11 @@ public sealed class AuthManager
     /// <summary>
     /// Discover organizations after capture, choose one via the pure <see cref="SelectOrg"/> rule
     /// (never <c>orgs[0]</c>), add or re-auth the account, and close the window ONLY on success.
-    /// Every failure edge (401/403, empty orgs, network/decode error, picker cancel) surfaces a
-    /// visible error and resets the capture guard so a retry can capture again. Mirrors the Mac
+    /// Every failure edge (401/403, empty orgs, network/decode error, picker cancel, a secret-blob
+    /// write failure, any unexpected throw in the commit tail) surfaces a visible error and resets
+    /// the capture guard so a retry can capture again. This task is fire-and-forget from the capture
+    /// funnel with no observer, so an uncaught throw here would not crash - it would leave the
+    /// signing-in overlay up until the inactivity timeout with no message at all. Mirrors the Mac
     /// <c>fetchOrganizationId</c>.
     /// </summary>
     internal async Task DiscoverOrganizationsAsync(CancellationToken token)
@@ -764,106 +767,128 @@ public sealed class AuthManager
             return;
         }
 
-        if (orgs.Count == 0)
+        // Everything from here to the success notification runs inside one guard. This task has no
+        // observer (LastDiscoveryTask is awaited only by tests), so any throw in this tail - a
+        // secret-blob write failure in UpsertAccount, or anything unexpected - would otherwise fault
+        // silently and leave LoginState stuck at OrgDiscovery / Picker with the overlay spinning.
+        try
         {
-            HandleOrgDiscoveryFailure("No Claude organizations were found for this account. A Pro or Max plan may be required.");
-            return;
-        }
-
-        Organization chosenOrg;
-        switch (SelectOrg(orgs, _accountStore.Accounts))
-        {
-            case { Kind: OrgSelectionKind.Single } single:
-                chosenOrg = single.Org!;
-                break;
-
-            case { Kind: OrgSelectionKind.AutoMatched } matched:
-                chosenOrg = matched.Org!;
-                DebugLog($"Re-auth auto-selected org for account {matched.AccountId:N}");
-                break;
-
-            case { Kind: OrgSelectionKind.NeedsChoice } choice:
+            if (orgs.Count == 0)
             {
-                LoginState = LoginState.Picker;
-                // Discovery already ran on the primed new-identity jar; the org picker is a user-paced
-                // wait. Restore the active account's cookies for its duration so its poll is undisturbed
-                // (the chosen account re-primes on commit via UpsertAccount/SwitchTo). On cancel/timeout
-                // the teardown paths restore again; on pick-cancel HandleOrgDiscoveryFailure does.
-                _accountStore.RestoreActiveCookies();
-                Organization? picked;
-                try
-                {
-                    picked = await _orgPicker.PickAsync(choice.Orgs!, token).ConfigureAwait(true);
-                }
-                catch (OperationCanceledException)
-                {
-                    return; // Teardown resumed the picker; do not re-drive state.
-                }
-
-                if (token.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                if (picked is null)
-                {
-                    HandleOrgDiscoveryFailure("Sign-in cancelled.");
-                    return;
-                }
-
-                chosenOrg = picked;
-                break;
+                HandleOrgDiscoveryFailure("No Claude organizations were found for this account. A Pro or Max plan may be required.");
+                return;
             }
 
-            default:
-                HandleOrgDiscoveryFailure("Connection error. Please try again.");
+            Organization chosenOrg;
+            switch (SelectOrg(orgs, _accountStore.Accounts))
+            {
+                case { Kind: OrgSelectionKind.Single } single:
+                    chosenOrg = single.Org!;
+                    break;
+
+                case { Kind: OrgSelectionKind.AutoMatched } matched:
+                    chosenOrg = matched.Org!;
+                    DebugLog($"Re-auth auto-selected org for account {matched.AccountId:N}");
+                    break;
+
+                case { Kind: OrgSelectionKind.NeedsChoice } choice:
+                {
+                    LoginState = LoginState.Picker;
+                    // Discovery already ran on the primed new-identity jar; the org picker is a user-paced
+                    // wait. Restore the active account's cookies for its duration so its poll is undisturbed
+                    // (the chosen account re-primes on commit via UpsertAccount/SwitchTo). On cancel/timeout
+                    // the teardown paths restore again; on pick-cancel HandleOrgDiscoveryFailure does.
+                    _accountStore.RestoreActiveCookies();
+                    Organization? picked;
+                    try
+                    {
+                        picked = await _orgPicker.PickAsync(choice.Orgs!, token).ConfigureAwait(true);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return; // Teardown resumed the picker; do not re-drive state.
+                    }
+
+                    if (token.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    if (picked is null)
+                    {
+                        HandleOrgDiscoveryFailure("Sign-in cancelled.");
+                        return;
+                    }
+
+                    chosenOrg = picked;
+                    break;
+                }
+
+                default:
+                    HandleOrgDiscoveryFailure("Connection error. Please try again.");
+                    return;
+            }
+
+            if (token.IsCancellationRequested)
+            {
                 return;
-        }
+            }
 
-        if (token.IsCancellationRequested)
+            var email = ExtractEmail(orgs) ?? $"Account {_accountStore.Accounts.Count + 1}";
+
+            var account = new Account
+            {
+                Email = email,
+                SessionKey = sessionKey,
+                OrganizationId = chosenOrg.Uuid,
+                AllCookieHeader = _pendingCookieHeader,
+                // Persist the session UA so a cold-start restore seeds the poll transport with the same
+                // UA the login captured (U1/U2). Null until the first NavigationCompleted captures it.
+                UserAgent = CapturedUserAgent,
+            };
+
+            // UpsertAccount returns false ONLY when a genuinely new account would exceed the 5-account
+            // limit; a duplicate org id updates the existing account in place (re-auth, no lockout).
+            // A secret-blob write failure throws AccountPersistenceException (caught below) with
+            // nothing changed in the store.
+            if (!_accountStore.UpsertAccount(account))
+            {
+                HandleOrgDiscoveryFailure("Account limit reached.");
+                return;
+            }
+
+            // Activate whichever account now owns this org (new id, or the pre-existing one on re-auth),
+            // but ONLY when it is not already active. UpsertAccount already activates+bumps the active
+            // account on an in-place re-auth, and auto-activates the very first account; calling SwitchTo
+            // again would double-bump the request generation and superfluously re-activate (issue #18).
+            // Mac parity: fetchOrganizationId switches to the logged-in account (incl. a re-auth of a
+            // non-active one); the only change here is dropping the redundant second bump.
+            var owning = _accountStore.Accounts.FirstOrDefault(a => a.OrganizationId == chosenOrg.Uuid);
+            if (owning is not null && owning.Id != _accountStore.ActiveAccountId)
+            {
+                _accountStore.SwitchTo(owning.Id);
+            }
+
+            // Success: clear pending state, close the window, notify.
+            _pendingSessionKey = null;
+            _pendingCookieHeader = null;
+            LoginState = LoginState.Active;
+            StopLoginWindow();
+            OnAuthSuccess?.Invoke();
+        }
+        catch (OperationCanceledException)
         {
+            // Teardown owns state after a cancel; never re-drive it from here.
             return;
         }
-
-        var email = ExtractEmail(orgs) ?? $"Account {_accountStore.Accounts.Count + 1}";
-
-        var account = new Account
+        catch (AccountPersistenceException)
         {
-            Email = email,
-            SessionKey = sessionKey,
-            OrganizationId = chosenOrg.Uuid,
-            AllCookieHeader = _pendingCookieHeader,
-            // Persist the session UA so a cold-start restore seeds the poll transport with the same
-            // UA the login captured (U1/U2). Null until the first NavigationCompleted captures it.
-            UserAgent = CapturedUserAgent,
-        };
-
-        // UpsertAccount returns false ONLY when a genuinely new account would exceed the 5-account
-        // limit; a duplicate org id updates the existing account in place (re-auth, no lockout).
-        if (!_accountStore.UpsertAccount(account))
-        {
-            HandleOrgDiscoveryFailure("Account limit reached.");
-            return;
+            HandleOrgDiscoveryFailure("Could not save sign-in data. Check that your user folder is writable, then try again.");
         }
-
-        // Activate whichever account now owns this org (new id, or the pre-existing one on re-auth),
-        // but ONLY when it is not already active. UpsertAccount already activates+bumps the active
-        // account on an in-place re-auth, and auto-activates the very first account; calling SwitchTo
-        // again would double-bump the request generation and superfluously re-activate (issue #18).
-        // Mac parity: fetchOrganizationId switches to the logged-in account (incl. a re-auth of a
-        // non-active one); the only change here is dropping the redundant second bump.
-        var owning = _accountStore.Accounts.FirstOrDefault(a => a.OrganizationId == chosenOrg.Uuid);
-        if (owning is not null && owning.Id != _accountStore.ActiveAccountId)
+        catch (Exception)
         {
-            _accountStore.SwitchTo(owning.Id);
+            HandleOrgDiscoveryFailure("Sign-in could not be completed. Please try again.");
         }
-
-        // Success: clear pending state, close the window, notify.
-        _pendingSessionKey = null;
-        _pendingCookieHeader = null;
-        LoginState = LoginState.Active;
-        StopLoginWindow();
-        OnAuthSuccess?.Invoke();
     }
 
     /// <summary>

@@ -136,6 +136,13 @@ public sealed class ManualSignIn
     /// add. (The Mac had to snapshot-and-restore because its <c>activateCookies</c> ran before
     /// discovery; here discovery uses the already-primed active jar and only a successful upsert
     /// re-primes, so there is nothing to restore.)
+    ///
+    /// <b>Threading.</b> Must be awaited from the UI thread. The org fetch resumes on the caller's
+    /// synchronization context (<c>ConfigureAwait(true)</c>, as <see cref="AuthManager"/> does) so
+    /// the commit - <see cref="AccountStore.UpsertAccount"/> / <see cref="AccountStore.SwitchTo"/>,
+    /// which mutate the store's live account list - runs on the same thread the flyout enumerates
+    /// that list on. Committing on a thread-pool thread raced a poll tick's enumeration
+    /// ("Collection was modified") with no handler to catch it.
     /// </summary>
     public async Task<ManualSignInResult> SignInAsync(string pasted, CancellationToken cancellationToken = default)
     {
@@ -157,7 +164,9 @@ public sealed class ManualSignIn
         IReadOnlyList<Organization> orgs;
         try
         {
-            orgs = await _api.GetOrganizationsAsync(cancellationToken).ConfigureAwait(false);
+            // ConfigureAwait(true): AccountStore is UI-thread-only, and everything after this await
+            // commits into it. See the threading note on this method.
+            orgs = await _api.GetOrganizationsAsync(cancellationToken).ConfigureAwait(true);
         }
         catch (ClaudeAuthException)
         {
@@ -224,7 +233,8 @@ public sealed class ManualSignIn
     {
         // UpsertAccount adds a new account OR updates an existing org in place (the corrected Mac
         // re-auth path); it primes the jar + bumps the generation when the account becomes/stays
-        // active. A false return means a genuinely new account would exceed the 5-account cap.
+        // active. A false return means a genuinely new account would exceed the 5-account cap; an
+        // AccountPersistenceException means the secret blob could not be written (nothing changed).
         var account = new Account
         {
             Email = email,
@@ -233,21 +243,36 @@ public sealed class ManualSignIn
             AllCookieHeader = cookieHeader,
         };
 
-        if (!_accountStore.UpsertAccount(account))
+        Account resolved;
+        try
         {
-            return ManualSignInResult.AccountLimitReached;
+            if (!_accountStore.UpsertAccount(account))
+            {
+                return ManualSignInResult.AccountLimitReached;
+            }
+
+            // Make the just-upserted account active so its session is the one polled, but only when it is
+            // not already active. UpsertAccount already activates+bumps the first-ever account and an
+            // in-place re-auth of the active one; an unconditional SwitchTo would double-bump the request
+            // generation (the issue #18 pattern, applied here for parity). SwitchTo still covers the
+            // add-a-non-first-account and pick-a-different-org cases.
+            resolved = _accountStore.Accounts.First(a => a.OrganizationId == org.Uuid);
+            if (resolved.Id != _accountStore.ActiveAccountId)
+            {
+                _accountStore.SwitchTo(resolved.Id);
+            }
+        }
+        catch (AccountPersistenceException)
+        {
+            // The store changed nothing, but the shared jar is still primed with the pasted
+            // credential from discovery: put the healthy active account's cookies back so it keeps
+            // polling, then report a distinct outcome (not "Connection error") so Settings can say
+            // what actually went wrong.
+            _accountStore.RestoreActiveCookies();
+            DebugLog("Manual sign-in could not save the account");
+            return ManualSignInResult.SaveFailed;
         }
 
-        // Make the just-upserted account active so its session is the one polled, but only when it is
-        // not already active. UpsertAccount already activates+bumps the first-ever account and an
-        // in-place re-auth of the active one; an unconditional SwitchTo would double-bump the request
-        // generation (the issue #18 pattern, applied here for parity). SwitchTo still covers the
-        // add-a-non-first-account and pick-a-different-org cases.
-        var resolved = _accountStore.Accounts.First(a => a.OrganizationId == org.Uuid);
-        if (resolved.Id != _accountStore.ActiveAccountId)
-        {
-            _accountStore.SwitchTo(resolved.Id);
-        }
         DebugLog("Manual sign-in added/reactivated an account");
         return ManualSignInResult.Success(resolved.DisplayName);
     }
@@ -285,6 +310,12 @@ public sealed record ManualSignInResult
         NoOrganizations,
         AccountLimitReached,
         ConnectionError,
+
+        /// The credential was valid and the org resolved, but the account's sign-in data could not
+        /// be written to disk (<see cref="AccountPersistenceException"/>). Nothing was added; the
+        /// prior active account's cookies are restored. Windows-only (the Mac Keychain path has no
+        /// equivalent edge).
+        SaveFailed,
     }
 
     public ResultKind Kind { get; private init; }
@@ -316,4 +347,6 @@ public sealed record ManualSignInResult
     public static readonly ManualSignInResult AccountLimitReached = new() { Kind = ResultKind.AccountLimitReached };
 
     public static readonly ManualSignInResult ConnectionError = new() { Kind = ResultKind.ConnectionError };
+
+    public static readonly ManualSignInResult SaveFailed = new() { Kind = ResultKind.SaveFailed };
 }
