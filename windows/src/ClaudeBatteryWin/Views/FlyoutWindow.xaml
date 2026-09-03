@@ -24,29 +24,17 @@
 
     <Window.Resources>
         <ResourceDictionary>
-            <!-- Directional fallback theme tokens (dark), mirroring the RuntimeMissingWindow
-                 precedent: the merged light/dark token dictionaries (swapped by ApplyTheme) override
-                 these keys when present, so the window is self-consistent before a theme dictionary
-                 is merged and re-themes live afterward. Values map the plan's light/dark token table
-                 (the dark column = the Mac Color(white:) values). -->
-            <SolidColorBrush x:Key="CardBackgroundBrush" Color="#26FFFFFF" />   <!-- white 0.15 -->
-            <SolidColorBrush x:Key="BarTrackBrush" Color="#40FFFFFF" />          <!-- white 0.25 -->
-            <SolidColorBrush x:Key="LabelMutedBrush" Color="#99FFFFFF" />        <!-- white 0.6 -->
-            <SolidColorBrush x:Key="LabelDetailBrush" Color="#B3FFFFFF" />       <!-- white 0.7 -->
-            <SolidColorBrush x:Key="LabelSubtleBrush" Color="#80FFFFFF" />       <!-- white 0.5 -->
-            <SolidColorBrush x:Key="LabelFaintBrush" Color="#73FFFFFF" />        <!-- white 0.45 -->
-            <SolidColorBrush x:Key="ArcTickBrush" Color="#1FFFFFFF" />           <!-- white 0.12 -->
-            <SolidColorBrush x:Key="DividerBrush" Color="#4DFFFFFF" />           <!-- white 0.3 a0.3 -->
-            <SolidColorBrush x:Key="ForegroundBrush" Color="#FFFFFFFF" />
-            <SolidColorBrush x:Key="PopoverSurfaceBrush" Color="#FF1E1E1E" />
-            <SolidColorBrush x:Key="EditFieldBorderBrush" Color="#99007ACC" />   <!-- Fluent accent -->
-
-            <!-- Semantic colors are theme-invariant (Mac parity): they are the same in light/dark. -->
-            <SolidColorBrush x:Key="UsageRedBrush" Color="#FFE74C3C" />
-            <SolidColorBrush x:Key="UsageOrangeBrush" Color="#FFF39C12" />
-            <SolidColorBrush x:Key="UsageGreenBrush" Color="#FF2ECC71" />
-            <SolidColorBrush x:Key="SpendCyanBrush" Color="#FF22C3E6" />
-            <SolidColorBrush x:Key="AccentGreenBrush" Color="#FF2ECC71" />
+            <!-- Theme tokens live ONLY in the merged dictionary, never in this base dictionary. WPF
+                 resolves a key from the base dictionary first and consults MergedDictionaries only
+                 when the base has no entry, so a fallback token defined here would shadow the merged
+                 light/dark dictionary and make ApplyTheme a no-op. The dark dictionary is merged as
+                 MergedDictionaries[0] so the window is self-consistent before the first ApplyTheme
+                 call, and ApplyTheme replaces that same slot to re-theme live. Every theme key below
+                 is consumed via DynamicResource; converters, styles and templates (StaticResource)
+                 stay in this base dictionary so nothing breaks at parse time. -->
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="/Themes/DarkTokens.xaml" />
+            </ResourceDictionary.MergedDictionaries>
 
             <!-- Converters. Defined inline because the inline-controls approach defers a Controls/
                  library until a second consumer exists (U10 approach). -->
@@ -54,7 +42,7 @@
             <views:UsageColorToBrushConverter x:Key="UsageColorToBrush" />
             <views:SpendColorToBrushConverter x:Key="SpendColorToBrush" />
             <views:BoolToVisibilityConverter x:Key="BoolToVisibility" />
-            <views:PercentToWidthConverter x:Key="PercentToWidth" />
+            <views:PercentOfWidthConverter x:Key="PercentOfWidth" />
             <views:GaugeArcConverter x:Key="GaugeArc" />
             <views:GaugeTicksConverter x:Key="GaugeTicks" />
 
@@ -68,7 +56,12 @@
             <!-- Gauge card: the 270-degree arc (track + trimmed fill) with the centered percent
                  label, then the pace bar beneath. Geometry mirrors the Mac ArcGauge (start 135deg,
                  sweep 270deg). The arc path data is produced by GaugeArcConverter from the remaining
-                 percent so the SwiftUI .trim(...) is reproduced without code-behind drawing. -->
+                 percent so the SwiftUI .trim(...) is reproduced without code-behind drawing.
+                 The dial host Grid is a fixed 58x58 box centred in the card: the Paths use the WPF
+                 default Stretch=None and draw at the converter's absolute 58-box coordinates, so the
+                 host must be exactly that box or the ring slides off the label. Do not put
+                 HorizontalAlignment on the Paths themselves (each would centre on its own bounds,
+                 and the fill arc's bounds shrink with the percent). -->
             <DataTemplate x:Key="GaugeCardTemplate" DataType="{x:Type vm:GaugeCard}">
                 <Border Style="{StaticResource CardBorderStyle}"
                         AutomationProperties.Name="{Binding Title}">
@@ -77,7 +70,7 @@
                                    FontSize="13"
                                    FontWeight="SemiBold"
                                    Foreground="{DynamicResource ForegroundBrush}" />
-                        <Grid Height="58" Margin="0,12,0,0">
+                        <Grid Width="58" Height="58" Margin="0,12,0,0" HorizontalAlignment="Center">
                             <!-- Track arc (full sweep, muted). -->
                             <Path Stroke="{DynamicResource BarTrackBrush}"
                                   StrokeThickness="5"
@@ -96,9 +89,12 @@
                                   StrokeStartLineCap="Round"
                                   StrokeEndLineCap="Round"
                                   Data="{Binding Converter={StaticResource GaugeArc}, ConverterParameter=fill}" />
+                            <!-- Label centre sits at y=31 (Mac: ZStack centre + offset 2), inside
+                                 the ring whose centre is at y=35. -->
                             <TextBlock Text="{Binding PercentLabel}"
                                        HorizontalAlignment="Center"
                                        VerticalAlignment="Center"
+                                       Margin="0,4,0,0"
                                        FontSize="15"
                                        FontWeight="Bold"
                                        Foreground="{DynamicResource ForegroundBrush}" />
@@ -110,12 +106,21 @@
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
+                            <!-- The fill width is a fraction of the track's REAL ActualWidth (a
+                                 MultiBinding), never a hard-coded track width: the star column
+                                 narrows with the percent label, so a literal overstates the bar. -->
                             <Grid Grid.Column="0" Height="6" VerticalAlignment="Center">
-                                <Border CornerRadius="3" Background="{DynamicResource BarTrackBrush}" />
+                                <Border x:Name="PaceTrack" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" />
                                 <Border CornerRadius="3"
                                         HorizontalAlignment="Left"
-                                        Background="{Binding Pace.Color, Converter={StaticResource UsageColorToBrush}}"
-                                        Width="{Binding Pace.Percent, Converter={StaticResource PercentToWidth}, ConverterParameter=110}" />
+                                        Background="{Binding Pace.Color, Converter={StaticResource UsageColorToBrush}}">
+                                    <Border.Width>
+                                        <MultiBinding Converter="{StaticResource PercentOfWidth}">
+                                            <Binding Path="Pace.Percent" />
+                                            <Binding ElementName="PaceTrack" Path="ActualWidth" />
+                                        </MultiBinding>
+                                    </Border.Width>
+                                </Border>
                             </Grid>
                             <TextBlock Grid.Column="1"
                                        Text="{Binding Pace.PercentLabel}"
@@ -176,11 +181,17 @@
                         <TextBlock Grid.Column="1" Text="{Binding PercentLabel}" FontSize="10" FontWeight="Medium" Foreground="{DynamicResource ForegroundBrush}" />
                     </Grid>
                     <Grid Height="4" Margin="0,2,0,0">
-                        <Border CornerRadius="2" Background="{DynamicResource BarTrackBrush}" />
+                        <Border x:Name="ModelTrack" CornerRadius="2" Background="{DynamicResource BarTrackBrush}" />
                         <Border CornerRadius="2"
                                 HorizontalAlignment="Left"
-                                Background="{Binding Color, Converter={StaticResource UsageColorToBrush}}"
-                                Width="{Binding RemainingPercent, Converter={StaticResource PercentToWidth}, ConverterParameter=120}" />
+                                Background="{Binding Color, Converter={StaticResource UsageColorToBrush}}">
+                            <Border.Width>
+                                <MultiBinding Converter="{StaticResource PercentOfWidth}">
+                                    <Binding Path="RemainingPercent" />
+                                    <Binding ElementName="ModelTrack" Path="ActualWidth" />
+                                </MultiBinding>
+                            </Border.Width>
+                        </Border>
                     </Grid>
                 </StackPanel>
             </DataTemplate>
@@ -372,11 +383,17 @@
                         </Grid>
                         <!-- Spend bar (empty track when disabled) -->
                         <Grid Height="6" Margin="0,6,0,0">
-                            <Border CornerRadius="3" Background="{DynamicResource BarTrackBrush}" />
+                            <Border x:Name="SpendTrack" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" />
                             <Border CornerRadius="3"
                                     HorizontalAlignment="Left"
-                                    Background="{Binding Credits.BarColor, Converter={StaticResource SpendColorToBrush}}"
-                                    Width="{Binding Credits.BarPercent, Converter={StaticResource PercentToWidth}, ConverterParameter=270}" />
+                                    Background="{Binding Credits.BarColor, Converter={StaticResource SpendColorToBrush}}">
+                                <Border.Width>
+                                    <MultiBinding Converter="{StaticResource PercentOfWidth}">
+                                        <Binding Path="Credits.BarPercent" />
+                                        <Binding ElementName="SpendTrack" Path="ActualWidth" />
+                                    </MultiBinding>
+                                </Border.Width>
+                            </Border>
                         </Grid>
                         <!-- Enabled detail lines -->
                         <StackPanel Margin="0,2,0,0"
@@ -514,10 +531,31 @@
                         Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=Error}">
                 <TextBlock Text="⚠" FontSize="32" HorizontalAlignment="Center" Foreground="{DynamicResource LabelMutedBrush}" />
                 <TextBlock Text="Unable to reach Claude" Margin="0,8,0,0" HorizontalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}" />
-                <TextBlock Text="The app may need an update."
+                <TextBlock Text="Check your connection, or sign in again."
                            Margin="0,2,0,0"
                            FontSize="11"
                            TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+                <!-- The error card must never be a dead end: a persistent Cloudflare block on the
+                     poll transport is only cleared by a fresh sign-in, so offer it here. Click
+                     handlers are attached by App.WireFlyoutInteractions (HookButton by x:Name). -->
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,12,0,0">
+                    <Button x:Name="ErrorSignInButton"
+                            Content="Sign In Again"
+                            Padding="16,6"
+                            AutomationProperties.Name="Sign in again" />
+                    <Button x:Name="ErrorRetryButton"
+                            Content="Retry Now"
+                            Margin="8,0,0,0"
+                            Padding="16,6"
+                            AutomationProperties.Name="Retry fetching usage now" />
+                </StackPanel>
+                <TextBlock Text="Right-click the tray icon for Settings."
+                           Margin="0,10,0,0"
+                           FontSize="9"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
                            Foreground="{DynamicResource LabelMutedBrush}" />
             </StackPanel>
 
@@ -530,6 +568,12 @@
                 <TextBlock Text="Fetching usage..."
                            Margin="0,12,0,0"
                            HorizontalAlignment="Center"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+                <TextBlock Text="Right-click the tray icon for Settings."
+                           Margin="0,10,0,0"
+                           FontSize="9"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
                            Foreground="{DynamicResource LabelMutedBrush}" />
             </StackPanel>
         </Grid>

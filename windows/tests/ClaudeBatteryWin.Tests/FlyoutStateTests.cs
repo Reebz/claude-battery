@@ -1,3 +1,4 @@
+using System.IO;
 using ClaudeBatteryWin.Models;
 using ClaudeBatteryWin.ViewModels;
 using ClaudeBatteryWin.Views;
@@ -631,6 +632,156 @@ public class FlyoutStateTests
         Assert.True(p.Y >= workArea.Top - tol, $"top {p.Y} < work-area top {workArea.Top}");
         Assert.True(p.X + size.Width <= workArea.Right + tol, $"right {p.X + size.Width} > work-area right {workArea.Right}");
         Assert.True(p.Y + size.Height <= workArea.Bottom + tol, $"bottom {p.Y + size.Height} > work-area bottom {workArea.Bottom}");
+    }
+
+    // MARK: - DIP / device-pixel boundary (system-DPI-aware process, scaling above 100%)
+
+    // A 1920x1080 primary at a bottom taskbar: the physical work area, the tray icon's physical rect
+    // inside the taskbar, and the flyout's size in DIPs (WPF ActualWidth/ActualHeight).
+    private static readonly PlacementRect DpiWorkArea = new(0, 0, 1920, 1000);
+    private static readonly PlacementRect DpiTrayRect = new(1784, 1045, 1824, 1080);
+    private static readonly PlacementPoint DpiCursor = new(1800, 1060);
+    private static readonly PlacementSize DpiSizeDips = new(300, 420);
+
+    [Theory]
+    [InlineData(1.0)]
+    [InlineData(1.25)]
+    [InlineData(1.5)]
+    [InlineData(2.0)]
+    public void Placement_AtAnyScale_ConvertedBackToDevice_LiesInsidePhysicalWorkArea(double scale)
+    {
+        // The window converts its DIP size to device pixels, computes in device pixels, and converts
+        // the result to DIPs for Left/Top. Scaling that DIP result back by the same factor must land
+        // the physical window inside the physical work area; the old code fed DIPs into device math
+        // and assigned device pixels to Left/Top, which WPF scaled AGAIN (off-screen above 100%).
+        var deviceSize = FlyoutPlacement.ToDevice(DpiSizeDips, scale, scale);
+        var placedDevice = FlyoutPlacement.Compute(DpiTrayRect, DpiCursor, DpiWorkArea, deviceSize);
+        var dip = FlyoutPlacement.ToDips(placedDevice, scale, scale);
+
+        var backToDevice = new PlacementPoint(dip.X * scale, dip.Y * scale);
+        AssertWithinWorkArea(backToDevice, deviceSize, DpiWorkArea);
+    }
+
+    [Fact]
+    public void Placement_1920x1080_At125Percent_LeftIsUnitCorrect_NotTheMixedUnitValue()
+    {
+        // Explicit numbers so a regression to mixed units fails loudly. Device: the flyout is 375 px
+        // wide and right-aligns to the tray's right edge 1824 -> device Left 1449 -> DIP Left 1159.2.
+        // The mixed-unit code produced 1524 (1824 - 300 DIP width, then assigned as DIPs and scaled to
+        // 1905 px: a 15 px sliver at the screen edge).
+        const double scale = 1.25;
+        var placedDevice = FlyoutPlacement.Compute(
+            DpiTrayRect, DpiCursor, DpiWorkArea, FlyoutPlacement.ToDevice(DpiSizeDips, scale, scale));
+        var dip = FlyoutPlacement.ToDips(placedDevice, scale, scale);
+
+        Assert.Equal((1824 - 300 * scale) / scale, dip.X, 3);
+        Assert.Equal(1159.2, dip.X, 1);
+        Assert.NotEqual(1524.0, dip.X, 0);
+        // Sanity on the helpers themselves.
+        Assert.Equal(new PlacementSize(375, 525), FlyoutPlacement.ToDevice(DpiSizeDips, scale, scale));
+        Assert.Equal(new PlacementPoint(100, 200), FlyoutPlacement.ToDips(new PlacementPoint(125, 250), scale, scale));
+    }
+
+    [Theory]
+    [InlineData(70)]
+    [InlineData(450)]
+    public void Placement_BottomEdgeStaysAboveTray_ForAnyHeight(double height)
+    {
+        // The invariant OnRenderSizeChanged -> Reposition relies on: re-running Compute with the new
+        // height keeps the flyout's BOTTOM edge 8 px above the tray rect, so a SizeToContent regrowth
+        // (Loading ~70 -> Authenticated ~450) grows upward instead of down over the taskbar. The work
+        // area bottom is the taskbar top here (a real layout), so nothing clamps.
+        var workArea = new PlacementRect(0, 0, 1920, 1040);
+        var size = new PlacementSize(300, height);
+
+        var p = FlyoutPlacement.Compute(DpiTrayRect, DpiCursor, workArea, size);
+
+        Assert.Equal(DpiTrayRect.Top - 8, p.Y + size.Height, 3);
+        AssertWithinWorkArea(p, size, workArea);
+    }
+
+    // MARK: - Tray-click toggle decision (pure)
+
+    [Theory]
+    [InlineData(null, 1000L, false)]   // never hidden by a deactivation -> plain show
+    [InlineData(900L, 1000L, true)]    // hidden 100 ms ago -> the click is the toggle-close
+    [InlineData(0L, 2000L, false)]     // hidden 2 s ago -> a fresh open
+    [InlineData(1500L, 1000L, false)]  // negative delta (clock oddity) -> never a toggle
+    public void ShouldTreatAsToggleClose_MatchesTheWindow(long? hiddenAtMs, long nowMs, bool expected)
+    {
+        Assert.Equal(expected, FlyoutWindow.ShouldTreatAsToggleClose(hiddenAtMs, nowMs));
+    }
+
+    [Fact]
+    public void ShouldTreatAsToggleClose_WindowEdgeIsExclusive()
+    {
+        Assert.True(FlyoutWindow.ShouldTreatAsToggleClose(0, FlyoutWindow.ToggleCloseWindowMs - 1));
+        Assert.False(FlyoutWindow.ShouldTreatAsToggleClose(0, FlyoutWindow.ToggleCloseWindowMs));
+    }
+
+    // MARK: - Source-scan contracts for the flyout XAML / code-behind (no WPF host needed)
+
+    [Fact]
+    public void FlyoutXaml_ErrorPanel_HasSignInAndRetryButtons()
+    {
+        // The error card must not be a dead end: App.WireFlyoutInteractions hooks these by x:Name.
+        var xaml = File.ReadAllText(Path.Combine(FindSourceDir(), "Views", "FlyoutWindow.xaml"));
+        Assert.Contains("x:Name=\"ErrorSignInButton\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"ErrorRetryButton\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FlyoutXaml_BarFills_DoNotUseHardCodedTrackWidths()
+    {
+        // Every fill is a fraction of its track's ActualWidth (PercentOfWidth MultiBinding); a literal
+        // track width drifts from the layout and overstates the bar.
+        var xaml = File.ReadAllText(Path.Combine(FindSourceDir(), "Views", "FlyoutWindow.xaml"));
+        Assert.DoesNotContain("ConverterParameter=110", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ConverterParameter=120", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ConverterParameter=270", xaml, StringComparison.Ordinal);
+        Assert.Contains("ElementName=\"PaceTrack\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("ElementName=\"ModelTrack\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("ElementName=\"SpendTrack\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FlyoutCodeBehind_DoesNotHardCodeTheTrayIconGuid()
+    {
+        // The tray GUID is path-bound by Windows; the flyout must consume the live icon Id assigned
+        // by the composition root, never a literal that can diverge from the created icon.
+        var cs = File.ReadAllText(Path.Combine(FindSourceDir(), "Views", "FlyoutWindow.xaml.cs"));
+        Assert.DoesNotContain("7E2C1B44", cs, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void FlyoutXaml_DefinesNoThemeTokenInItsBaseDictionary()
+    {
+        // A theme token in the window's own dictionary shadows the merged theme dictionary and makes
+        // ApplyTheme a no-op (base entries win over merged ones). Tokens live only in Themes/*.xaml.
+        var xaml = File.ReadAllText(Path.Combine(FindSourceDir(), "Views", "FlyoutWindow.xaml"));
+        Assert.DoesNotContain("<SolidColorBrush x:Key=", xaml, StringComparison.Ordinal);
+        Assert.Contains("Source=\"/Themes/DarkTokens.xaml\"", xaml, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Locate <c>src/ClaudeBatteryWin</c> by walking up from the test output directory (the
+    /// NoSecretsGateTests pattern). Works on the CI runner and a dev box.
+    /// </summary>
+    private static string FindSourceDir()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            var candidate = Path.Combine(dir.FullName, "src", "ClaudeBatteryWin");
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+            dir = dir.Parent;
+        }
+
+        throw new DirectoryNotFoundException(
+            "Could not locate src/ClaudeBatteryWin from " + AppContext.BaseDirectory);
     }
 
     // MARK: - Account-row switch command (U15 / issue #15)

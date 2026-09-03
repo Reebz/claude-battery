@@ -19,8 +19,17 @@ namespace ClaudeBatteryWin.Views;
 /// <para>
 /// <b>Why a window and not the library TrayPopup.</b> The plan pins this: a borderless
 /// <c>WindowStyle=None</c> / <c>AllowsTransparency=true</c> / <c>ShowInTaskbar=false</c> /
-/// <c>Topmost=true</c> window gives full control of placement (multi-monitor + PerMonitorV2 DPI) and
+/// <c>Topmost=true</c> window gives full control of placement (multi-monitor + DPI scaling) and
 /// of the signing-in dismissal suppression, which the library popup does not expose.
+/// </para>
+///
+/// <para>
+/// <b>Units.</b> The process is system-DPI-aware (WPF's default; there is no app manifest and this
+/// change must not add one), so every Win32 coordinate (tray rect, cursor, monitor work area) is in
+/// device pixels of the one session DPI, while WPF's <c>ActualWidth</c>/<c>ActualHeight</c> and
+/// <c>Left</c>/<c>Top</c> are device-independent units (DIPs). Placement runs entirely in device
+/// pixels and converts at the boundary with <see cref="FlyoutPlacement.ToDevice"/> /
+/// <see cref="FlyoutPlacement.ToDips"/>, using the window's own <c>TransformToDevice</c> scale.
 /// </para>
 ///
 /// <para>
@@ -31,9 +40,23 @@ namespace ClaudeBatteryWin.Views;
 /// </summary>
 public partial class FlyoutWindow : Window
 {
-    /// The tray icon GUID registered in App.xaml. Shell_NotifyIconGetRect keys on this exact value;
-    /// it MUST match the TaskbarIcon.Id in App.xaml or the rect lookup returns the overflow fallback.
-    private static readonly Guid TrayIconGuid = new("7E2C1B44-9F3A-4D21-B8E6-0C5A1F2D3E40");
+    /// <summary>
+    /// The live tray icon GUID, assigned by the composition root AFTER the tray icon is created (the
+    /// library derives its default Id from the process path, and a creation retry may replace it, so
+    /// the value must be read from the created icon, never hard-coded). Shell_NotifyIconGetRect keys
+    /// on this exact value. While it is still <see cref="Guid.Empty"/> (not yet assigned) the rect
+    /// lookup reports "no rect" and placement falls back to the cursor anchor.
+    /// </summary>
+    internal static Guid TrayIconGuid { get; set; } = Guid.Empty;
+
+    /// <summary>
+    /// Monotonic stamp (<see cref="Environment.TickCount64"/>) of the last Hide() caused by a loss of
+    /// activation; null when the last hide was not a deactivation or has been consumed. Used by the
+    /// tray-click toggle: a click on the tray icon deactivates (and hides) the open flyout BEFORE the
+    /// icon's mouse-up arrives, so the show request that follows within a short window is really the
+    /// second half of a toggle-close and must be swallowed.
+    /// </summary>
+    private long? _hiddenByDeactivationAtMs;
 
     private FlyoutViewModel? ViewModel => DataContext as FlyoutViewModel;
 
@@ -49,6 +72,8 @@ public partial class FlyoutWindow : Window
     /// without a close/reopen (the DynamicResource bindings pick up the new brushes). The integration
     /// layer calls this from <c>ThemeWatcher.BucketChanged</c>. Replacing the dictionary in
     /// <see cref="FrameworkElement.Resources"/> is what makes every DynamicResource consumer re-resolve.
+    /// This only works because the window's base dictionary defines NO theme token itself: WPF reads
+    /// the base dictionary before the merged ones, so a base-level token would shadow the swap.
     /// </summary>
     public void ApplyTheme(ThemeBucket bucket)
     {
@@ -60,9 +85,9 @@ public partial class FlyoutWindow : Window
             Source = new Uri($"pack://application:,,,/{source}", UriKind.Absolute),
         };
 
-        // Replace the single theme dictionary (kept first by convention) rather than appending, so
-        // repeated flips do not stack dictionaries. The structural (non-theme) dictionary, if any,
-        // stays.
+        // Replace the single theme dictionary (slot 0, seeded with DarkTokens.xaml by the XAML) rather
+        // than appending, so repeated flips do not stack dictionaries. The structural (non-theme)
+        // dictionary, if any, stays.
         if (Resources.MergedDictionaries.Count > 0)
         {
             Resources.MergedDictionaries[0] = dict;
@@ -86,7 +111,48 @@ public partial class FlyoutWindow : Window
         {
             return;
         }
+        // Stamp ONLY this hide (not Escape, not the suppressed early return) so a tray click that
+        // just dismissed the flyout can be recognized as a toggle-close by ShouldTreatAsToggleClose.
+        _hiddenByDeactivationAtMs = Environment.TickCount64;
         Hide();
+    }
+
+    // MARK: - Tray-click toggle
+
+    /// <summary>
+    /// The default window after a deactivation-hide during which a tray click counts as the close
+    /// half of a toggle (the EarTrumpet pattern, which uses 300 ms). Known limitation: a press held
+    /// longer than this before release still reopens the panel, which is harmless.
+    /// </summary>
+    internal const long ToggleCloseWindowMs = 400;
+
+    /// <summary>
+    /// Pure decision: was the flyout hidden by a deactivation so recently that a show request now is
+    /// really the second half of a toggle-close? Monotonic milliseconds (<see cref="Environment.TickCount64"/>)
+    /// so a wall-clock step cannot swallow or admit a click. A null stamp or a negative delta is never
+    /// a toggle.
+    /// </summary>
+    internal static bool ShouldTreatAsToggleClose(long? hiddenAtMs, long nowMs, long windowMs = ToggleCloseWindowMs)
+    {
+        if (hiddenAtMs is not { } hidden)
+        {
+            return false;
+        }
+        var delta = nowMs - hidden;
+        return delta >= 0 && delta < windowMs;
+    }
+
+    /// <summary>
+    /// Read-and-clear the deactivation-hide stamp: true when the flyout was hidden by a deactivation
+    /// within the toggle window of <paramref name="nowMs"/>. The composition root calls this on the
+    /// tray-click path (only; the second-instance signal keeps the unguarded show) and skips the show
+    /// when it returns true. Clearing on every call means a stale stamp never blocks a later click.
+    /// </summary>
+    internal bool ConsumeRecentDeactivationHide(long nowMs)
+    {
+        var result = ShouldTreatAsToggleClose(_hiddenByDeactivationAtMs, nowMs);
+        _hiddenByDeactivationAtMs = null;
+        return result;
     }
 
     /// <summary>Escape closes the flyout (a standard popover affordance). Mac/Windows parity.</summary>
@@ -104,44 +170,94 @@ public partial class FlyoutWindow : Window
 
     /// <summary>
     /// Show the flyout anchored to the tray icon. Resolves the tray rect via
-    /// <c>Shell_NotifyIconGetRect</c> (keyed on the registered GUID); when that fails (the icon is in
-    /// the overflow flyout, so it has no on-screen rect), falls back to cursor anchoring. Either way
-    /// the result is clamped to the work area of the monitor the anchor is on, honoring PerMonitorV2
-    /// DPI. The actual arithmetic lives in <see cref="FlyoutPlacement.Compute"/> so it is testable.
+    /// <c>Shell_NotifyIconGetRect</c> (keyed on the live <see cref="TrayIconGuid"/>); when that fails
+    /// (the icon is in the overflow flyout, so it has no on-screen rect), falls back to cursor
+    /// anchoring. Either way the result is clamped to the work area of the monitor the anchor is on,
+    /// with the DIP/device-pixel conversion done at the boundary (the process is system-DPI-aware).
+    /// The actual arithmetic lives in <see cref="FlyoutPlacement.Compute"/> so it is testable.
     /// </summary>
     public void ShowAtTray()
     {
+        // A successful show consumes any deactivation-hide stamp so it can never block a later click.
+        _hiddenByDeactivationAtMs = null;
+
         if (!IsVisible)
         {
             Show();
         }
 
-        // Ensure Width/Height are measured so the placement has the real flyout size.
+        // Ensure Width/Height are measured so the placement has the real flyout size. Show() has run,
+        // so the PresentationSource (and with it the DPI scale) is available to Reposition.
         UpdateLayout();
+        Reposition(new PlacementSize(ActualWidth, ActualHeight));
+
+        Topmost = true;
+        Activate();
+    }
+
+    /// <summary>
+    /// The window is SizeToContent=Height, and the visible content panel swaps while the flyout is
+    /// open (Loading -> Authenticated on the first poll, for example). WPF keeps Left/Top on a resize,
+    /// so growth would extend downward over the taskbar and off-screen; re-run the placement so the
+    /// bottom edge stays anchored above the tray. The override also fires during ShowAtTray's own
+    /// Show()/UpdateLayout(), which just re-runs the same placement with identical inputs. No
+    /// Activate()/Topmost here: a size-driven reposition must not steal focus.
+    /// </summary>
+    protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
+    {
+        base.OnRenderSizeChanged(sizeInfo);
+        if (IsVisible && IsLoaded && sizeInfo.HeightChanged)
+        {
+            Reposition(new PlacementSize(sizeInfo.NewSize.Width, sizeInfo.NewSize.Height));
+        }
+    }
+
+    /// <summary>
+    /// Place the window for the given DIP size: gather the live device-pixel inputs (tray rect,
+    /// cursor, work area), convert the size to device pixels, compute, and convert the result back to
+    /// DIPs for Left/Top. Never calls UpdateLayout() itself (it runs from inside a layout pass).
+    /// </summary>
+    private void Reposition(PlacementSize dipSize)
+    {
+        var (sx, sy) = DeviceScale();
 
         var hasTrayRect = TryGetTrayRect(out var trayRect);
         var cursor = GetCursorPosition();
         var anchorPoint = hasTrayRect
             ? new PlacementPoint(trayRect.Left, trayRect.Top)
             : cursor;
-        var workArea = GetWorkAreaForPoint(anchorPoint);
+        var workArea = GetWorkAreaForPoint(anchorPoint, sx, sy);
 
         var placed = FlyoutPlacement.Compute(
             hasTrayRect ? trayRect : (PlacementRect?)null,
             cursor,
             workArea,
-            new PlacementSize(ActualWidth, ActualHeight));
+            FlyoutPlacement.ToDevice(dipSize, sx, sy));
 
-        Left = placed.X;
-        Top = placed.Y;
+        var dip = FlyoutPlacement.ToDips(placed, sx, sy);
+        Left = dip.X;
+        Top = dip.Y;
+    }
 
-        Topmost = true;
-        Activate();
+    /// <summary>
+    /// The DIP-to-device scale of this window's presentation source (M11/M22 of TransformToDevice).
+    /// Identity when the window has no source yet (before Show()). Under system-DPI awareness this is
+    /// the single session scale, so it is exact on every monitor.
+    /// </summary>
+    private (double sx, double sy) DeviceScale()
+    {
+        var m = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformToDevice ?? Matrix.Identity;
+        return (m.M11, m.M22);
     }
 
     private static bool TryGetTrayRect(out PlacementRect rect)
     {
         rect = default;
+        if (TrayIconGuid == Guid.Empty)
+        {
+            // Not yet assigned by the composition root: no rect to key on, use the cursor anchor.
+            return false;
+        }
         var identifier = new NOTIFYICONIDENTIFIER
         {
             cbSize = (uint)Marshal.SizeOf<NOTIFYICONIDENTIFIER>(),
@@ -177,21 +293,36 @@ public partial class FlyoutWindow : Window
     /// The work area (screen minus taskbar) of the monitor under <paramref name="point"/>, in device
     /// pixels. Uses MONITOR_DEFAULTTONEAREST so a point just off any monitor still lands on the
     /// closest one, matching how the flyout should appear on the monitor the user is interacting with.
+    /// Falls back to the primary monitor (same physical-pixel API), and only then to
+    /// <see cref="SystemParameters.WorkArea"/>, which is in DIPs and so is scaled by
+    /// (<paramref name="sx"/>, <paramref name="sy"/>) so every branch yields device pixels.
     /// </summary>
-    private static PlacementRect GetWorkAreaForPoint(PlacementPoint point)
+    private static PlacementRect GetWorkAreaForPoint(PlacementPoint point, double sx, double sy)
     {
         var pt = new POINT { X = (int)point.X, Y = (int)point.Y };
-        var monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-        var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
-        if (monitor != IntPtr.Zero && GetMonitorInfo(monitor, ref info))
+        if (TryGetMonitorWorkArea(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), out var nearest))
         {
-            var wa = info.rcWork;
-            return new PlacementRect(wa.left, wa.top, wa.right, wa.bottom);
+            return nearest;
         }
-        // Fallback to the primary screen work area dimensions.
-        return new PlacementRect(0, 0,
-            (int)SystemParameters.WorkArea.Width,
-            (int)SystemParameters.WorkArea.Height);
+        if (TryGetMonitorWorkArea(MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY), out var primary))
+        {
+            return primary;
+        }
+        var wa = SystemParameters.WorkArea;
+        return new PlacementRect(wa.Left * sx, wa.Top * sy, wa.Right * sx, wa.Bottom * sy);
+    }
+
+    private static bool TryGetMonitorWorkArea(IntPtr monitor, out PlacementRect workArea)
+    {
+        workArea = default;
+        var info = new MONITORINFO { cbSize = (uint)Marshal.SizeOf<MONITORINFO>() };
+        if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref info))
+        {
+            return false;
+        }
+        var wa = info.rcWork;
+        workArea = new PlacementRect(wa.left, wa.top, wa.right, wa.bottom);
+        return true;
     }
 
     // MARK: - Win32 interop
@@ -210,6 +341,7 @@ public partial class FlyoutWindow : Window
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 
+    private const uint MONITOR_DEFAULTTOPRIMARY = 1;
     private const uint MONITOR_DEFAULTTONEAREST = 2;
 
     [StructLayout(LayoutKind.Sequential)]
@@ -264,7 +396,9 @@ public readonly record struct PlacementSize(double Width, double Height);
 
 /// <summary>
 /// Pure placement math for the flyout, factored out of <see cref="FlyoutWindow"/> so it is unit
-/// testable without a real screen, tray, or DPI context. All inputs are in device pixels.
+/// testable without a real screen, tray, or DPI context. All inputs to <see cref="Compute"/> are in
+/// device pixels; the window converts its DIP size in with <see cref="ToDevice"/> and the result
+/// back out with <see cref="ToDips"/>.
 ///
 /// <para>
 /// Strategy, mirroring how a tray popover lands on Windows:
@@ -285,6 +419,14 @@ public static class FlyoutPlacement
 {
     /// A small gap between the flyout and the tray/anchor, in device pixels.
     private const double Margin = 8;
+
+    /// <summary>Scale a DIP size to device pixels by the window's (M11, M22) DPI scale.</summary>
+    public static PlacementSize ToDevice(PlacementSize dips, double sx, double sy)
+        => new(dips.Width * sx, dips.Height * sy);
+
+    /// <summary>Scale a device-pixel point back to DIPs by the window's (M11, M22) DPI scale.</summary>
+    public static PlacementPoint ToDips(PlacementPoint device, double sx, double sy)
+        => new(device.X / sx, device.Y / sy);
 
     /// <summary>
     /// Compute the top-left position for the flyout.
@@ -382,9 +524,14 @@ public sealed class ContentStateToVisibilityConverter : IValueConverter
 }
 
 /// <summary>
-/// Maps a <see cref="UsageColor"/> bucket to its theme-invariant semantic brush (red/orange/green),
-/// resolved from the application/window resources so a token override still applies. A null value
-/// (no color, e.g. an absent pace bar) yields <see cref="Brushes.Transparent"/>.
+/// Maps a <see cref="UsageColor"/> bucket to its theme-invariant semantic brush (red/orange/green).
+/// The brushes are frozen static constants, NOT resource lookups: a converter has no element
+/// context, and <c>Application.TryFindResource</c> never sees a window's resources or the theme
+/// dictionaries merged into it, so a lookup there silently returned Transparent and every gauge
+/// fill and bar was invisible. The semantic colors are the same in both theme dictionaries (Mac
+/// parity), so nothing is lost by pinning them here; a token override does NOT apply to
+/// converter-driven brushes. A null value (no color, e.g. an absent pace bar) yields
+/// <see cref="Brushes.Transparent"/>.
 /// </summary>
 public sealed class UsageColorToBrushConverter : IValueConverter
 {
@@ -403,14 +550,29 @@ public sealed class UsageColorToBrushConverter : IValueConverter
     public object ConvertBack(object value, Type targetType, object? parameter, CultureInfo culture)
         => throw new NotSupportedException();
 
-    internal static Brush ResolveBrush(string? key)
+    // Frozen constants: the values of UsageRedBrush/UsageOrangeBrush/UsageGreenBrush/SpendCyanBrush in
+    // Themes/DarkTokens.xaml (the cyan is the dark/window value; the light-theme cyan variant is not
+    // used for converter-driven brushes).
+    private static readonly SolidColorBrush Red = Frozen(0xE7, 0x4C, 0x3C);
+    private static readonly SolidColorBrush Orange = Frozen(0xF3, 0x9C, 0x12);
+    private static readonly SolidColorBrush Green = Frozen(0x2E, 0xCC, 0x71);
+    private static readonly SolidColorBrush Cyan = Frozen(0x22, 0xC3, 0xE6);
+
+    private static SolidColorBrush Frozen(byte r, byte g, byte b)
     {
-        if (key is not null && Application.Current?.TryFindResource(key) is Brush brush)
-        {
-            return brush;
-        }
-        return Brushes.Transparent;
+        var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
+        brush.Freeze();
+        return brush;
     }
+
+    internal static Brush ResolveBrush(string? key) => key switch
+    {
+        "UsageRedBrush" => Red,
+        "UsageOrangeBrush" => Orange,
+        "UsageGreenBrush" => Green,
+        "SpendCyanBrush" => Cyan,
+        _ => Brushes.Transparent,
+    };
 }
 
 /// <summary>
@@ -458,49 +620,59 @@ public sealed class BoolToVisibilityConverter : IValueConverter
 }
 
 /// <summary>
-/// Maps a 0-100 percent to a pixel width given a track width passed as the converter parameter (the
-/// bar's full pixel width). Clamps the percent to 0-100 so an out-of-range value never overflows the
-/// track. A null/non-numeric value yields width 0 (empty fill). This reproduces the Mac
-/// <c>geo.size.width * value / 100</c> fill math in a binding.
+/// Maps a 0-100 percent (values[0]) to a pixel width against the track's REAL width (values[1], bound
+/// to the track element's <c>ActualWidth</c>). Clamps the percent to 0-100 so an out-of-range value
+/// never overflows the track. Either value missing (<see cref="DependencyProperty.UnsetValue"/>,
+/// null, or non-numeric) yields width 0 (empty fill). This reproduces the Mac
+/// <c>geo.size.width * value / 100</c> fill math in a binding without a hard-coded track width, which
+/// drifted from the layout and overstated every bar.
 /// </summary>
-public sealed class PercentToWidthConverter : IValueConverter
+public sealed class PercentOfWidthConverter : IMultiValueConverter
 {
-    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    public object Convert(object[] values, Type targetType, object? parameter, CultureInfo culture)
     {
-        if (value is null)
+        if (values is null || values.Length < 2)
         {
             return 0.0;
         }
-
-        double percent;
-        try
-        {
-            percent = System.Convert.ToDouble(value, CultureInfo.InvariantCulture);
-        }
-        catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException)
+        if (!TryToDouble(values[0], out var percent) || !TryToDouble(values[1], out var trackWidth))
         {
             return 0.0;
-        }
-
-        double trackWidth = 0;
-        if (parameter is string s && double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var w))
-        {
-            trackWidth = w;
         }
 
         var clamped = Math.Max(0, Math.Min(100, percent));
         return trackWidth * clamped / 100.0;
     }
 
-    public object ConvertBack(object value, Type targetType, object? parameter, CultureInfo culture)
+    public object[] ConvertBack(object value, Type[] targetTypes, object? parameter, CultureInfo culture)
         => throw new NotSupportedException();
+
+    private static bool TryToDouble(object? value, out double result)
+    {
+        result = 0;
+        if (value is null || value == DependencyProperty.UnsetValue)
+        {
+            return false;
+        }
+        try
+        {
+            result = System.Convert.ToDouble(value, CultureInfo.InvariantCulture);
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidCastException or OverflowException)
+        {
+            return false;
+        }
+        return !double.IsNaN(result) && !double.IsInfinity(result);
+    }
 }
 
 /// <summary>
 /// Produces the gauge arc <see cref="Geometry"/> for a <see cref="GaugeCard"/>: the full 270-degree
 /// track ("track") or the fill trimmed to the remaining percent ("fill"), on the same geometry as
-/// the Mac <c>ArcShape</c> (start 135 degrees, sweep 270 degrees, clockwise). The arc is sized to a
-/// fixed nominal box matching the Mac 58pt gauge; WPF scales the Path to its layout slot.
+/// the Mac <c>ArcShape</c> (start 135 degrees, sweep 270 degrees, clockwise). The arc is built in
+/// absolute coordinates of a fixed 58x58 box matching the Mac 58pt gauge. The consuming Paths use
+/// the WPF default Stretch=None (no scaling to the layout slot), so the XAML hosts them in a Grid
+/// that is exactly that 58x58 box, centred in the card.
 /// </summary>
 public sealed class GaugeArcConverter : IValueConverter
 {
