@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Throwaway U2 auth/Cloudflare spike (see ../U2-auth-cloudflare-spike-TODO.md). NOT a shipped
+         artifact: it has a real window, no single-file publish, no signing/notarize/install. Run it
+         with `dotnet run` on a real Windows box with a real claude.ai login and live network.
+
+         It references the PRODUCTION project so the load-bearing poll is fired through the real
+         ClaudeApi transport and the real AccountStore.PrimeCookies jar-priming - the gate must test
+         the shipped code, not a copy that can drift. -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <RootNamespace>AuthSpike</RootNamespace>
+    <AssemblyName>AuthSpike</AssemblyName>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Match the referenced project's self-contained win-x64 build so the ProjectReference is
+         allowed (a non-self-contained app cannot reference a self-contained exe - NETSDK1151). No
+         PublishSingleFile here: this is `dotnet run`, never a published distributable. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ClaudeBatteryWin\ClaudeBatteryWin.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pinned to the production WebView2 version (csproj) so the cookie + UA API match what ships. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2592.51" />
+  </ItemGroup>
+
+</Project>

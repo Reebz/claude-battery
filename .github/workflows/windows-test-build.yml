@@ -1,0 +1,58 @@
+name: Windows Test Build
+
+# Build a self-contained, single-file Windows .exe and publish it as a GitHub PRE-RELEASE for a
+# tester to try. Triggered by pushing a tag like `windows-test-1.50.0` (a tag-triggered workflow runs
+# the workflow file as it exists on the tagged commit, so this works from feat/windows-port without
+# the workflow needing to live on the default branch). The tag namespace is distinct from the Mac
+# `v{X}` release tags, and every release here is marked pre-release so it never becomes "Latest".
+on:
+  push:
+    tags:
+      - "windows-test-*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # The csproj already declares SelfContained + PublishSingleFile + win-x64, so the output is one
+      # ClaudeBatteryWin.exe with the .NET runtime and WebView2Loader.dll bundled in - no .NET install
+      # needed on the tester's box. WebView2 Evergreen Runtime is still required (the app downloads
+      # and runs the Evergreen bootstrapper itself if it is missing; the zip ships only the exe, no
+      # stub beside it). This build is UNSIGNED, so SmartScreen warns; that is expected.
+      - name: Publish self-contained single-file exe
+        run: dotnet publish src/ClaudeBatteryWin/ClaudeBatteryWin.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
+
+      - name: Zip the exe
+        shell: pwsh
+        run: Compress-Archive -Path publish/ClaudeBatteryWin.exe -DestinationPath "ClaudeBattery-${{ github.ref_name }}-win-x64.zip" -Force
+
+      - name: Publish GitHub pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = @"
+          Unsigned self-contained TEST build of the Windows port (not for production).
+
+          How to run:
+          1. Download and unzip ClaudeBattery-${{ github.ref_name }}-win-x64.zip.
+          2. Windows SmartScreen will warn (the build is not code-signed): click "More info" then "Run anyway".
+          3. The app needs the WebView2 Evergreen Runtime (preinstalled on Windows 11 and most Windows 10); if it is missing the app will download and install it (about 2 MB); if that fails, install it from Microsoft's WebView2 page (https://developer.microsoft.com/microsoft-edge/webview2/) and click Retry.
+
+          Notes:
+          - This is a raw exe, not an installer: no Start-menu shortcut and no auto-update.
+          - The login/poll path has never run on real hardware yet, so this build is itself the validation. Please report what happens at sign-in (Google, email-code, manual cookie paste) and whether the tray battery updates.
+          "@
+          gh release create "${{ github.ref_name }}" "ClaudeBattery-${{ github.ref_name }}-win-x64.zip" --prerelease --title "Windows test build (${{ github.ref_name }})" --notes "$notes"
