@@ -137,7 +137,9 @@ struct SettingsView: View {
         // always renders (R9, issue #41), so the short branch would under-allocate it by ~210pt.
         // +30 over the prior 730 covers the two extra wrapped lines in the Diagnostics caption,
         // which grew when it started naming the plan sample it now collects (R6).
-        let base: CGFloat = 760
+        // +30 over the prior 760 covers the blocked-host sentence added to the same caption
+        // (issue #49). The paste help sits in a collapsed DisclosureGroup and adds nothing.
+        let base: CGFloat = 790
         // Each account row: ~40pt, plus ~45pt for threshold slider when notifications on
         let perAccount: CGFloat = notificationsEnabled ? 85 : 40
         let accountCount = CGFloat(max(accountStore.accounts.count, 1))
@@ -212,6 +214,22 @@ struct SettingsView: View {
 
 // MARK: - Manual sign-in (U5 — the universal paste floor)
 
+/// The two Settings captions the sign-in window's blocked-navigation work (issue #49) changed.
+/// Kept as literals here, off the private views, so the disclosure they carry is unit-testable:
+/// the export now names the hosts the sign-in window blocked, and the paste help has to say the
+/// cookie header goes nowhere but this field.
+enum SettingsCopy {
+    static let cookieHeaderHelp = "1. Sign in to claude.ai in your browser.\n2. Open Developer Tools (Option-Cmd-I) and select the Network tab.\n3. Refresh the page, then click any request to claude.ai.\n4. Under Request Headers, copy the entire value of the \"Cookie\" header.\n5. Paste it above. Paste it only here, never into a web page."
+
+    // Says what is collected, not just what is not. The plan sample (R6) added a second kind of
+    // record here - which plan the account is on and how much of each limit is left, written every
+    // couple of minutes while logging is on - and a description that still said "sign-in events"
+    // would be understating what the user is agreeing to. The blocked-host sentence is there
+    // because a blocked single sign-on hop records the host by name (issue #49), and for a company
+    // account that host names the employer's identity provider.
+    static let diagnosticsCaption = "Records sign-in events, which plan your account is on, and how much of your session and weekly limits is left, to help diagnose problems. Hosts the sign-in window blocked, including a company identity provider, are recorded by name. No passwords, tokens, emails, or account names are saved."
+}
+
 /// Settings section for pasting a claude.ai cookie header to sign in without the WebView.
 /// The true "nobody is ever fully locked out" floor: works for Google-federated and
 /// passkey-only accounts that cannot complete the embedded flow.
@@ -266,7 +284,7 @@ private struct ManualSignInSection: View {
             }
 
             DisclosureGroup("How do I find my cookie header?") {
-                Text("1. Sign in to claude.ai in your browser.\n2. Open Developer Tools (Option-Cmd-I) and select the Network tab.\n3. Refresh the page, then click any request to claude.ai.\n4. Under Request Headers, copy the entire value of the \"Cookie\" header.\n5. Paste it above.")
+                Text(SettingsCopy.cookieHeaderHelp)
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -357,11 +375,7 @@ private struct DiagnosticsSection: View {
 
     var body: some View {
         Section(header: Text("Diagnostics")) {
-            // Says what is collected, not just what is not. The plan sample (R6) added a second
-            // kind of record here - which plan the account is on and how much of each limit is
-            // left, written every couple of minutes while logging is on - and a description that
-            // still said "sign-in events" would be understating what the user is agreeing to.
-            Text("Records sign-in events, which plan your account is on, and how much of your session and weekly limits is left, to help diagnose problems. No passwords, tokens, emails, or account names are saved.")
+            Text(SettingsCopy.diagnosticsCaption)
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

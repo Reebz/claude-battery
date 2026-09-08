@@ -1,6 +1,7 @@
 import AppleArchive
 import Compression
 import System
+import WebKit
 import XCTest
 @testable import ClaudeBattery
 
@@ -43,9 +44,13 @@ final class NoSecretsExportGateTests: XCTestCase {
         "99887766554433",                            // numeric scalar under credential key
         "CLEARANCESECRETXYZ",                        // cf_clearance cookie value
         "OPAQUELASTURLSECRET",                       // lasturl cookie value
-        "OPAQUENEXTURLSECRET"                        // next-url cookie value
+        "OPAQUENEXTURLSECRET",                       // next-url cookie value
+        "LEAKEDCODE",                                // OAuth code in a failed load's userInfo URL
+        "LEAKEDSTATE",                               // state query on a blocked SSO hop
+        "idp.example"                                // host of the failed load, never emitted
     ]
 
+    @MainActor
     func testEndToEnd_producerToArchive_hasNoSecrets() throws {
         // 1) Real DiagnosticsLogger (enabled) → diag-*.jsonl with planted secrets of every type,
         //    including the NESTED-under-credential-key shapes (arrays/objects).
@@ -67,6 +72,26 @@ final class NoSecretsExportGateTests: XCTestCase {
             // cookieHeader-only keys: cf_clearance/lasturl/next-url live SOLELY in cookieHeaderKeys.
             "cookieHeader": "cf_clearance=CLEARANCESECRETXYZ; lasturl=OPAQUELASTURLSECRET; next-url=OPAQUENEXTURLSECRET; theme=dark"
         ])
+
+        // 1b) The two navigation records the login window writes (U4, issue #49), driven through
+        //     the REAL AuthManager delegate methods rather than a hand-built payload, so a producer
+        //     regression (emitting the error's userInfo, or the URL instead of the host) fails here.
+        let suite = "test.NoSecretsGate.\(UUID().uuidString)"
+        let storage = StorageService(defaults: UserDefaults(suiteName: suite)!, prefix: "cb_")
+        let auth = AuthManager(storage: storage, accountStore: AccountStore(storage: storage), session: MockHTTPSession())
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        auth.diagnostics = logger
+        let login = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        auth.loginWebView = login
+        auth.webView(login, didFailProvisionalNavigation: nil, withError: NSError(domain: "WebKitErrorDomain", code: 102, userInfo: [
+            NSURLErrorFailingURLStringErrorKey: "https://idp.example/cb?code=LEAKEDCODE",
+            NSURLErrorFailingURLErrorKey: URL(string: "https://idp.example/cb?code=LEAKEDCODE")!,
+            NSLocalizedDescriptionKey: "Frame load interrupted https://idp.example/cb?code=LEAKEDCODE"
+        ]))
+        auth.webView(login, decidePolicyFor: WebKitFakes.action(
+            url: "https://acme.okta.com/app/sso?state=LEAKEDSTATE",
+            targetFrame: WebKitFakes.frame(isMainFrame: true),
+            navigationType: .other)) { _ in }
         logger.flush()
 
         // 2) Plant an oslogstore-*.txt with a RAW secret in the same dir. The export must NEVER
@@ -108,6 +133,14 @@ final class NoSecretsExportGateTests: XCTestCase {
                      "an @-email survived into the archive")
         // Proof the producer actually ran and was redacted (not just empty output).
         XCTAssertTrue(combined.contains("REDACTED_LEN_"), "expected redaction markers in archive content")
+        // The navigation records keep their signal: the blocked host by name with no query, and the
+        // failed load's code and domain. Not a redactor catch - the producer never emits the rest.
+        XCTAssertTrue(combined.contains("\"kind\":\"nav-decision\""), "blocked hop record missing: \(combined)")
+        XCTAssertTrue(combined.contains("\"host\":\"acme.okta.com\""), "blocked host must survive by name: \(combined)")
+        XCTAssertFalse(combined.contains("state="), "the blocked hop's query must not be in the archive: \(combined)")
+        XCTAssertTrue(combined.contains("\"kind\":\"nav-failed\""), "failed load record missing: \(combined)")
+        XCTAssertTrue(combined.contains("\"code\":102") && combined.contains("\"domain\":\"WebKitErrorDomain\""),
+                      "nav-failed must carry the integer code and the domain string verbatim: \(combined)")
     }
 
     /// Hardens the gate against two producer-shape regressions the original end-to-end test did not

@@ -100,6 +100,15 @@ class AuthManager: NSObject, ObservableObject {
     /// and Google OAuth fails immediately.
     // internal for @testable access in AuthManagerTests (popup teardown test)
     var popupWebView: WKWebView?
+    /// Sink for the navigation records this class writes (`nav-decision`, `nav-failed`).
+    /// Production keeps the shared logger; tests inject an enabled logger on a temp directory
+    /// so the records can be read back and their payload keys asserted.
+    // internal for @testable access in AuthManagerTests (blocked-navigation record tests)
+    var diagnostics: DiagnosticsLogger = .shared
+    /// The last blocked navigation written, so a page retrying the same blocked hop writes one
+    /// `nav-decision` record instead of one per attempt (the `lastPolledCookieNames` idiom).
+    /// Cleared on retry and teardown so a fresh attempt records again.
+    private var lastBlockedNavigation: (host: String, kind: NavigationBlockKind)?
     var onAuthSuccess: (() -> Void)?
     /// Hook the app wires to open Settings at the manual paste section (U5). Invoked by the
     /// sign-in error overlay's "Sign in manually" button so a stuck user reaches the floor.
@@ -371,7 +380,7 @@ class AuthManager: NSObject, ObservableObject {
     static func makeEmailCodeAlert() -> NSAlert {
         let alert = NSAlert()
         alert.messageText = "Sign in with an email code"
-        alert.informativeText = "To sign in, choose \"Continue with email\" and enter the code Claude sends you. Google and passkey sign-in aren't available in this sign-in window. If you get stuck, you can sign in manually under Settings."
+        alert.informativeText = "To sign in, choose \"Continue with email\" and enter the code Claude sends you. Google, passkey and single sign-on (SSO) sign-in aren't available in this sign-in window. If you get stuck, you can sign in manually under Settings."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Ok, I'll login with email code")
         return alert
@@ -476,6 +485,7 @@ class AuthManager: NSObject, ObservableObject {
         cookiePollTimer = nil
         urlObservation?.invalidate()
         urlObservation = nil
+        lastBlockedNavigation = nil
         popupWebView?.stopLoading()
         popupWebView?.removeFromSuperview()
         popupWebView = nil
@@ -648,6 +658,7 @@ class AuthManager: NSObject, ObservableObject {
         hasCapturedSession = false
         pendingSessionKey = nil
         pendingCookieHeader = nil
+        lastBlockedNavigation = nil
         removeLoginOverlay()
         loginState = .idle
         // Restart the inactivity clock the moment the user chooses to retry, rather than only
@@ -1875,6 +1886,99 @@ class AuthManager: NSObject, ObservableObject {
         guard let host = url.host else { return false }
         return isAllowedDomain(host)
     }
+
+    // MARK: - Blocked navigation feedback and diagnostics (issue #49)
+
+    /// Which navigation the allow-list rejected. Written verbatim as the `kind` of a blocked
+    /// `nav-decision` record, and it decides whether the block is shown to the user: `main`,
+    /// `popup` and `popupMain` set the error overlay, `link` and `subframe` only leave a record
+    /// (the login page's own policy links open in a new window and must not draw the SSO card).
+    enum NavigationBlockKind: String {
+        case main
+        case popupMain = "popup-main"
+        case popup
+        case link
+        case subframe
+    }
+
+    /// The error copy for a blocked single sign-on hop. A compile-time literal that never
+    /// interpolates the host: the blocked host is a company identity provider, and it belongs in
+    /// the opt-in diagnostics record, not in the `login-state` line every error emits.
+    static let ssoBlockedMessage = "This sign-in window can't complete single sign-on (SSO). Choose \"Continue with email\" and enter the code Claude sends you, or use Sign in manually to paste your cookie header under Settings."
+
+    /// Classify a blocked navigation from what the delegate can see. Pure and static so the table
+    /// is unit-testable without a WebKit frame. A nil target frame is a new window: a link click
+    /// there is `link`, anything else (a script `window.open`) is `popup`. A main-frame load is
+    /// `main` on the login view and `popupMain` inside the mounted popup. Everything else is a
+    /// subframe.
+    static func navigationBlockKind(isMainFrame: Bool, targetFrameIsNil: Bool, navigationType: WKNavigationType, onPopup: Bool) -> NavigationBlockKind {
+        if targetFrameIsNil {
+            return navigationType == .linkActivated ? .link : .popup
+        }
+        if isMainFrame {
+            return onPopup ? .popupMain : .main
+        }
+        return .subframe
+    }
+
+    /// Validate a host before it is written to a diagnostics record: at most 253 characters, made
+    /// of dot-separated labels of 1 to 63 characters from `[A-Za-z0-9-]`. Anything else (an empty
+    /// host, a userinfo `@`, a path, a query) is written as the literal `(invalid)`, so a malformed
+    /// URL can never smuggle a value into the export under the `host` key.
+    static func hostForDiagnostics(_ host: String) -> String {
+        guard !host.isEmpty, host.count <= 253 else { return "(invalid)" }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        let labelIsValid = { (label: Substring) -> Bool in
+            (1...63).contains(label.count) && label.unicodeScalars.allSatisfy {
+                ("A"..."Z").contains($0) || ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "-"
+            }
+        }
+        return labels.allSatisfy(labelIsValid) ? host : "(invalid)"
+    }
+
+    /// The one place a blocked navigation is recorded, from both `decidePolicyFor` and the nil
+    /// path of `createWebViewWith`. Writes a `nav-decision` record carrying exactly `decision`,
+    /// `kind` and `host` (never the URL), collapsing a repeat of the previous block. For a
+    /// `main`, `popup` or `popupMain` block it sets the SSO error while the login is still idle
+    /// and nothing has been captured: a block that lands after capture (a post-login redirect,
+    /// or a page firing one on purpose) must not replace "Finishing sign-in" or offer "Try again"
+    /// under a live org discovery. A `popupMain` block also retires the mounted popup so
+    /// "Try again" does not reload under a blank pane.
+    private func recordBlockedNavigation(host: String, kind: NavigationBlockKind) {
+        let safeHost = Self.hostForDiagnostics(host)
+        if lastBlockedNavigation?.host != safeHost || lastBlockedNavigation?.kind != kind {
+            lastBlockedNavigation = (safeHost, kind)
+            logger.info("Blocked navigation to disallowed domain: \(safeHost) (\(kind.rawValue, privacy: .public))")
+            diagnostics.emitMilestone(kind: "nav-decision", payload: [
+                "decision": "block",
+                "kind": kind.rawValue,
+                "host": safeHost
+            ])
+        }
+
+        switch kind {
+        case .link, .subframe:
+            return
+        case .popupMain:
+            retirePopup()
+        case .main, .popup:
+            break
+        }
+
+        guard loginState == .idle, !hasCapturedSession else { return }
+        loginState = .error(Self.ssoBlockedMessage)
+    }
+
+    /// Fully retire the mounted popup: clear its delegate pointers and nil our reference, so a
+    /// late `webViewDidClose` from a replaced popup cannot fall through to this manager
+    /// (review finding).
+    private func retirePopup() {
+        popupWebView?.navigationDelegate = nil
+        popupWebView?.uiDelegate = nil
+        popupWebView?.stopLoading()
+        popupWebView?.removeFromSuperview()
+        popupWebView = nil
+    }
 }
 
 // MARK: - WKNavigationDelegate
@@ -1915,10 +2019,30 @@ extension AuthManager: WKNavigationDelegate {
             DiagnosticsLogger.shared.emitMilestone(kind: "nav-decision", payload: ["decision": "allow", "host": host])
             decisionHandler(.allow)
         } else {
-            logger.info("Blocked navigation to disallowed domain: \(host)")
-            DiagnosticsLogger.shared.emitMilestone(kind: "nav-decision", payload: ["decision": "block", "host": host])
+            let kind = Self.navigationBlockKind(
+                isMainFrame: navigationAction.targetFrame?.isMainFrame ?? false,
+                targetFrameIsNil: navigationAction.targetFrame == nil,
+                navigationType: navigationAction.navigationType,
+                onPopup: popupWebView != nil && webView === popupWebView
+            )
+            recordBlockedNavigation(host: host, kind: kind)
             decisionHandler(.cancel)
         }
+    }
+
+    /// A main-frame load that started and then failed. Emits `nav-failed` with exactly the
+    /// error `code` and `domain`, never the error object, its description or its `userInfo`,
+    /// which carries the failing URL with any `code=` or `state=` query. It never touches
+    /// `loginState`: after a block this fires as `WebKitErrorDomain` 102 (frame load interrupted
+    /// by policy change) or `NSURLErrorDomain` -999, and the block record already said what
+    /// happened. WebKit only calls this for main-frame loads.
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let nsError = error as NSError
+        logger.info("Provisional navigation failed: \(nsError.domain, privacy: .public) \(nsError.code, privacy: .public)")
+        diagnostics.emitMilestone(kind: "nav-failed", payload: [
+            "code": nsError.code,
+            "domain": nsError.domain
+        ])
     }
 
     /// Additive #17 backstop (KTD-2): if a claude.ai navigation response carries a
@@ -1975,17 +2099,21 @@ extension AuthManager: WKUIDelegate {
             // Scheme + host only, never absoluteString — a custom-scheme OAuth redirect can carry
             // a live `code=` in its path/query (Release info-leak). Mirrors nav-decision logging.
             logger.info("Blocked popup to disallowed URL (scheme \(url.scheme ?? "?", privacy: .public) host \(url.host ?? "?", privacy: .public))")
+            // A script `window.open` reaches here first and runs no `decidePolicyFor` when this
+            // returns nil, so this is the only place a blocked popup can be recorded (verified
+            // with a delegate-order harness, 2026-09-04). A hostless URL records as `(invalid)`.
+            recordBlockedNavigation(host: url.host ?? "", kind: Self.navigationBlockKind(
+                isMainFrame: false,
+                targetFrameIsNil: true,
+                navigationType: navigationAction.navigationType,
+                onPopup: popupWebView != nil && webView === popupWebView
+            ))
             return nil
         }
 
-        // Fully retire any previous popup before creating a new one: clear its delegate pointers
-        // and nil our reference, so a late webViewDidClose from a replaced popup cannot fall
-        // through to this manager (review finding).
-        popupWebView?.navigationDelegate = nil
-        popupWebView?.uiDelegate = nil
-        popupWebView?.stopLoading()
-        popupWebView?.removeFromSuperview()
-        popupWebView = nil
+        // Fully retire any previous popup before creating a new one, so a late webViewDidClose
+        // from a replaced popup cannot fall through to this manager (review finding).
+        retirePopup()
 
         let popup = WKWebView(frame: webView.bounds, configuration: configuration)
         popup.navigationDelegate = self
