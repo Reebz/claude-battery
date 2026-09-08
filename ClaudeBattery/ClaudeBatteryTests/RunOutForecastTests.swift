@@ -368,4 +368,183 @@ final class RunOutForecastTests: XCTestCase {
             name: "Weekly", usage: 66, timeRemaining: 84, pace: .caution)
         XCTAssertEqual(label, "Weekly usage 66 percent, time remaining 84 percent, caution, over pace")
     }
+
+    // MARK: - dialLines (KTD3: the three lines under a dial from one pure function, never the display value)
+
+    /// Lines for one card on the same inputs as `pace`, with the pace supplied from `paceStatus`
+    /// unless `paceOverride` is given.
+    private func lines(_ remaining: Double, _ r: TimeInterval?, _ window: TimeInterval,
+                       paceOverride: UsagePopoverView.PaceStatus? = nil) -> UsagePopoverView.DialLines {
+        UsagePopoverView.dialLines(pace: paceOverride ?? pace(remaining, r, window),
+                                   rawRemaining: remaining,
+                                   resetsAt: r.map(resetsIn),
+                                   window: window,
+                                   now: now)
+    }
+
+    func testDialLines_caution_captionRunOutCountdown() {
+        // (40, 9000, s): Caution, run-out 6000 s (already a 5 min multiple), 2h 30m to reset.
+        let l = lines(40, 9000, s)
+        XCTAssertEqual(l.caption, "Caution")
+        XCTAssertEqual(l.runOut, "Out in ~1h 40m")
+        XCTAssertEqual(l.countdown, "Resets in 2h 30m")
+        XCTAssertEqual(l.runOutSeconds ?? -1, 6000, accuracy: 1)
+        XCTAssertEqual(l.resetSeconds ?? -1, 9000, accuracy: 1)
+    }
+
+    func testDialLines_onTrack_noRunOutButCountdown() {
+        // AE2: the maths would give a time, but On Track hides it. The countdown still shows.
+        let l = lines(45, 9000, s)
+        XCTAssertEqual(l.caption, "On Track")
+        XCTAssertNil(l.runOut)
+        XCTAssertNil(l.runOutSeconds)
+        XCTAssertEqual(l.countdown, "Resets in 2h 30m")
+    }
+
+    func testDialLines_runOutIsQuantisedBeforePrinting() {
+        // AE1 shape: (20, 7200, s) projects 2700 s, which prints as the quantised "~45m", and the
+        // weekly (10, 259200, w) projects 38400 s, printed to the hour. runOutLine prints what it
+        // is given, so dialLines must quantise first.
+        let session = lines(20, 7200, s)
+        XCTAssertEqual(session.caption, "Caution")
+        XCTAssertEqual(session.runOut, "Out in ~45m")
+        XCTAssertEqual(session.countdown, "Resets in 2h 00m")
+        let weekly = lines(10, 259200, w)
+        XCTAssertEqual(weekly.caption, "Danger")
+        XCTAssertEqual(weekly.runOut, "Out in ~11h 00m")
+        XCTAssertEqual(weekly.countdown, "Resets in 3d 00h")
+    }
+
+    func testDialLines_noResetTime_singleUnavailableLine() {
+        // AE5: no reset time -> no caption, no run-out, one "Reset time unavailable" line.
+        let l = lines(40, nil, s)
+        XCTAssertNil(l.caption)
+        XCTAssertNil(l.runOut)
+        XCTAssertEqual(l.countdown, "Reset time unavailable")
+        XCTAssertNil(l.resetSeconds)
+        XCTAssertNil(l.runOutSeconds)
+        XCTAssertEqual(l.countdown, UsagePopoverView.resetUnavailableLine)
+    }
+
+    func testDialLines_pastResetTime_sameAsNoResetTime() {
+        // A stale poll whose reset is already behind us self-omits exactly like a missing one,
+        // even when the caller hands in a pace that would otherwise print a word.
+        XCTAssertEqual(lines(40, -3600, s), lines(40, nil, s))
+        let stale = lines(40, -3600, s, paceOverride: .caution)
+        XCTAssertNil(stale.caption)
+        XCTAssertNil(stale.runOut)
+        XCTAssertEqual(stale.countdown, "Reset time unavailable")
+    }
+
+    func testDialLines_underAMinuteToReset_printsLessThanAMinute() {
+        let l = lines(40, 30, s)
+        XCTAssertEqual(l.countdown, "Resets in <1m")
+    }
+
+    // MARK: - sessionDialLines (KD7: mirrors sessionPace and picks the RAW session itself)
+
+    func testSessionDialLines_planRatioNil_cautionCase() {
+        // The packet's shape case: 40% left, 9000 s to reset, no plan ratio.
+        let usage = makeUsage(session: 40, weekly: 50, sessionResetsIn: 9000, planRatio: nil)
+        let l = UsagePopoverView.sessionDialLines(for: usage, now: now)
+        XCTAssertEqual(l.caption, "Caution")
+        XCTAssertEqual(l.runOut, "Out in ~1h 40m")
+        XCTAssertEqual(l.countdown, "Resets in 2h 30m")
+    }
+
+    func testSessionDialLines_weeklyLimitedRawOnTrack_wordAndSessionCountdownOnly() {
+        // AE4 first half: "Limited by weekly", the SESSION reset countdown, no run-out.
+        let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        let l = UsagePopoverView.sessionDialLines(for: usage, now: now)
+        XCTAssertEqual(l.caption, "Limited by weekly")
+        XCTAssertNil(l.runOut)
+        XCTAssertEqual(l.countdown, "Resets in 2h 30m")
+    }
+
+    func testSessionDialLines_weeklyLimitedRawDanger_allThreeLines() {
+        // AE4 second half: raw session (15%, half the window left) is in Danger, so the word is
+        // "Danger", the run-out is the RAW session's 9000 * 15 / 85 = 1588 s quantised to 25m, and
+        // the countdown shows.
+        let usage = makeUsage(session: 15, weekly: 1, sessionResetsIn: 9000)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        let l = UsagePopoverView.sessionDialLines(for: usage, now: now)
+        XCTAssertEqual(l.caption, "Danger")
+        XCTAssertEqual(l.runOut, "Out in ~25m")
+        XCTAssertEqual(l.countdown, "Resets in 2h 30m")
+    }
+
+    func testSessionDialLines_neverProjectsTheCappedValue() {
+        // The raw-value discriminator: the capped display value (weekly 1 -> 12.6 in session
+        // units) would project a run-out over the 5h window, but the raw session (90) is ahead.
+        let usage = makeUsage(session: 90, weekly: 1, sessionResetsIn: 9000)
+        let wrong = UsagePopoverView.dialLines(pace: .danger, rawRemaining: usage.sessionDisplayRemaining,
+                                               resetsAt: usage.sessionResetDate, window: s, now: now)
+        XCTAssertNotNil(wrong.runOut, "the capped value would print a run-out")
+        let l = UsagePopoverView.sessionDialLines(for: usage, now: now)
+        XCTAssertNil(l.runOut)
+        XCTAssertEqual(l.caption, "Limited by weekly")
+    }
+
+    func testSessionDialLines_noSessionReset_unavailable() {
+        let usage = makeUsage(session: 40, weekly: 50, sessionResetsIn: nil)
+        let l = UsagePopoverView.sessionDialLines(for: usage, now: now)
+        XCTAssertNil(l.caption)
+        XCTAssertNil(l.runOut)
+        XCTAssertEqual(l.countdown, "Reset time unavailable")
+    }
+
+    // MARK: - gaugeAccessibilityLabel with the lines folded in (one spoken dial, KTD3)
+
+    func testGaugeA11y_foldsInCountdownAndRunOut() {
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Session", usage: 40, timeRemaining: 50, pace: .caution, lines: lines(40, 9000, s))
+        XCTAssertTrue(label.contains("caution, over pace"), label)
+        XCTAssertTrue(label.contains("resets in 2 hours 30 minutes"), label)
+        XCTAssertTrue(label.contains("projected to run out in about 1 hour 40 minutes"), label)
+        XCTAssertEqual(label, "Session usage 40 percent, time remaining 50 percent, caution, over pace, "
+                       + "projected to run out in about 1 hour 40 minutes, resets in 2 hours 30 minutes")
+    }
+
+    func testGaugeA11y_noResetTime_speaksUnavailableAndNoTimePhrase() {
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Session", usage: 40, timeRemaining: nil, pace: .unknown, lines: lines(40, nil, s))
+        XCTAssertFalse(label.contains("resets in"), label)
+        XCTAssertFalse(label.contains("projected to run out"), label)
+        XCTAssertEqual(label, "Session usage 40 percent, reset time unavailable")
+    }
+
+    func testGaugeA11y_onTrack_speaksCountdownWithoutRunOut() {
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Weekly", usage: 45, timeRemaining: 50, pace: .onTrack, lines: lines(45, 9000, s))
+        XCTAssertEqual(label, "Weekly usage 45 percent, time remaining 50 percent, on track, resets in 2 hours 30 minutes")
+    }
+
+    func testGaugeA11y_roundingUnchangedWithLines() {
+        // Usage 16.5 still speaks "16", like the dial prints, with the lines present.
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Session", usage: 16.5, timeRemaining: 42.5, pace: .onTrack, lines: lines(16.5, 9000, s))
+        XCTAssertTrue(label.hasPrefix("Session usage 16 percent, time remaining 42 percent"), label)
+    }
+
+    func testSpokenDuration_wordsForTheLinesTheDialPrints() {
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 2 * 3600 + 30 * 60), "2 hours 30 minutes")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 3600 + 40 * 60), "1 hour 40 minutes")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 7200), "2 hours")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 45 * 60), "45 minutes")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 60), "1 minute")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 3 * 86400), "3 days")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 86400 + 3600), "1 day 1 hour")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 30), "less than a minute")
+    }
+
+    // MARK: - lastUpdatedText (the footer freshness line the minute clock refreshes, KTD10)
+
+    func testLastUpdatedText_movesWithNowNotWithAPoll() {
+        let fetched = now
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: nil, now: now), "Not yet updated")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(30)), "Updated just now")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(60)), "Updated 1 minute ago")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(5 * 60 + 10)), "Updated 5 minutes ago")
+    }
 }

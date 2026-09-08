@@ -1,11 +1,19 @@
 import AppKit
 import SwiftUI
+#if DEBUG
+import os
+#endif
 
 struct UsagePopoverView: View {
     @ObservedObject var accountStore: AccountStore
     @ObservedObject var authManager: AuthManager
     @ObservedObject var usageService: UsageService
     @ObservedObject var updateChecker: UpdateChecker
+    /// The minute clock `MenuBarController` starts on popover show and stops on close (KTD10).
+    /// Held as a plain `let`, NOT `@ObservedObject`: this root view must never re-evaluate on a
+    /// tick. Only `DialLinesView` and `FooterStatusLineView` observe it, so a tick re-draws the
+    /// three text lines and nothing else (the arcs are siblings of that scope, never children).
+    let clock: PopoverClock
     let onSignIn: () -> Void
 
     var body: some View {
@@ -55,17 +63,11 @@ struct UsagePopoverView: View {
                 usageCreditsSection(credits: credits)
             }
 
-            // Models card is omitted entirely when no per-model data is present (KTD3);
-            // Resets then spans the full width rather than leaving a lonely half-card.
-            if usage.modelUsages.isEmpty {
-                resetsCard(usage: usage)
-            } else {
-                LazyVGrid(columns: columns, spacing: 8) {
-                    resetsCard(usage: usage)
-                        .frame(maxHeight: .infinity)
-                    modelsCard(usage: usage)
-                        .frame(maxHeight: .infinity)
-                }
+            // Models card spans the full width, and is omitted entirely when no per-model data is
+            // present (KTD3). The Resets card that used to share this row is gone: each dial now
+            // carries its own reset countdown under the pace word (#44, KTD3).
+            if !usage.modelUsages.isEmpty {
+                modelsCard(usage: usage)
             }
 
             // Account list (hidden when only 1 account)
@@ -94,9 +96,9 @@ struct UsagePopoverView: View {
             VStack(spacing: 2) {
                 // Freshness line is now unconditional: the update notice lives in the top banner,
                 // so the two no longer compete for this slot. The version rides in front of it (#48).
-                Text(Self.footerStatusLine(version: AppVersion.marketing, updated: lastUpdatedText))
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+                // A leaf view, so the minute clock can move "Updated N minutes ago" without a poll
+                // and without re-evaluating anything above it (KTD10).
+                FooterStatusLineView(clock: clock, lastFetch: usageService.lastSuccessfulFetch)
                 Text("Right-click the battery icon in your menu bar for Settings.")
                     .font(.system(size: 9))
                     .foregroundColor(.secondary)
@@ -109,57 +111,69 @@ struct UsagePopoverView: View {
 
     // MARK: - Cards
 
-    // Gauge cards (Session/Weekly) give the concentric dial and the run-out caption room (#31).
-    // Taller than the arc alone needs: the enlarged dial (frame height 80) plus the caption sit
-    // with vertical slack so title/gauge/caption never clip.
-    private let gaugeCardHeight: CGFloat = 160
-    // Info cards (Resets/Models) take no fixed height: they size to their content and equalize to
-    // each other in the grid (maxHeight at the call site), with content vertically centered. This
-    // hugs the content (no excess bottom padding), keeps the two boxes symmetric, and never clips
-    // the 3-bar model case the way a fixed height would.
+    // Gauge cards (Session/Weekly) give the concentric dial and the three lines under it room
+    // (#31, #44). Taller than the arc alone needs: the enlarged dial (frame height 80) plus the pace
+    // word, the run-out and the reset countdown (10pt each) sit with vertical slack so nothing
+    // clips. 160 fitted one line; the three-line content measures 171 in the render harness, so
+    // 185 leaves the same slack the old card had and keeps the two cards in a row equal.
+    private let gaugeCardHeight: CGFloat = 185
+    // The Models card takes no fixed height: it sizes to its content, with content vertically
+    // centered, so it hugs the bars (no excess bottom padding) and never clips the 3-bar case the
+    // way a fixed height would.
 
     private func sessionCard(usage: UsageData) -> some View {
         // The gauge shows the weekly-capped value (sessionDisplayRemaining) so a nearly-exhausted
         // weekly can't display a high, unreachable session number. The menu-bar renderers read the
         // same value, so the two surfaces never disagree about "Session". The pace is graded
-        // separately from the RAW session (via sessionPace) so the cap never corrupts it.
+        // separately from the RAW session (via sessionPace) so the cap never corrupts it, and the
+        // lines under the dial project the RAW session too (`rawRemaining`, KD7): the display value
+        // reaches ArcGauge and the ring colour only, never `dialLines`.
         gaugeCard(title: "Session",
                   remaining: usage.sessionDisplayRemaining,
+                  rawRemaining: usage.sessionRemaining,
                   resetsAt: usage.sessionResetDate,
                   window: Self.sessionWindow,
                   tickCount: 5,
-                  paceOverride: Self.sessionPace(for: usage),
+                  pace: Self.sessionPace(for: usage),
                   suppressTimeArc: usage.isSessionWeeklyLimited)
     }
 
     private func weeklyCard(usage: UsageData) -> some View {
         gaugeCard(title: "Weekly",
                   remaining: usage.weeklyRemaining,
+                  rawRemaining: usage.weeklyRemaining,
                   resetsAt: usage.weeklyResetDate,
                   window: Self.weeklyWindow,
-                  tickCount: 7)
+                  tickCount: 7,
+                  pace: Self.paceStatus(remainingPercent: usage.weeklyRemaining,
+                                        resetsAt: usage.weeklyResetDate, window: Self.weeklyWindow))
     }
 
-    /// Shared Session/Weekly card: a concentric dual-arc gauge (outer = usage remaining, inner =
-    /// time remaining, both on the batteryColor scale, KTD1/KTD2) over a RAG pace caption
-    /// (#31). The inner arc, time %, and caption self-omit when the reset time is unknown (KTD4).
-    private func gaugeCard(title: String, remaining: Double, resetsAt: Date?, window: TimeInterval, tickCount: Int,
-                           paceOverride: PaceStatus? = nil, suppressTimeArc: Bool = false) -> some View {
+    /// Shared Session/Weekly card: a concentric dual-arc gauge (outer = usage remaining coloured by
+    /// pace with the red floor, KD5; inner = time remaining in neutral grey, KD8) over the pace word,
+    /// the run-out estimate and the reset countdown (KTD3). The inner arc and time % self-omit when
+    /// the reset time is unknown (KTD4); the lines then collapse to "Reset time unavailable".
+    ///
+    /// `remaining` is the DISPLAY value (what the dial draws, and what colours it); `rawRemaining`
+    /// is what the lines project. They differ only on a weekly-limited Session card.
+    private func gaugeCard(title: String, remaining: Double, rawRemaining: Double, resetsAt: Date?,
+                           window: TimeInterval, tickCount: Int, pace: PaceStatus,
+                           suppressTimeArc: Bool = false) -> some View {
         // Suppress the inner time arc when the shown value is not on this card's own clock: a
         // weekly-limited Session displays the weekly quota, so a session-window time arc would pair
         // two different windows and mislead. nil hides the inner arc, its centre clock, and the
         // a11y "time remaining" (KTD4).
         let timeRemaining = suppressTimeArc ? nil : Self.timeRemainingPercent(resetsAt: resetsAt, window: window)
-        // `paceOverride` lets the Session card supply a pace graded from the RAW session value
-        // (or `.weeklyLimited`) instead of the possibly-capped `remaining` shown on the dial; the
-        // Weekly card passes nil and grades its own value.
-        let pace = paceOverride ?? Self.paceStatus(remainingPercent: remaining, resetsAt: resetsAt, window: window)
+        // The spoken label folds the three lines in, computed here (poll time) rather than on the
+        // clock, because this view must not observe the tick (KTD10 rule 1). It refreshes with the
+        // next poll re-render; the visible lines under the dial refresh every minute on their own.
+        let spokenLines = Self.dialLines(pace: pace, rawRemaining: rawRemaining, resetsAt: resetsAt, window: window)
         return UsageCard(title: title) {
             VStack(spacing: 8) {
                 ArcGauge(value: remaining,
-                         color: gaugeColor(for: remaining),
+                         color: Self.ringColor(remaining: remaining, pace: pace),
                          innerValue: timeRemaining,
-                         innerColor: timeRemaining.map { gaugeColor(for: $0) } ?? .clear,
+                         innerColor: Self.neutralInnerRingColor,
                          tickCount: tickCount)
                     // Height drives the arc radius (ArcShape uses min(width,height)); at ~114pt card
                     // width the height binds, so 80 (was 58) grows the rings enough that even the
@@ -168,41 +182,22 @@ struct UsagePopoverView: View {
                     .frame(height: 80)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(Self.gaugeAccessibilityLabel(name: title, usage: remaining,
-                                                                     timeRemaining: timeRemaining, pace: pace))
-                paceCaptionView(pace)
+                                                                     timeRemaining: timeRemaining, pace: pace,
+                                                                     lines: spokenLines))
+                // The three lines are the only part of the card that observes the minute clock.
+                DialLinesView(clock: clock,
+                              title: title,
+                              pace: pace,
+                              rawRemaining: rawRemaining,
+                              displayRemaining: remaining,
+                              resetsAt: resetsAt,
+                              window: window)
             }
+            // Fill the fixed card height from the top, so the two cards in a row stay the same
+            // size and their dials line up even when one shows three lines and the other one.
+            .frame(maxHeight: .infinity, alignment: .top)
         }
         .frame(height: gaugeCardHeight)
-    }
-
-    /// RAG-coloured pace caption under a dial; omitted entirely when the pace is `.unknown` (KTD4).
-    @ViewBuilder
-    private func paceCaptionView(_ pace: PaceStatus) -> some View {
-        if let text = Self.paceCaption(pace) {
-            Text(text)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(Self.paceColor(pace))
-                .fixedSize()
-        }
-    }
-
-    private func resetsCard(usage: UsageData) -> some View {
-        UsageCard(title: "Resets") {
-            VStack(alignment: .leading, spacing: 8) {
-                if usage.sessionResetDate == nil && usage.weeklyResetDate == nil {
-                    // Both reset times missing: show one explicit line rather than two
-                    // bare "--" rows that read as a broken/blank section (issue #23).
-                    Text("Reset times unavailable")
-                        .font(.system(size: 10))
-                        .foregroundColor(Color(white: 0.5))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    resetRow(label: "Session", date: usage.sessionResetDate)
-                    resetRow(label: "Weekly", date: usage.weeklyResetDate)
-                }
-            }
-            .frame(maxHeight: .infinity, alignment: .center)
-        }
     }
 
     /// Bars for the Models card (U4): an "All Models" bar from the real weekly aggregate
@@ -229,25 +224,7 @@ struct UsagePopoverView: View {
 
     // MARK: - Components
 
-    private func resetRow(label: String, date: Date?) -> some View {
-        HStack {
-            Text(label)
-                .font(.system(size: 10))
-                .foregroundColor(.white)
-            Spacer()
-            if let date = date {
-                Text(formatCountdown(date))
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(.white)
-            } else {
-                Text("--")
-                    .font(.system(size: 10))
-                    .foregroundColor(Color(white: 0.5))
-            }
-        }
-    }
-
-    /// Gauge/arc/model-bar color, sharing the exact thresholds the tested `batteryColor`
+    /// Model-bar color, sharing the exact thresholds the tested `batteryColor`
     /// twin uses (red <20, orange <45) so one test set locks both (U7).
     private func gaugeColor(for value: Double) -> Color {
         Self.batteryColor(remainingPercent: value)
@@ -268,8 +245,9 @@ struct UsagePopoverView: View {
 
     /// Shared bar-track gray for the usage-credits bar row.
     private static let trackColor = Color(white: 0.25)
-    /// Shared muted-label gray for secondary label/percent text (bar rows and the run-out caption).
-    private static let mutedLabelColor = Color(white: 0.6)
+    /// Shared muted-label gray for secondary label/percent text (bar rows and the run-out and
+    /// countdown lines under the dials, drawn by the file-scope `DialLinesView`).
+    fileprivate static let mutedLabelColor = Color(white: 0.6)
 
     // MARK: - Pace (U2)
 
@@ -451,15 +429,80 @@ struct UsagePopoverView: View {
         return "Out in ~" + CountdownFormat.minuteResolution(seconds: seconds)
     }
 
-    /// One spoken label per dial combining usage, time-remaining, and the pace status (R9). The
-    /// pace is spelled out with its meaning ("over pace") rather than reusing the terse visual
-    /// caption, and `.unknown` has nothing to add.
+    // MARK: - Dial lines (#44, KTD3)
+
+    /// The three text lines under a dial, in display order: the pace word (nil hides it), the
+    /// run-out estimate (nil hides it), and the reset countdown, which is always present. The two
+    /// durations behind the strings ride along for the spoken label; `runOutSeconds` is already
+    /// quantised, so the voice and the line agree.
+    struct DialLines: Equatable {
+        let caption: String?
+        let runOut: String?
+        let countdown: String
+        let resetSeconds: TimeInterval?
+        let runOutSeconds: TimeInterval?
+    }
+
+    /// The single line a dial shows when its reset time is nil or already past (AE5).
+    static let resetUnavailableLine = "Reset time unavailable"
+
+    /// The lines under one dial from the current snapshot (KTD3). Takes no display value and no
+    /// weekly-limited flag: `pace` already encodes weekly-limited-versus-Danger through
+    /// `sessionPace(for:)`, and `rawRemaining` is the value the run-out projects. A nil or past
+    /// reset self-omits everything but "Reset time unavailable", whatever `pace` says, matching the
+    /// dial's own inner-arc rule (KTD4). The run-out is quantised here, before `runOutLine`, which
+    /// prints exactly what it is given.
+    static func dialLines(pace: PaceStatus, rawRemaining: Double, resetsAt: Date?, window: TimeInterval,
+                          now: Date = Date()) -> DialLines {
+        guard let resetsAt,
+              let resetSeconds = CountdownFormat.remainingSeconds(until: resetsAt, now: now) else {
+            return DialLines(caption: nil, runOut: nil, countdown: resetUnavailableLine,
+                             resetSeconds: nil, runOutSeconds: nil)
+        }
+        let runOut = runOutSeconds(remainingPercent: rawRemaining, resetsAt: resetsAt, window: window,
+                                   pace: pace, now: now)
+            .map { quantiseRunOut($0, window: window) }
+        return DialLines(caption: paceCaption(pace),
+                         runOut: runOutLine(seconds: runOut),
+                         countdown: "Resets in " + CountdownFormat.minuteResolution(seconds: resetSeconds),
+                         resetSeconds: resetSeconds,
+                         runOutSeconds: runOut)
+    }
+
+    /// The Session card's lines. Mirrors `sessionPace(for:)` and picks the RAW `sessionRemaining`
+    /// itself, so no caller can hand the weekly-capped display value to the run-out (KD7).
+    static func sessionDialLines(for usage: UsageData, now: Date = Date()) -> DialLines {
+        dialLines(pace: sessionPace(for: usage, now: now),
+                  rawRemaining: usage.sessionRemaining,
+                  resetsAt: usage.sessionResetDate,
+                  window: sessionWindow,
+                  now: now)
+    }
+
+    /// A duration in words for the spoken label ("2 hours 30 minutes", "3 days", "less than a
+    /// minute"), truncated to whole units exactly like `CountdownFormat.minuteResolution`, so the
+    /// voice never says a number the line does not print. Zero components are dropped.
+    static func spokenDuration(seconds: TimeInterval) -> String {
+        let total = Int(seconds)
+        let units: [(Int, String)] = [(total / 86400, "day"),
+                                      ((total % 86400) / 3600, "hour"),
+                                      ((total % 3600) / 60, "minute")]
+        let parts = units.filter { $0.0 > 0 }.map { "\($0.0) \($0.1)\($0.0 == 1 ? "" : "s")" }
+        return parts.isEmpty ? "less than a minute" : parts.joined(separator: " ")
+    }
+
+    /// One spoken label per dial combining usage, time-remaining, the pace status (R9) and, when
+    /// `lines` is given, the run-out and the reset countdown from under the dial, so each dial is
+    /// spoken once and the three text lines can hide from the accessibility tree (KTD3). The pace
+    /// is spelled out with its meaning ("over pace") rather than reusing the terse visual caption,
+    /// and `.unknown` has nothing to add.
     ///
     /// `.toNearestOrEven` because these are the same two Doubles the gauge draws with "%.0f", and
     /// that is what "%.0f" does at an exact half: plain `.rounded()` would speak 17 against a dial
     /// printing 16. Every menu bar renderer already rounds this way for the same reason. #43 was
     /// this class of bug between two surfaces, and a screen reader is a third one.
-    static func gaugeAccessibilityLabel(name: String, usage: Double, timeRemaining: Double?, pace: PaceStatus) -> String {
+    static func gaugeAccessibilityLabel(name: String, usage: Double, timeRemaining: Double?, pace: PaceStatus,
+                                        lines: DialLines? = nil) -> String {
         var parts = ["\(name) usage \(Int(usage.rounded(.toNearestOrEven))) percent"]
         if let timeRemaining {
             parts.append("time remaining \(Int(timeRemaining.rounded(.toNearestOrEven))) percent")
@@ -470,6 +513,16 @@ struct UsagePopoverView: View {
         case .danger:        parts.append("danger, over pace")
         case .weeklyLimited: parts.append("limited by weekly")
         case .unknown:       break
+        }
+        if let lines {
+            if let runOut = lines.runOutSeconds {
+                parts.append("projected to run out in about \(spokenDuration(seconds: runOut))")
+            }
+            if let reset = lines.resetSeconds {
+                parts.append("resets in \(spokenDuration(seconds: reset))")
+            } else {
+                parts.append(resetUnavailableLine.lowercased())
+            }
         }
         return parts.joined(separator: ", ")
     }
@@ -819,39 +872,21 @@ struct UsagePopoverView: View {
 
     // MARK: - Formatting
 
-    private var lastUpdatedText: String {
-        guard let lastFetch = usageService.lastSuccessfulFetch else { return "Not yet updated" }
-        let seconds = Int(Date().timeIntervalSince(lastFetch))
+    /// The footer freshness text. Static and clock-driven so `FooterStatusLineView` can re-print
+    /// it on each minute tick without a poll (KTD10), and so the copy is testable.
+    static func lastUpdatedText(lastFetch: Date?, now: Date = Date()) -> String {
+        guard let lastFetch else { return "Not yet updated" }
+        let seconds = Int(now.timeIntervalSince(lastFetch))
         if seconds < 60 { return "Updated just now" }
         let minutes = seconds / 60
         if minutes == 1 { return "Updated 1 minute ago" }
         return "Updated \(minutes) minutes ago"
     }
-
-    private func formatCountdown(_ date: Date) -> String {
-        // Route through the shared guarded core (U1, KTD1) so the popover and menu-bar
-        // countdowns inherit the same issue-#23 trap protection.
-        guard let remaining = CountdownFormat.remainingSeconds(until: date) else { return "00m 00s" }
-
-        let total = Int(remaining)
-        let d = total / 86400
-        let h = (total % 86400) / 3600
-        let m = (total % 3600) / 60
-        let s = total % 60
-
-        if d > 0 {
-            return String(format: "%dd %02dh", d, h)
-        } else if h > 0 {
-            return String(format: "%dh %02dm", h, m)
-        } else {
-            return String(format: "%dm %02ds", m, s)
-        }
-    }
 }
 
 // MARK: - Countdown Formatting
 
-/// Shared, testable countdown helpers (U1, KTD1). Both the popover `formatCountdown` and the
+/// Shared, testable countdown helpers (U1, KTD1). Both the popover dial countdown and the
 /// menu-bar compact countdown route through `remainingSeconds` so they inherit the same
 /// issue-#23 trap protection: a past, non-finite, or absurdly large date yields nil rather
 /// than reaching `Int(...)`, which traps fatally.
@@ -1100,6 +1135,114 @@ private struct UsageCard<Content: View>: View {
     }
 }
 
+// MARK: - Minute-clock scope (KTD10)
+
+/// The three text lines under a dial: pace word, run-out, reset countdown, each 10pt (#44, KTD3).
+/// This is the whole tick scope for a card: it is the only view here that observes `PopoverClock`,
+/// so a minute tick re-prints these lines and nothing else. `ArcGauge` is its sibling in
+/// `gaugeCard`, never its child. Hidden from the accessibility tree because the dial's combined
+/// label already speaks all three; without that the pace word was read twice.
+private struct DialLinesView: View {
+    @ObservedObject var clock: PopoverClock
+    let title: String
+    let pace: UsagePopoverView.PaceStatus
+    let rawRemaining: Double
+    let displayRemaining: Double
+    let resetsAt: Date?
+    let window: TimeInterval
+
+    var body: some View {
+        #if DEBUG
+        PopoverBodyCounters.recordLineView(title)
+        #endif
+        let lines = UsagePopoverView.dialLines(pace: pace, rawRemaining: rawRemaining,
+                                               resetsAt: resetsAt, window: window, now: clock.now)
+        return VStack(spacing: 2) {
+            if let caption = lines.caption {
+                // The word shares the ring's red floor, on the DISPLAY value the ring uses (KD13).
+                Text(caption)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(UsagePopoverView.paceCaptionColor(remaining: displayRemaining, pace: pace))
+            }
+            if let runOut = lines.runOut {
+                Text(runOut)
+                    .font(.system(size: 10))
+                    .foregroundColor(UsagePopoverView.mutedLabelColor)
+            }
+            Text(lines.countdown)
+                .font(.system(size: 10))
+                .monospacedDigit()
+                .foregroundColor(UsagePopoverView.mutedLabelColor)
+        }
+        // "Reset time unavailable" is the widest line and sits within a few points of the 114pt
+        // card content width; one line with a little shrink is insurance against a wider font.
+        .lineLimit(1)
+        .minimumScaleFactor(0.85)
+        .accessibilityHidden(true)
+    }
+}
+
+/// The footer's "v1.70 · Updated N minutes ago" line, in the tick scope so the freshness text
+/// moves without a poll (KTD10). `lastFetch` comes in as a value from the parent, which already
+/// observes `UsageService`; this view never does.
+private struct FooterStatusLineView: View {
+    @ObservedObject var clock: PopoverClock
+    let lastFetch: Date?
+
+    var body: some View {
+        #if DEBUG
+        PopoverBodyCounters.recordLineView("Footer")
+        #endif
+        return Text(UsagePopoverView.footerStatusLine(
+            version: AppVersion.marketing,
+            updated: UsagePopoverView.lastUpdatedText(lastFetch: lastFetch, now: clock.now)))
+            .font(.caption2)
+            .foregroundColor(.secondary)
+    }
+}
+
+#if DEBUG
+/// Body-evaluation counters for the KTD10 refresh-scope proof, absent from Release builds by
+/// construction (the whole type and every call site sit under `#if DEBUG`). Each evaluation logs
+/// at debug level (Console.app, subsystem of the app, category "PopoverBody"). The expected shape
+/// with the popover open: one line-view evaluation per instance per minute, plus one per poll that
+/// lands, and `ArcGauge` evaluations equal to the polls only, never the ticks. Closed: zero.
+///
+/// The trip-wire fails (log at fault, then `assertionFailure`) when one line view evaluates more
+/// than `tripWireLimit` times inside `tripWireWindow`: that is the popover re-rendering its text
+/// on something other than the minute clock and a poll, the loop shape both CPU incidents had.
+/// Rapid user actions that legitimately re-render (switching accounts twice inside ten seconds
+/// right after opening) can trip it too; it is a debug diagnostic, not a product check.
+@MainActor
+enum PopoverBodyCounters {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app",
+        category: "PopoverBody"
+    )
+    private static var counts: [String: Int] = [:]
+    private static var lineViewStamps: [String: [Date]] = [:]
+    static let tripWireWindow: TimeInterval = 10
+    static let tripWireLimit = 2
+
+    static func record(_ name: String) {
+        let count = (counts[name] ?? 0) + 1
+        counts[name] = count
+        logger.debug("body=\(name, privacy: .public) count=\(count)")
+    }
+
+    static func recordLineView(_ name: String, now: Date = Date()) {
+        record(name)
+        var stamps = (lineViewStamps[name] ?? []).filter { now.timeIntervalSince($0) < tripWireWindow }
+        stamps.append(now)
+        lineViewStamps[name] = stamps
+        if stamps.count > tripWireLimit {
+            logger.fault("trip-wire: line view \(name, privacy: .public) evaluated \(stamps.count) times in \(Int(tripWireWindow))s")
+            assertionFailure("KTD10 trip-wire: line view \(name) evaluated \(stamps.count) times in \(Int(tripWireWindow))s")
+        }
+    }
+}
+#endif
+
 // MARK: - Arc Gauge
 
 private struct ArcGauge: View {
@@ -1118,7 +1261,11 @@ private struct ArcGauge: View {
     private let innerInset: CGFloat = 9          // radial gap between the outer and inner arc (KTD1 separation)
 
     var body: some View {
-        ZStack {
+        #if DEBUG
+        // KTD10 proof: this must count polls, never minute ticks (the gauge is outside the scope).
+        PopoverBodyCounters.record("ArcGauge")
+        #endif
+        return ZStack {
             // Outer arc: usage remaining.
             ArcShape()
                 .stroke(Color(white: 0.25), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))

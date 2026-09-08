@@ -201,4 +201,49 @@ final class MenuBarCountdownTests: XCTestCase {
     func testVersionMenuTitle_empty_isNil() {
         XCTAssertNil(MenuBarController.versionMenuTitle(""))
     }
+
+    // MARK: - PopoverClock (KTD10: one clock, started and stopped by the popover show/close hooks)
+
+    /// The clock `MenuBarController.popoverWillShow` starts and `popoverDidClose` stops. Only the
+    /// clock is testable here (the controller needs a live status item); the two hooks are one-line
+    /// forwards to `start()` and `stop()`.
+    @MainActor
+    func testPopoverClock_startRefreshesNowTicksAndStopEndsTicks() async {
+        let clock = PopoverClock(interval: 0.05, now: .distantPast)
+        XCTAssertFalse(clock.isRunning)
+        XCTAssertEqual(clock.now, .distantPast)
+
+        // start() refreshes `now` at once (the popover must open on the current minute, not the
+        // minute it last closed on) and arms the timer.
+        clock.start()
+        XCTAssertTrue(clock.isRunning)
+        XCTAssertLessThan(abs(clock.now.timeIntervalSinceNow), 5)
+        let atStart = clock.now
+
+        let ticked = expectation(description: "tick")
+        ticked.assertForOverFulfill = false
+        let tickSink = clock.$now.dropFirst().sink { _ in ticked.fulfill() }
+        await fulfillment(of: [ticked], timeout: 2)
+        tickSink.cancel()
+        XCTAssertGreaterThan(clock.now, atStart)
+
+        // A second start() is a no-op on the timer (one clock, not two).
+        clock.start()
+        XCTAssertTrue(clock.isRunning)
+
+        clock.stop()
+        XCTAssertFalse(clock.isRunning)
+        let silent = expectation(description: "no tick after stop")
+        silent.isInverted = true
+        let silentSink = clock.$now.dropFirst().sink { _ in silent.fulfill() }
+        await fulfillment(of: [silent], timeout: 0.3)
+        silentSink.cancel()
+    }
+
+    @MainActor
+    func testPopoverClock_stopWithoutStartIsHarmless() {
+        let clock = PopoverClock(interval: 0.05)
+        clock.stop()
+        XCTAssertFalse(clock.isRunning)
+    }
 }
