@@ -185,4 +185,20 @@ final class MenuBarCountdownTests: XCTestCase {
         XCTAssertEqual(usage.weeklyRemaining, 100)
         XCTAssertFalse(usage.isSessionWeeklyLimited)
     }
+
+    // MARK: - Version menu title (#48)
+
+    /// The right-click menu's first item is a disabled "Claude Battery v1.70". Only the title
+    /// mapping is tested; a nil title means the item is omitted from the menu.
+    func testVersionMenuTitle_prefixesAppName() {
+        XCTAssertEqual(MenuBarController.versionMenuTitle("1.70"), "Claude Battery v1.70")
+    }
+
+    func testVersionMenuTitle_nil_isNil() {
+        XCTAssertNil(MenuBarController.versionMenuTitle(nil))
+    }
+
+    func testVersionMenuTitle_empty_isNil() {
+        XCTAssertNil(MenuBarController.versionMenuTitle(""))
+    }
 }

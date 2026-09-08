@@ -256,6 +256,15 @@ class MenuBarController: NSObject {
 
     private func showContextMenu() {
         let menu = NSMenu()
+        // Greyed version row first (#48). Its action is nil, so the target loop below skips it
+        // and it stays inert; disabled explicitly so it never highlights. Omitted when the
+        // bundle carries no version (the test host).
+        if let versionTitle = Self.versionMenuTitle(AppVersion.marketing) {
+            let versionItem = NSMenuItem(title: versionTitle, action: nil, keyEquivalent: "")
+            versionItem.isEnabled = false
+            menu.addItem(versionItem)
+            menu.addItem(.separator())
+        }
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
@@ -395,6 +404,14 @@ class MenuBarController: NSObject {
     nonisolated static func countdownTitle(usage: UsageData?, enabled: Bool, now: Date = Date()) -> String {
         guard enabled, let resetDate = usage?.sessionResetDate else { return "" }
         return CountdownFormat.compactCountdown(until: resetDate, now: now) ?? ""
+    }
+
+    /// Title for the disabled first row of the right-click menu, "Claude Battery v1.70", or nil
+    /// when there is no version to show (the row is then omitted). `nonisolated static` so it is
+    /// reachable from tests like `countdownTitle`.
+    nonisolated static func versionMenuTitle(_ version: String?) -> String? {
+        guard let version, !version.isEmpty else { return nil }
+        return "Claude Battery v\(version)"
     }
 
     /// Compose a leading rounded "tag cell" carrying the countdown onto the front of the

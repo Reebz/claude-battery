@@ -4,6 +4,14 @@ import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app", category: "UpdateChecker")
 
+/// The running app's marketing version, read once from the bundle. Lives in this file because
+/// the update comparison already owns "what version am I"; the popover footer and the right-click
+/// menu format it (#48). nil when the key is missing, which is the test host under XCTest.
+/// No build number: CURRENT_PROJECT_VERSION is always 1.
+enum AppVersion {
+    static let marketing: String? = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+}
+
 @MainActor
 class UpdateChecker: NSObject, ObservableObject {
     @Published var availableVersion: String?
@@ -93,7 +101,7 @@ class UpdateChecker: NSObject, ObservableObject {
             let release = try decoder.decode(GitHubRelease.self, from: data)
 
             let remoteVersion = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
-            let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+            let currentVersion = AppVersion.marketing ?? "0"
 
             guard isValidVersion(remoteVersion) else {
                 logger.warning("Invalid version format: \(remoteVersion)")

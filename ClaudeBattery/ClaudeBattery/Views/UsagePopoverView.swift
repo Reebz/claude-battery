@@ -93,8 +93,8 @@ struct UsagePopoverView: View {
 
             VStack(spacing: 2) {
                 // Freshness line is now unconditional: the update notice lives in the top banner,
-                // so the two no longer compete for this slot.
-                Text(lastUpdatedText)
+                // so the two no longer compete for this slot. The version rides in front of it (#48).
+                Text(Self.footerStatusLine(version: AppVersion.marketing, updated: lastUpdatedText))
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 Text("Right-click the battery icon in your menu bar for Settings.")
@@ -596,6 +596,20 @@ struct UsagePopoverView: View {
         return (title: "v\(availableVersion) available - Download",
                 spokenLabel: "Version \(availableVersion) available, Download",
                 url: downloadURL)
+    }
+
+    /// "v1.70" from the bare marketing version, or nil when there is no version to show (missing
+    /// or empty, which is the XCTest host). Pure so the footer copy is testable without the view.
+    static func versionLabel(_ version: String?) -> String? {
+        guard let version, !version.isEmpty else { return nil }
+        return "v\(version)"
+    }
+
+    /// The footer's single status line: "v1.70 · Updated just now". Without a version it is the
+    /// freshness text alone, with no dangling separator.
+    static func footerStatusLine(version: String?, updated: String) -> String {
+        guard let label = versionLabel(version) else { return updated }
+        return "\(label) \u{00B7} \(updated)"
     }
 
     /// Full-width update banner at the top of the popover. The URL is host- and scheme-validated

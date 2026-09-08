@@ -163,3 +163,37 @@ final class UsagePopoverViewUpdateBannerTests: XCTestCase {
         XCTAssertFalse(banner?.title.contains("\u{2014}") ?? true, "got `\(banner?.title ?? "nil")`")
     }
 }
+
+/// Locks the pure version formatters behind the popover footer (#48). The footer reads
+/// "v1.70 · Updated just now"; under XCTest `Bundle.main` is the test host, so the version
+/// string is passed in rather than read from `AppVersion`.
+final class UsagePopoverViewVersionTests: XCTestCase {
+
+    func testVersionLabel_prefixesV() {
+        XCTAssertEqual(UsagePopoverView.versionLabel("1.70"), "v1.70")
+    }
+
+    func testVersionLabel_nil_isNil() {
+        XCTAssertNil(UsagePopoverView.versionLabel(nil))
+    }
+
+    func testVersionLabel_empty_isNil() {
+        XCTAssertNil(UsagePopoverView.versionLabel(""))
+    }
+
+    func testFooterStatusLine_withVersion_joinsWithMiddleDot() {
+        let line = UsagePopoverView.footerStatusLine(version: "1.70", updated: "Updated just now")
+        XCTAssertEqual(line, "v1.70 · Updated just now")
+    }
+
+    func testFooterStatusLine_withoutVersion_hasNoDanglingSeparator() {
+        let line = UsagePopoverView.footerStatusLine(version: nil, updated: "Not yet updated")
+        XCTAssertEqual(line, "Not yet updated")
+        XCTAssertFalse(line.contains("\u{00B7}"), "got `\(line)`")
+    }
+
+    func testFooterStatusLine_emptyVersion_hasNoDanglingSeparator() {
+        let line = UsagePopoverView.footerStatusLine(version: "", updated: "Updated just now")
+        XCTAssertEqual(line, "Updated just now")
+    }
+}
