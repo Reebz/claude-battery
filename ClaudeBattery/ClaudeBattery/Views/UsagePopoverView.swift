@@ -261,7 +261,7 @@ struct UsagePopoverView: View {
 
     static func batteryColor(remainingPercent: Double) -> Color {
         let clamped = max(0, min(100, remainingPercent))
-        if clamped < 20 { return .red }
+        if clamped < UsageData.lowRemainingThreshold { return .red }
         if clamped < 45 { return .orange }
         return .green
     }
@@ -367,6 +367,88 @@ struct UsagePopoverView: View {
         case .weeklyLimited: return mutedLabelColor
         case .unknown:       return .clear
         }
+    }
+
+    // MARK: - Ring colour (#46, KD5, KD13)
+
+    /// Outer ring colour: red below `UsageData.lowRemainingThreshold` whatever the pace says (the
+    /// menu-bar icons go red at the same number, so icon and popover agree about "nearly empty"),
+    /// else the pace colour so ring and word agree, else the level colour when there is no pace to
+    /// follow (`.weeklyLimited`, `.unknown`). The Session card passes the DISPLAY value here, the
+    /// same number the renderers test (KTD2).
+    static func ringColor(remaining: Double, pace: PaceStatus) -> Color {
+        if remaining < UsageData.lowRemainingThreshold { return .red }
+        switch pace {
+        case .onTrack, .caution, .danger: return paceColor(pace)
+        case .weeklyLimited, .unknown:    return batteryColor(remainingPercent: remaining)
+        }
+    }
+
+    /// Colour of the pace word under the dial: the ring's red floor, otherwise `paceColor`, so the
+    /// word can never disagree with the ring and "Limited by weekly" keeps its muted colour above
+    /// the floor (KD13). Takes the same value the ring does.
+    static func paceCaptionColor(remaining: Double, pace: PaceStatus) -> Color {
+        if remaining < UsageData.lowRemainingThreshold { return .red }
+        return paceColor(pace)
+    }
+
+    /// The inner time ring is a fixed neutral grey (KD8): lighter than `trackColor` so it reads as
+    /// a ring, and not cyan or blue, which already means "spend is fine" on the credits row.
+    static let neutralInnerRingColor = Color(white: 0.5)
+
+    // MARK: - Run-out estimate (#31, KD6, KD7, KTD1)
+
+    /// Below this fraction of the window elapsed no run-out is projected: a burst of use at the
+    /// start of a fresh window divides by a tiny elapsed time and projects a run-out minutes away.
+    static let minElapsedFraction: Double = 0.10
+
+    /// Seconds until usage runs out at the current burn rate, from the current snapshot only, or
+    /// nil when there is nothing sound to project. `pace` is the result of `paceStatus` on the SAME
+    /// inputs: the projection reads it instead of re-deriving the delta, so the word and the
+    /// estimate can never drift apart, and it returns nil unless the pace is `.caution` or
+    /// `.danger`. That gate already implies at least 10% used and at most 90% left, so the only
+    /// guards kept are the ones it does not imply: depleted (nothing left to project), under
+    /// `minElapsedFraction` of the window elapsed, and a reset beyond one window (clock skew makes
+    /// the elapsed time negative). Window start is `resetsAt - window`, as in `timeRemainingPercent`.
+    /// The formula `(window - r) * remaining / (100 - remaining)` is below `r` exactly when the
+    /// pace delta is positive, so the estimate always lands before the reset.
+    static func runOutSeconds(remainingPercent: Double, resetsAt: Date?, window: TimeInterval,
+                              pace: PaceStatus, now: Date = Date()) -> TimeInterval? {
+        guard pace == .caution || pace == .danger else { return nil }
+        guard let resetsAt,
+              let r = CountdownFormat.remainingSeconds(until: resetsAt, now: now) else { return nil }
+        if remainingPercent <= 0 { return nil }
+        if r > window { return nil }
+        let elapsedFraction = 1 - r / window
+        if elapsedFraction < minElapsedFraction { return nil }
+        return (window - r) * remainingPercent / (100 - remainingPercent)
+    }
+
+    /// Rounds a run-out to the nearest 5 minutes on the session window and the nearest hour on
+    /// the weekly window, never below one quantum, so poll-to-poll jitter in the integer
+    /// percentages does not move the shown value.
+    static func quantiseRunOut(_ seconds: TimeInterval, window: TimeInterval) -> TimeInterval {
+        let quantum: TimeInterval = window == weeklyWindow ? 3600 : 300
+        return max(1, (seconds / quantum).rounded()) * quantum
+    }
+
+    /// The Session card's run-out (#31). Mirrors `sessionPace(for:)`: it projects the RAW
+    /// `sessionRemaining` over the 5h window with the pace `sessionPace` grades, never the capped
+    /// `sessionDisplayRemaining`. Because `sessionPace` returns `.weeklyLimited` unless the raw
+    /// session is in Danger, the weekly-limited rule (KD7) needs no restating here.
+    static func sessionRunOutSeconds(for usage: UsageData, now: Date = Date()) -> TimeInterval? {
+        runOutSeconds(remainingPercent: usage.sessionRemaining,
+                      resetsAt: usage.sessionResetDate,
+                      window: sessionWindow,
+                      pace: sessionPace(for: usage, now: now),
+                      now: now)
+    }
+
+    /// Copy for the run-out line under the pace word, relative so it cannot be mistaken for a
+    /// reset time (KD6). Prints the seconds it is given; the caller quantises first. nil hides it.
+    static func runOutLine(seconds: TimeInterval?) -> String? {
+        guard let seconds else { return nil }
+        return "Out in ~" + CountdownFormat.minuteResolution(seconds: seconds)
     }
 
     /// One spoken label per dial combining usage, time-remaining, and the pace status (R9). The
@@ -794,6 +876,28 @@ enum CountdownFormat {
         if hours >= 1 { return "\(hours)h+" }
         if minutes >= 1 { return "\(minutes)m" }
         return "<1m"
+    }
+
+    /// Minute-resolution countdown for the dial lines (KD10): `>= 1d` -> `"Nd HHh"` (e.g.
+    /// "3d 00h"), `>= 1h` -> `"Nh MMm"` (e.g. "2h 14m"), `>= 1m` -> `"Nm"` (e.g. "5m"), under a
+    /// minute `"<1m"` so this and `compactCountdown` print the same thing for the same instant.
+    /// Takes seconds so the run-out line can print a duration that has no date.
+    static func minuteResolution(seconds: TimeInterval) -> String {
+        let total = Int(seconds)
+        let days = total / 86400
+        let hours = (total % 86400) / 3600
+        let minutes = (total % 3600) / 60
+        if days > 0 { return String(format: "%dd %02dh", days, hours) }
+        if hours > 0 { return String(format: "%dh %02dm", hours, minutes) }
+        if minutes >= 1 { return "\(minutes)m" }
+        return "<1m"
+    }
+
+    /// `minuteResolution(seconds:)` for a reset date, nil through `remainingSeconds` when there is
+    /// nothing to count down.
+    static func minuteResolution(until date: Date, now: Date = Date()) -> String? {
+        guard let remaining = remainingSeconds(until: date, now: now) else { return nil }
+        return minuteResolution(seconds: remaining)
     }
 }
 

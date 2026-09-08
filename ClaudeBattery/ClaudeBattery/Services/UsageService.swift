@@ -922,6 +922,12 @@ struct UsageData: Equatable {
     /// disables the conversion entirely rather than substituting a guess (R3).
     private(set) var planRatio: Double?
 
+    /// Below this many percent left a limit is "nearly empty": the popover rings and pace word go
+    /// red whatever the pace says, and `batteryColor` starts its red band here (KTD2). One owner
+    /// for the number, reachable from the AppKit renderers without SwiftUI; the four menu-bar
+    /// renderers still carry their own `< 20` literal and migrating them is deferred cleanup.
+    static let lowRemainingThreshold: Double = 20
+
     init(from response: UsageResponse, prepaidCredits: PrepaidCreditsResponse? = nil, planRatio: Double? = nil) {
         self.planRatio = planRatio
         let limits = response.limits

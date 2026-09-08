@@ -61,6 +61,37 @@ final class CountdownFormatTests: XCTestCase {
         }
     }
 
+    // MARK: - minuteResolution (the dial countdown and the run-out line, no seconds, KD10)
+
+    func testMinute_twoHoursExactly_zeroPaddedMinutes() {
+        XCTAssertEqual(CountdownFormat.minuteResolution(seconds: 7200), "2h 00m")
+    }
+
+    func testMinute_twoHoursFourteen() {
+        XCTAssertEqual(CountdownFormat.minuteResolution(seconds: 2 * 3600 + 14 * 60), "2h 14m")
+    }
+
+    func testMinute_fiveMinutes_minutesOnly() {
+        XCTAssertEqual(CountdownFormat.minuteResolution(seconds: 300), "5m")
+    }
+
+    func testMinute_underAMinute_matchesCompact() {
+        // Both surfaces print the same thing for the same instant under a minute.
+        XCTAssertEqual(CountdownFormat.minuteResolution(seconds: 59), "<1m")
+        XCTAssertEqual(CountdownFormat.minuteResolution(seconds: 59), CountdownFormat.compactCountdown(until: future(59), now: now))
+    }
+
+    func testMinute_days_zeroPaddedHours() {
+        XCTAssertEqual(CountdownFormat.minuteResolution(seconds: 90000), "1d 01h")
+        XCTAssertEqual(CountdownFormat.minuteResolution(seconds: 3 * 86400), "3d 00h")
+    }
+
+    func testMinute_until_routesThroughRemainingSecondsGuard() {
+        XCTAssertEqual(CountdownFormat.minuteResolution(until: future(7200), now: now), "2h 00m")
+        XCTAssertNil(CountdownFormat.minuteResolution(until: future(-120), now: now))
+        XCTAssertNil(CountdownFormat.minuteResolution(until: now, now: now))
+    }
+
     // MARK: - remainingSeconds guard
 
     func testRemainingSeconds_past_isNil() {
