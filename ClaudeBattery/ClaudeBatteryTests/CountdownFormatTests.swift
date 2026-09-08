@@ -86,12 +86,6 @@ final class CountdownFormatTests: XCTestCase {
         XCTAssertEqual(CountdownFormat.minuteResolution(seconds: 3 * 86400), "3d 00h")
     }
 
-    func testMinute_until_routesThroughRemainingSecondsGuard() {
-        XCTAssertEqual(CountdownFormat.minuteResolution(until: future(7200), now: now), "2h 00m")
-        XCTAssertNil(CountdownFormat.minuteResolution(until: future(-120), now: now))
-        XCTAssertNil(CountdownFormat.minuteResolution(until: now, now: now))
-    }
-
     // MARK: - remainingSeconds guard
 
     func testRemainingSeconds_past_isNil() {

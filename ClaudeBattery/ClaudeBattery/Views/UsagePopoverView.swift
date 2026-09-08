@@ -410,18 +410,6 @@ struct UsagePopoverView: View {
         return max(1, (seconds / quantum).rounded()) * quantum
     }
 
-    /// The Session card's run-out (#31). Mirrors `sessionPace(for:)`: it projects the RAW
-    /// `sessionRemaining` over the 5h window with the pace `sessionPace` grades, never the capped
-    /// `sessionDisplayRemaining`. Because `sessionPace` returns `.weeklyLimited` unless the raw
-    /// session is in Danger, the weekly-limited rule (KD7) needs no restating here.
-    static func sessionRunOutSeconds(for usage: UsageData, now: Date = Date()) -> TimeInterval? {
-        runOutSeconds(remainingPercent: usage.sessionRemaining,
-                      resetsAt: usage.sessionResetDate,
-                      window: sessionWindow,
-                      pace: sessionPace(for: usage, now: now),
-                      now: now)
-    }
-
     /// Copy for the run-out line under the pace word, relative so it cannot be mistaken for a
     /// reset time (KD6). Prints the seconds it is given; the caller quantises first. nil hides it.
     static func runOutLine(seconds: TimeInterval?) -> String? {
@@ -483,10 +471,8 @@ struct UsagePopoverView: View {
     /// minute"), truncated to whole units exactly like `CountdownFormat.minuteResolution`, so the
     /// voice never says a number the line does not print. Zero components are dropped.
     static func spokenDuration(seconds: TimeInterval) -> String {
-        let total = Int(seconds)
-        let units: [(Int, String)] = [(total / 86400, "day"),
-                                      ((total % 86400) / 3600, "hour"),
-                                      ((total % 3600) / 60, "minute")]
+        let c = CountdownFormat.components(seconds: seconds)
+        let units: [(Int, String)] = [(c.days, "day"), (c.hours, "hour"), (c.minutes, "minute")]
         let parts = units.filter { $0.0 > 0 }.map { "\($0.0) \($0.1)\($0.0 == 1 ? "" : "s")" }
         return parts.isEmpty ? "less than a minute" : parts.joined(separator: " ")
     }
@@ -735,7 +721,7 @@ struct UsagePopoverView: View {
 
     /// "v1.70" from the bare marketing version, or nil when there is no version to show (missing
     /// or empty, which is the XCTest host). Pure so the footer copy is testable without the view.
-    static func versionLabel(_ version: String?) -> String? {
+    nonisolated static func versionLabel(_ version: String?) -> String? {
         guard let version, !version.isEmpty else { return nil }
         return "v\(version)"
     }
@@ -913,26 +899,23 @@ enum CountdownFormat {
         return "<1m"
     }
 
+    /// Whole days, hours and minutes of a duration, truncated (`Int(seconds)`), shared by the
+    /// dial countdown and the spoken label so both print the same numbers for the same instant.
+    static func components(seconds: TimeInterval) -> (days: Int, hours: Int, minutes: Int) {
+        let total = Int(seconds)
+        return (total / 86400, (total % 86400) / 3600, (total % 3600) / 60)
+    }
+
     /// Minute-resolution countdown for the dial lines (KD10): `>= 1d` -> `"Nd HHh"` (e.g.
     /// "3d 00h"), `>= 1h` -> `"Nh MMm"` (e.g. "2h 14m"), `>= 1m` -> `"Nm"` (e.g. "5m"), under a
     /// minute `"<1m"` so this and `compactCountdown` print the same thing for the same instant.
     /// Takes seconds so the run-out line can print a duration that has no date.
     static func minuteResolution(seconds: TimeInterval) -> String {
-        let total = Int(seconds)
-        let days = total / 86400
-        let hours = (total % 86400) / 3600
-        let minutes = (total % 3600) / 60
+        let (days, hours, minutes) = components(seconds: seconds)
         if days > 0 { return String(format: "%dd %02dh", days, hours) }
         if hours > 0 { return String(format: "%dh %02dm", hours, minutes) }
         if minutes >= 1 { return "\(minutes)m" }
         return "<1m"
-    }
-
-    /// `minuteResolution(seconds:)` for a reset date, nil through `remainingSeconds` when there is
-    /// nothing to count down.
-    static func minuteResolution(until date: Date, now: Date = Date()) -> String? {
-        guard let remaining = remainingSeconds(until: date, now: now) else { return nil }
-        return minuteResolution(seconds: remaining)
     }
 }
 

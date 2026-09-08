@@ -2023,7 +2023,7 @@ extension AuthManager: WKNavigationDelegate {
                 isMainFrame: navigationAction.targetFrame?.isMainFrame ?? false,
                 targetFrameIsNil: navigationAction.targetFrame == nil,
                 navigationType: navigationAction.navigationType,
-                onPopup: popupWebView != nil && webView === popupWebView
+                onPopup: webView === popupWebView
             )
             recordBlockedNavigation(host: host, kind: kind)
             decisionHandler(.cancel)
@@ -2106,7 +2106,7 @@ extension AuthManager: WKUIDelegate {
                 isMainFrame: false,
                 targetFrameIsNil: true,
                 navigationType: navigationAction.navigationType,
-                onPopup: popupWebView != nil && webView === popupWebView
+                onPopup: webView === popupWebView
             ))
             return nil
         }

@@ -421,8 +421,7 @@ class MenuBarController: NSObject {
     /// when there is no version to show (the row is then omitted). `nonisolated static` so it is
     /// reachable from tests like `countdownTitle`.
     nonisolated static func versionMenuTitle(_ version: String?) -> String? {
-        guard let version, !version.isEmpty else { return nil }
-        return "Claude Battery v\(version)"
+        UsagePopoverView.versionLabel(version).map { "Claude Battery \($0)" }
     }
 
     /// Compose a leading rounded "tag cell" carrying the countdown onto the front of the

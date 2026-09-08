@@ -263,27 +263,33 @@ final class RunOutForecastTests: XCTestCase {
         XCTAssertNil(UsagePopoverView.runOutLine(seconds: runOut(45, 9000, s)))
     }
 
-    // MARK: - sessionRunOutSeconds (KD7: weekly-limited hides the run-out unless the raw session is in Danger)
+    // MARK: - sessionDialLines(...).runOutSeconds (KD7: weekly-limited hides the run-out unless the raw session is in Danger)
 
     func testSessionRunOut_weeklyLimitedAndRawOnTrack_nil() {
         let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
         XCTAssertEqual(UsagePopoverView.sessionPace(for: usage, now: now), .weeklyLimited)
-        XCTAssertNil(UsagePopoverView.sessionRunOutSeconds(for: usage, now: now))
+        XCTAssertNil(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds)
     }
 
     func testSessionRunOut_weeklyLimitedButRawDanger_projectsRawSession() {
         // AE4 second half: the raw session (15%, half the window left) is in Danger, so the
-        // run-out shows and it is the RAW session's projection: 9000 * 15 / 85.
+        // run-out shows and it is the RAW session's projection: 9000 * 15 / 85 (1588 s), which
+        // `sessionDialLines` quantises to the nearest 5 minutes on the session window (1500 s).
         let usage = makeUsage(session: 15, weekly: 1, sessionResetsIn: 9000)
         XCTAssertTrue(usage.isSessionWeeklyLimited)
         XCTAssertEqual(UsagePopoverView.sessionPace(for: usage, now: now), .danger)
-        assertSeconds(UsagePopoverView.sessionRunOutSeconds(for: usage, now: now), 9000 * 15 / 85)
+        assertSeconds(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds,
+                      UsagePopoverView.quantiseRunOut(9000 * 15 / 85, window: s))
+        assertSeconds(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds, 25 * 60)
     }
 
     func testSessionRunOut_healthyWeek_projectsRawSession() {
+        // 6000 s is already on a 5-minute boundary, so quantising leaves it unchanged.
         let usage = makeUsage(session: 40, weekly: 50, sessionResetsIn: 9000)
         XCTAssertFalse(usage.isSessionWeeklyLimited)
-        assertSeconds(UsagePopoverView.sessionRunOutSeconds(for: usage, now: now), 6000)
+        assertSeconds(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds,
+                      UsagePopoverView.quantiseRunOut(6000, window: s))
+        assertSeconds(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds, 6000)
     }
 
     func testSessionRunOut_neverProjectsTheCappedValue() {
@@ -297,7 +303,7 @@ final class RunOutForecastTests: XCTestCase {
         XCTAssertNotNil(UsagePopoverView.runOutSeconds(remainingPercent: usage.sessionDisplayRemaining,
                                                        resetsAt: usage.sessionResetDate, window: s,
                                                        pace: wrongPace, now: now))
-        XCTAssertNil(UsagePopoverView.sessionRunOutSeconds(for: usage, now: now))
+        XCTAssertNil(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds)
     }
 
     // MARK: - ringColor (KD5: pace colour with a red floor below the nearly-empty threshold)
