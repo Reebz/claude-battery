@@ -127,15 +127,18 @@ struct UsagePopoverView: View {
         // same value, so the two surfaces never disagree about "Session". The pace is graded
         // separately from the RAW session (via sessionPace) so the cap never corrupts it, and the
         // lines under the dial project the RAW session too (`rawRemaining`, KD7): the display value
-        // reaches ArcGauge and the ring colour only, never `dialLines`.
-        gaugeCard(title: "Session",
-                  remaining: usage.sessionDisplayRemaining,
-                  rawRemaining: usage.sessionRemaining,
-                  resetsAt: usage.sessionResetDate,
-                  window: Self.sessionWindow,
-                  tickCount: 5,
-                  pace: Self.sessionPace(for: usage),
-                  suppressTimeArc: usage.isSessionWeeklyLimited)
+        // reaches ArcGauge and the ring colour only, never `dialLines`. Both come from
+        // `sessionDialInputs`, the one place that picks them, so this card cannot be re-wired to
+        // the display value by hand.
+        let inputs = Self.sessionDialInputs(for: usage)
+        return gaugeCard(title: "Session",
+                         remaining: usage.sessionDisplayRemaining,
+                         rawRemaining: inputs.rawRemaining,
+                         resetsAt: usage.sessionResetDate,
+                         window: Self.sessionWindow,
+                         tickCount: 5,
+                         pace: inputs.pace,
+                         suppressTimeArc: usage.isSessionWeeklyLimited)
     }
 
     private func weeklyCard(usage: UsageData) -> some View {
@@ -439,7 +442,9 @@ struct UsagePopoverView: View {
     /// `sessionPace(for:)`, and `rawRemaining` is the value the run-out projects. A nil or past
     /// reset self-omits everything but "Reset time unavailable", whatever `pace` says, matching the
     /// dial's own inner-arc rule (KTD4). The run-out is quantised here, before `runOutLine`, which
-    /// prints exactly what it is given.
+    /// prints exactly what it is given, and then dropped unless it still lands strictly before the
+    /// reset: `pace` is graded at poll time while these lines re-print on the minute clock, so a
+    /// stale Caution can otherwise project past a reset the countdown says is nearer.
     static func dialLines(pace: PaceStatus, rawRemaining: Double, resetsAt: Date?, window: TimeInterval,
                           now: Date = Date()) -> DialLines {
         guard let resetsAt,
@@ -450,6 +455,7 @@ struct UsagePopoverView: View {
         let runOut = runOutSeconds(remainingPercent: rawRemaining, resetsAt: resetsAt, window: window,
                                    pace: pace, now: now)
             .map { quantiseRunOut($0, window: window) }
+            .flatMap { $0 < resetSeconds ? $0 : nil }
         return DialLines(caption: paceCaption(pace),
                          runOut: runOutLine(seconds: runOut),
                          countdown: "Resets in " + CountdownFormat.minuteResolution(seconds: resetSeconds),
@@ -457,14 +463,21 @@ struct UsagePopoverView: View {
                          runOutSeconds: runOut)
     }
 
-    /// The Session card's lines. Mirrors `sessionPace(for:)` and picks the RAW `sessionRemaining`
-    /// itself, so no caller can hand the weekly-capped display value to the run-out (KD7).
+    /// The two inputs the Session card's lines project from: the pace from `sessionPace(for:)`
+    /// and the RAW `sessionRemaining`, picked here and nowhere else, so neither `sessionCard` nor
+    /// any other caller can hand the weekly-capped display value to the run-out (KD7).
+    static func sessionDialInputs(for usage: UsageData, now: Date = Date()) -> (pace: PaceStatus, rawRemaining: Double) {
+        (pace: sessionPace(for: usage, now: now), rawRemaining: usage.sessionRemaining)
+    }
+
+    /// The Session card's lines, from `sessionDialInputs` (KD7).
     static func sessionDialLines(for usage: UsageData, now: Date = Date()) -> DialLines {
-        dialLines(pace: sessionPace(for: usage, now: now),
-                  rawRemaining: usage.sessionRemaining,
-                  resetsAt: usage.sessionResetDate,
-                  window: sessionWindow,
-                  now: now)
+        let inputs = sessionDialInputs(for: usage, now: now)
+        return dialLines(pace: inputs.pace,
+                         rawRemaining: inputs.rawRemaining,
+                         resetsAt: usage.sessionResetDate,
+                         window: sessionWindow,
+                         now: now)
     }
 
     /// A duration in words for the spoken label ("2 hours 30 minutes", "3 days", "less than a
@@ -1213,6 +1226,12 @@ enum PopoverBodyCounters {
         logger.debug("body=\(name, privacy: .public) count=\(count)")
     }
 
+    /// Clears the trip-wire stamps. Called when the popover shows, so the trip-wire measures
+    /// re-evaluations within one open and never counts the opens themselves.
+    static func reset() {
+        lineViewStamps = [:]
+    }
+
     static func recordLineView(_ name: String, now: Date = Date()) {
         record(name)
         var stamps = (lineViewStamps[name] ?? []).filter { now.timeIntervalSince($0) < tripWireWindow }
@@ -1240,7 +1259,7 @@ private struct ArcGauge: View {
     var tickCount: Int = 0
 
     private let lineWidth: CGFloat = 5
-    private let innerLineWidth: CGFloat = 4      // thinner so two same-colour arcs stay separable (KTD1)
+    private let innerLineWidth: CGFloat = 4      // thinner than the outer ring so the neutral grey time ring reads as secondary (KD8)
     private let innerInset: CGFloat = 9          // radial gap between the outer and inner arc (KTD1 separation)
 
     var body: some View {
@@ -1258,8 +1277,8 @@ private struct ArcGauge: View {
 
             // Inner concentric arc: time remaining in the window (only when known).
             if let innerValue {
-                // Inner track a touch darker than the outer (0.25) so the two rings never merge
-                // into one band when both fills land on the same colour (KTD1).
+                // Inner track a touch darker than the outer (0.25) so the fixed grey time ring
+                // (KD8) reads as secondary to the coloured outer ring and the two stay separate.
                 ArcShape(radiusInset: innerInset)
                     .stroke(Color(white: 0.18), style: StrokeStyle(lineWidth: innerLineWidth, lineCap: .round))
                 ArcShape(radiusInset: innerInset)

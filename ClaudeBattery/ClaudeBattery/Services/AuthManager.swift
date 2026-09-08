@@ -109,6 +109,10 @@ class AuthManager: NSObject, ObservableObject {
     /// `nav-decision` record instead of one per attempt (the `lastPolledCookieNames` idiom).
     /// Cleared on retry and teardown so a fresh attempt records again.
     private var lastBlockedNavigation: (host: String, kind: NavigationBlockKind)?
+    /// The last failed load written, so the `didFailProvisionalNavigation` echo of a retried
+    /// blocked hop (the same `domain` and `code` every time) writes one `nav-failed` record
+    /// instead of one per attempt. Cleared alongside `lastBlockedNavigation`.
+    private var lastNavFailure: (domain: String, code: Int)?
     var onAuthSuccess: (() -> Void)?
     /// Hook the app wires to open Settings at the manual paste section (U5). Invoked by the
     /// sign-in error overlay's "Sign in manually" button so a stuck user reaches the floor.
@@ -297,6 +301,11 @@ class AuthManager: NSObject, ObservableObject {
             return
         }
 
+        // A fresh window is a fresh attempt. Without this, a run that already completed one
+        // WebView sign-in (success leaves `hasCapturedSession` true on the way out) could never
+        // capture again, and a blocked SSO hop on the second window would be recorded but never
+        // shown, because `recordBlockedNavigation` reads the same flag.
+        resetLoginAttemptState()
         loginState = .idle
 
         let config = makeLoginConfiguration()
@@ -486,6 +495,7 @@ class AuthManager: NSObject, ObservableObject {
         urlObservation?.invalidate()
         urlObservation = nil
         lastBlockedNavigation = nil
+        lastNavFailure = nil
         popupWebView?.stopLoading()
         popupWebView?.removeFromSuperview()
         popupWebView = nil
@@ -652,13 +662,24 @@ class AuthManager: NSObject, ObservableObject {
         stopLoginWindow()
     }
 
-    /// Reset capture state and reload claude.ai/login in the existing login WebView.
-    // internal for @testable access in AuthManagerTests
-    func retryLogin() {
+    /// Forget the previous sign-in attempt: the captured flag, the pending credentials, and the
+    /// keys that collapse repeated navigation records. Called when a fresh login window is built
+    /// and on "Try again", so every gate that reads `hasCapturedSession` means "nothing captured
+    /// on THIS attempt" rather than "nothing captured this app run".
+    // internal for @testable access in AuthManagerTests (the presentLogin path builds a real
+    // window and sheet, so the reset it performs is tested through this seam)
+    func resetLoginAttemptState() {
         hasCapturedSession = false
         pendingSessionKey = nil
         pendingCookieHeader = nil
         lastBlockedNavigation = nil
+        lastNavFailure = nil
+    }
+
+    /// Reset capture state and reload claude.ai/login in the existing login WebView.
+    // internal for @testable access in AuthManagerTests
+    func retryLogin() {
+        resetLoginAttemptState()
         removeLoginOverlay()
         loginState = .idle
         // Restart the inactivity clock the moment the user chooses to retry, rather than only
@@ -2015,8 +2036,9 @@ extension AuthManager: WKNavigationDelegate {
         if isAllowedDomain(host) {
             logger.debug("Navigation allowed: \(host)")
             // U6 diagnostics: decision + host only (never url.absoluteString — it may carry
-            // query params). Written to the exported diag-*.jsonl.
-            DiagnosticsLogger.shared.emitMilestone(kind: "nav-decision", payload: ["decision": "allow", "host": host])
+            // query params). Written to the exported diag-*.jsonl through the same injected
+            // sink as the block branch, so a test can read both decisions back.
+            diagnostics.emitMilestone(kind: "nav-decision", payload: ["decision": "allow", "host": host])
             decisionHandler(.allow)
         } else {
             let kind = Self.navigationBlockKind(
@@ -2035,10 +2057,15 @@ extension AuthManager: WKNavigationDelegate {
     /// which carries the failing URL with any `code=` or `state=` query. It never touches
     /// `loginState`: after a block this fires as `WebKitErrorDomain` 102 (frame load interrupted
     /// by policy change) or `NSURLErrorDomain` -999, and the block record already said what
-    /// happened. WebKit only calls this for main-frame loads.
+    /// happened. A repeat of the previous failure (same `domain` and `code`) is collapsed the way
+    /// `recordBlockedNavigation` collapses a retried hop, so a page looping on one blocked
+    /// redirect writes one `nav-failed` record, not one per attempt. WebKit only calls this for
+    /// main-frame loads.
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         let nsError = error as NSError
         logger.info("Provisional navigation failed: \(nsError.domain, privacy: .public) \(nsError.code, privacy: .public)")
+        guard lastNavFailure?.domain != nsError.domain || lastNavFailure?.code != nsError.code else { return }
+        lastNavFailure = (nsError.domain, nsError.code)
         diagnostics.emitMilestone(kind: "nav-failed", payload: [
             "code": nsError.code,
             "domain": nsError.domain

@@ -447,6 +447,23 @@ final class RunOutForecastTests: XCTestCase {
         XCTAssertEqual(l.countdown, "Resets in <1m")
     }
 
+    func testDialLines_stalePaceProjectingPastTheReset_dropsRunOutKeepsCountdown() {
+        // The pace is graded at poll time; the lines re-print on the minute clock. 29% left with
+        // 2h to reset is Caution (time 40%, delta +11). 35 minutes later the same snapshot has
+        // 5100 s to reset but projects 12900 * 29 / 71 = 5269 s (quantised to 5400 s), past the
+        // reset. The run-out must go, the countdown must stay.
+        let stalePace = pace(29, 7200, s)
+        XCTAssertEqual(stalePace, .caution)
+        let l = UsagePopoverView.dialLines(pace: stalePace, rawRemaining: 29,
+                                           resetsAt: resetsIn(7200), window: s,
+                                           now: now.addingTimeInterval(35 * 60))
+        XCTAssertEqual(l.caption, "Caution")
+        XCTAssertNil(l.runOut)
+        XCTAssertNil(l.runOutSeconds)
+        XCTAssertEqual(l.countdown, "Resets in 1h 25m")
+        XCTAssertEqual(l.resetSeconds ?? -1, 5100, accuracy: 1)
+    }
+
     // MARK: - sessionDialLines (KD7: mirrors sessionPace and picks the RAW session itself)
 
     func testSessionDialLines_planRatioNil_cautionCase() {
@@ -498,6 +515,20 @@ final class RunOutForecastTests: XCTestCase {
         XCTAssertNil(l.caption)
         XCTAssertNil(l.runOut)
         XCTAssertEqual(l.countdown, "Reset time unavailable")
+    }
+
+    func testSessionDialInputs_weeklyLimited_picksSessionPaceAndRawSession() {
+        // The inputs `sessionCard` hands to the dial's lines: the pace from `sessionPace(for:)`
+        // and the RAW session, never the weekly-capped display value (KD7).
+        let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        let inputs = UsagePopoverView.sessionDialInputs(for: usage, now: now)
+        XCTAssertEqual(inputs.pace, .weeklyLimited)
+        XCTAssertEqual(inputs.pace, UsagePopoverView.sessionPace(for: usage, now: now))
+        XCTAssertEqual(inputs.rawRemaining, usage.sessionRemaining)
+        XCTAssertEqual(inputs.rawRemaining, 90, accuracy: 0.001)
+        XCTAssertNotEqual(inputs.rawRemaining, usage.sessionDisplayRemaining,
+                          "the display value is the capped weekly conversion, not what the lines project")
     }
 
     // MARK: - gaugeAccessibilityLabel with the lines folded in (one spoken dial, KTD3)

@@ -668,6 +668,10 @@ extension MenuBarController: NSWindowDelegate {
 
 extension MenuBarController: NSPopoverDelegate {
     func popoverWillShow(_ notification: Notification) {
+        #if DEBUG
+        // The trip-wire measures re-evaluations within one open, not the opens themselves.
+        PopoverBodyCounters.reset()
+        #endif
         popoverClock.start()
     }
 

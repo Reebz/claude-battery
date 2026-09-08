@@ -88,10 +88,14 @@ final class NoSecretsExportGateTests: XCTestCase {
             NSURLErrorFailingURLErrorKey: URL(string: "https://idp.example/cb?code=LEAKEDCODE")!,
             NSLocalizedDescriptionKey: "Frame load interrupted https://idp.example/cb?code=LEAKEDCODE"
         ]))
+        var policy: WKNavigationActionPolicy?
         auth.webView(login, decidePolicyFor: WebKitFakes.action(
             url: "https://acme.okta.com/app/sso?state=LEAKEDSTATE",
             targetFrame: WebKitFakes.frame(isMainFrame: true),
-            navigationType: .other)) { _ in }
+            navigationType: .other)) { policy = $0 }
+        // Both decisions now write through the injected logger, so an allow-list regression would
+        // still produce a host-only record and pass the byte scan below. Pin the decision itself.
+        XCTAssertEqual(policy, .cancel, "the identity-provider hop must be blocked, not merely recorded")
         logger.flush()
 
         // 2) Plant an oslogstore-*.txt with a RAW secret in the same dir. The export must NEVER

@@ -3581,6 +3581,33 @@ final class AuthManagerTests: XCTestCase {
     }
 
     @MainActor
+    func testRecordBlockedNavigation_teardownThenNewWindowRecordsTheSameHopAgain() {
+        // The window closed (timeout, Cancel, quit-and-reopen) and the user opens sign-in again
+        // into the same blocked identity provider. Teardown must forget the collapse key, or the
+        // second window's hop is silent in the export.
+        let auth = makeAuthManager()
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+        let first = makeLoginWebView()
+        auth.loginWebView = first
+
+        decide(auth, first, makeMainFrameAction("https://acme.okta.com/app/sso"))
+        // What windowWillClose does on a real close: back to idle, then teardown. retryLogin is
+        // deliberately NOT called here so only the teardown reset is under test.
+        auth.loginState = .idle
+        auth.stopLoginWindow()
+        XCTAssertNil(auth.loginWebView, "stopLoginWindow releases the first window's web view")
+
+        let second = makeLoginWebView()
+        auth.loginWebView = second
+        decide(auth, second, makeMainFrameAction("https://acme.okta.com/app/sso"))
+
+        XCTAssertEqual(records(kind: "nav-decision", from: diagnostics).count, 2,
+                       "After teardown the same blocked hop on a new window is recorded again")
+        XCTAssertEqual(auth.loginState, .error(AuthManager.ssoBlockedMessage), "and the card is shown on the new window")
+    }
+
+    @MainActor
     func testNavDecisionBlockPayload_hasExactKeysAndHostOnly() {
         // AE7: the main frame redirects to acme.okta.com with a query the record must not carry.
         let auth = makeAuthManager()
@@ -3598,6 +3625,29 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(payload["decision"] as? String, "block")
         XCTAssertEqual(payload["kind"] as? String, "main")
         XCTAssertEqual(payload["host"] as? String, "acme.okta.com", "host only, never the path or query")
+    }
+
+    @MainActor
+    func testNavDecisionAllow_recordsThroughInjectedLogger() {
+        // Both branches of decidePolicyFor write through the injected sink, so an allowed hop
+        // is readable here too (and a host that should be blocked but is allowed shows up as
+        // an `allow` record rather than vanishing into the shared logger).
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+
+        let policy = decide(auth, login, makeMainFrameAction("https://claude.ai/login?return=LEAKEDQUERY"))
+
+        XCTAssertEqual(policy, .allow)
+        let decisions = records(kind: "nav-decision", from: diagnostics)
+        XCTAssertEqual(decisions.count, 1)
+        let payload = decisions.first ?? [:]
+        XCTAssertEqual(Set(payload.keys), ["decision", "host"], "exactly decision and host: \(payload)")
+        XCTAssertEqual(payload["decision"] as? String, "allow")
+        XCTAssertEqual(payload["host"] as? String, "claude.ai", "host only, never the path or query")
+        XCTAssertEqual(auth.loginState, .idle, "An allowed hop never touches the login state")
     }
 
     @MainActor
@@ -3685,6 +3735,35 @@ final class AuthManagerTests: XCTestCase {
     }
 
     @MainActor
+    func testNavFailed_collapsesIdenticalRepeats_andRecordsADifferentCode() {
+        // A page looping on one blocked redirect echoes the same WebKitErrorDomain 102 per attempt.
+        // The block record is collapsed; its echo must be too, or the export fills with the noise
+        // the collapse was built to stop.
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+        let interrupted = NSError(domain: "WebKitErrorDomain", code: 102, userInfo: nil)
+
+        auth.webView(login, didFailProvisionalNavigation: nil, withError: interrupted)
+        auth.webView(login, didFailProvisionalNavigation: nil, withError: interrupted)
+        XCTAssertEqual(records(kind: "nav-failed", from: diagnostics).count, 1,
+                       "Two identical consecutive failures write one record")
+
+        let cancelled = NSError(domain: "NSURLErrorDomain", code: -999, userInfo: nil)
+        auth.webView(login, didFailProvisionalNavigation: nil, withError: cancelled)
+        XCTAssertEqual(records(kind: "nav-failed", from: diagnostics).map { $0["code"] as? Int }, [102, -999],
+                       "A different failure is a new record")
+
+        // Try again is a fresh attempt: the same failure is recorded once more.
+        auth.retryLogin()
+        auth.webView(login, didFailProvisionalNavigation: nil, withError: cancelled)
+        XCTAssertEqual(records(kind: "nav-failed", from: diagnostics).count, 3)
+        XCTAssertEqual(auth.loginState, .idle, "nav-failed never touches the login state")
+    }
+
+    @MainActor
     func testSSOBlockedMessage_isStaticAndNamesTheRoute() {
         let copy = AuthManager.ssoBlockedMessage
         XCTAssertTrue(copy.contains("single sign-on"))
@@ -3729,6 +3808,50 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertFalse(message.contains("\u{2014}"), "No em dashes in user-facing copy")
         XCTAssertEqual(auth.loginOverlayKind, .error, "The existing error overlay renders the copy")
         XCTAssertTrue(hasMountedOverlay(login))
+    }
+
+    @MainActor
+    func testPresentLoginReset_afterCompletedSignIn_blockedHopShowsSSOErrorAgain() async {
+        // One WebView sign-in completes (say a personal account), then the user opens sign-in
+        // again to add a company account that bounces to an identity provider. Success leaves
+        // `hasCapturedSession` true on the way out; the fresh window must forget it, or the
+        // blocked hop is recorded and the SSO card never shows (the silent nothing of #49).
+        // presentLogin builds a real window and sheet, so the reset it performs is driven here
+        // through `resetLoginAttemptState`, the seam it calls.
+        let auth = makeAuthManager()
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        let first = WKWebView(frame: .zero, configuration: config)
+        await config.websiteDataStore.httpCookieStore.setCookie(makeCookie(value: "sk-first-account"))
+        auth.loginWebView = first
+        mockSession.responseData = #"[{"uuid": "org-first-account"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        auth.captureSessionCookie(from: [makeCookie(value: "sk-first-account")])
+        XCTAssertEqual(auth.loginState, .signingIn)
+        // The success path ends in stopLoginWindow, which releases the web view.
+        let finished = await waitUntil(timeout: 20) { auth.loginWebView == nil }
+        XCTAssertTrue(finished, "the first sign-in did not complete within timeout")
+        XCTAssertEqual(auth.accountStore.accounts.count, 1)
+        XCTAssertEqual(auth.loginState, .idle, "success returns to idle")
+
+        // Second window, same as presentLogin's fresh-window branch.
+        auth.resetLoginAttemptState()
+        auth.loginState = .idle
+        let second = makeLoginWebView()
+        auth.loginWebView = second
+
+        let policy = decide(auth, second, makeMainFrameAction("https://acme.okta.com/app/sso?state=abc"))
+
+        XCTAssertEqual(policy, .cancel)
+        XCTAssertEqual(auth.loginState, .error(AuthManager.ssoBlockedMessage),
+                       "A blocked hop on the second window must show the SSO card, not stay idle")
+        XCTAssertEqual(auth.loginOverlayKind, .error)
+        XCTAssertTrue(hasMountedOverlay(second))
+        XCTAssertEqual(records(kind: "nav-decision", from: diagnostics).map { $0["decision"] as? String }, ["block"])
     }
 
     @MainActor
