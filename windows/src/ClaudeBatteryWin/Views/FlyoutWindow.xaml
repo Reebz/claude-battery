@@ -1,0 +1,581 @@
+<Window x:Class="ClaudeBatteryWin.Views.FlyoutWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:ClaudeBatteryWin.ViewModels"
+        xmlns:views="clr-namespace:ClaudeBatteryWin.Views"
+        Title="Claude Battery"
+        Width="300"
+        SizeToContent="Height"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        ShowInTaskbar="False"
+        Topmost="True"
+        ResizeMode="NoResize"
+        Background="Transparent"
+        UseLayoutRounding="True"
+        FocusManager.IsFocusScope="True">
+
+    <!-- A borderless topmost popover (NOT the library TrayPopup): WindowStyle=None +
+         AllowsTransparency lets the card define its own rounded surface; ShowInTaskbar=False +
+         Topmost keep it popover-like; dismissal-on-Deactivated (suppressed while signing in) and
+         Escape-to-close live in the code-behind. Content states render in the Mac order. All
+         theme-sensitive colors bind via DynamicResource so ThemeWatcher can swap the token
+         dictionary live without a close/reopen. -->
+
+    <Window.Resources>
+        <ResourceDictionary>
+            <!-- Theme tokens live ONLY in the merged dictionary, never in this base dictionary. WPF
+                 resolves a key from the base dictionary first and consults MergedDictionaries only
+                 when the base has no entry, so a fallback token defined here would shadow the merged
+                 light/dark dictionary and make ApplyTheme a no-op. The dark dictionary is merged as
+                 MergedDictionaries[0] so the window is self-consistent before the first ApplyTheme
+                 call, and ApplyTheme replaces that same slot to re-theme live. Every theme key below
+                 is consumed via DynamicResource; converters, styles and templates (StaticResource)
+                 stay in this base dictionary so nothing breaks at parse time. -->
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="/Themes/DarkTokens.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <!-- Converters. Defined inline because the inline-controls approach defers a Controls/
+                 library until a second consumer exists (U10 approach). -->
+            <views:ContentStateToVisibilityConverter x:Key="StateToVisibility" />
+            <views:UsageColorToBrushConverter x:Key="UsageColorToBrush" />
+            <views:SpendColorToBrushConverter x:Key="SpendColorToBrush" />
+            <views:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+            <views:PercentOfWidthConverter x:Key="PercentOfWidth" />
+            <views:GaugeArcConverter x:Key="GaugeArc" />
+            <views:GaugeTicksConverter x:Key="GaugeTicks" />
+
+            <!-- Card surface style: rounded, themed background, the Mac corner radius 12. -->
+            <Style x:Key="CardBorderStyle" TargetType="Border">
+                <Setter Property="Background" Value="{DynamicResource CardBackgroundBrush}" />
+                <Setter Property="CornerRadius" Value="12" />
+                <Setter Property="Padding" Value="10" />
+            </Style>
+
+            <!-- Gauge card: the 270-degree arc (track + trimmed fill) with the centered percent
+                 label, then the pace bar beneath. Geometry mirrors the Mac ArcGauge (start 135deg,
+                 sweep 270deg). The arc path data is produced by GaugeArcConverter from the remaining
+                 percent so the SwiftUI .trim(...) is reproduced without code-behind drawing.
+                 The dial host Grid is a fixed 58x58 box centred in the card: the Paths use the WPF
+                 default Stretch=None and draw at the converter's absolute 58-box coordinates, so the
+                 host must be exactly that box or the ring slides off the label. Do not put
+                 HorizontalAlignment on the Paths themselves (each would centre on its own bounds,
+                 and the fill arc's bounds shrink with the percent). -->
+            <DataTemplate x:Key="GaugeCardTemplate" DataType="{x:Type vm:GaugeCard}">
+                <Border Style="{StaticResource CardBorderStyle}"
+                        AutomationProperties.Name="{Binding Title}">
+                    <StackPanel>
+                        <TextBlock Text="{Binding Title}"
+                                   FontSize="13"
+                                   FontWeight="SemiBold"
+                                   Foreground="{DynamicResource ForegroundBrush}" />
+                        <Grid Width="58" Height="58" Margin="0,12,0,0" HorizontalAlignment="Center">
+                            <!-- Track arc (full sweep, muted). -->
+                            <Path Stroke="{DynamicResource BarTrackBrush}"
+                                  StrokeThickness="5"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  Data="{Binding Converter={StaticResource GaugeArc}, ConverterParameter=track}" />
+                            <!-- Interior ticks (5 session / 7 weekly, from the bound TickCount). -->
+                            <Path Stroke="{DynamicResource ArcTickBrush}"
+                                  StrokeThickness="1.5"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  Data="{Binding Converter={StaticResource GaugeTicks}}" />
+                            <!-- Fill arc (trimmed to remaining percent, in the remaining color). -->
+                            <Path Stroke="{Binding Color, Converter={StaticResource UsageColorToBrush}}"
+                                  StrokeThickness="5"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  Data="{Binding Converter={StaticResource GaugeArc}, ConverterParameter=fill}" />
+                            <!-- Label centre sits at y=31 (Mac: ZStack centre + offset 2), inside
+                                 the ring whose centre is at y=35. -->
+                            <TextBlock Text="{Binding PercentLabel}"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Margin="0,4,0,0"
+                                       FontSize="15"
+                                       FontWeight="Bold"
+                                       Foreground="{DynamicResource ForegroundBrush}" />
+                        </Grid>
+                        <!-- Pace bar (omitted entirely when the reset date is unknown, KTD4). -->
+                        <Grid Margin="0,12,0,0"
+                              Visibility="{Binding Pace.HasValue, Converter={StaticResource BoolToVisibility}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <!-- The fill width is a fraction of the track's REAL ActualWidth (a
+                                 MultiBinding), never a hard-coded track width: the star column
+                                 narrows with the percent label, so a literal overstates the bar. -->
+                            <Grid Grid.Column="0" Height="6" VerticalAlignment="Center">
+                                <Border x:Name="PaceTrack" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" />
+                                <Border CornerRadius="3"
+                                        HorizontalAlignment="Left"
+                                        Background="{Binding Pace.Color, Converter={StaticResource UsageColorToBrush}}">
+                                    <Border.Width>
+                                        <MultiBinding Converter="{StaticResource PercentOfWidth}">
+                                            <Binding Path="Pace.Percent" />
+                                            <Binding ElementName="PaceTrack" Path="ActualWidth" />
+                                        </MultiBinding>
+                                    </Border.Width>
+                                </Border>
+                            </Grid>
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding Pace.PercentLabel}"
+                                       Margin="6,0,0,0"
+                                       FontSize="9"
+                                       FontWeight="Medium"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource LabelMutedBrush}" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+            </DataTemplate>
+
+            <!-- Resets card: either the "unavailable" line or the Session/Weekly reset rows. -->
+            <DataTemplate x:Key="ResetsCardTemplate" DataType="{x:Type vm:ResetsCard}">
+                <Border Style="{StaticResource CardBorderStyle}" AutomationProperties.Name="Resets">
+                    <StackPanel>
+                        <TextBlock Text="Resets" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" />
+                        <TextBlock Text="Reset times unavailable"
+                                   Margin="0,8,0,0"
+                                   FontSize="10"
+                                   Foreground="{DynamicResource LabelSubtleBrush}"
+                                   Visibility="{Binding Unavailable, Converter={StaticResource BoolToVisibility}}" />
+                        <ItemsControl Margin="0,8,0,0"
+                                      ItemsSource="{Binding Rows}"
+                                      Visibility="{Binding Unavailable, Converter={StaticResource BoolToVisibility}, ConverterParameter=Invert}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type vm:ResetRow}">
+                                    <Grid Margin="0,0,0,4">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{Binding Label}" FontSize="10" Foreground="{DynamicResource ForegroundBrush}" />
+                                        <TextBlock Grid.Column="1"
+                                                   Text="{Binding Value}"
+                                                   FontSize="10"
+                                                   FontWeight="Medium"
+                                                   FontFamily="Consolas"
+                                                   Foreground="{DynamicResource ForegroundBrush}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+            </DataTemplate>
+
+            <!-- One model bar row: name + percent over a colored fill bar. -->
+            <DataTemplate x:Key="ModelBarTemplate" DataType="{x:Type vm:ModelBarRow}">
+                <StackPanel Margin="0,0,0,8">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="{Binding Name}" FontSize="10" Foreground="{DynamicResource LabelMutedBrush}" />
+                        <TextBlock Grid.Column="1" Text="{Binding PercentLabel}" FontSize="10" FontWeight="Medium" Foreground="{DynamicResource ForegroundBrush}" />
+                    </Grid>
+                    <Grid Height="4" Margin="0,2,0,0">
+                        <Border x:Name="ModelTrack" CornerRadius="2" Background="{DynamicResource BarTrackBrush}" />
+                        <Border CornerRadius="2"
+                                HorizontalAlignment="Left"
+                                Background="{Binding Color, Converter={StaticResource UsageColorToBrush}}">
+                            <Border.Width>
+                                <MultiBinding Converter="{StaticResource PercentOfWidth}">
+                                    <Binding Path="RemainingPercent" />
+                                    <Binding ElementName="ModelTrack" Path="ActualWidth" />
+                                </MultiBinding>
+                            </Border.Width>
+                        </Border>
+                    </Grid>
+                </StackPanel>
+            </DataTemplate>
+
+            <!-- One account row: a flat clickable button (active dot + display name) that switches to
+                 that account on tap (U15). The command lives on the view-model; the parameter is the
+                 row Id. The flat ControlTemplate keeps the row chrome-free (no default Button hover)
+                 while making the whole row hit-testable via the Transparent background. -->
+            <DataTemplate x:Key="AccountRowTemplate" DataType="{x:Type vm:AccountRow}">
+                <Button Cursor="Hand"
+                        HorizontalContentAlignment="Stretch"
+                        AutomationProperties.Name="{Binding DisplayName}"
+                        Command="{Binding DataContext.SwitchAccountCommand, RelativeSource={RelativeSource AncestorType={x:Type ItemsControl}}}"
+                        CommandParameter="{Binding Id}">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border Background="Transparent">
+                                <ContentPresenter />
+                            </Border>
+                        </ControlTemplate>
+                    </Button.Template>
+                    <Grid Margin="10,5">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Ellipse Grid.Column="0"
+                                 Width="7"
+                                 Height="7"
+                                 Margin="0,0,8,0"
+                                 VerticalAlignment="Center">
+                            <Ellipse.Style>
+                                <Style TargetType="Ellipse">
+                                    <Setter Property="Fill" Value="{DynamicResource LabelSubtleBrush}" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                            <Setter Property="Fill" Value="{DynamicResource AccentGreenBrush}" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Ellipse.Style>
+                        </Ellipse>
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding DisplayName}"
+                                   FontSize="11"
+                                   TextTrimming="CharacterEllipsis"
+                                   VerticalAlignment="Center"
+                                   Foreground="{DynamicResource ForegroundBrush}" />
+                    </Grid>
+                </Button>
+            </DataTemplate>
+        </ResourceDictionary>
+    </Window.Resources>
+
+    <!-- Root rounded surface so the transparent window reads as a single Fluent card. -->
+    <Border CornerRadius="14"
+            Background="{DynamicResource PopoverSurfaceBrush}"
+            SnapsToDevicePixels="True">
+        <Grid>
+            <!-- 1. Signing in -->
+            <StackPanel Margin="16"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Center"
+                        AutomationProperties.Name="Signing in"
+                        Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=SigningIn}">
+                <ProgressBar IsIndeterminate="True" Width="120" Height="4" />
+                <TextBlock Text="Signing in..."
+                           Margin="0,12,0,0"
+                           FontSize="15"
+                           FontWeight="SemiBold"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}" />
+            </StackPanel>
+
+            <!-- 2. Login error -->
+            <StackPanel Margin="16"
+                        VerticalAlignment="Center"
+                        Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=LoginError}">
+                <TextBlock Text="⚠"
+                           FontSize="32"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource UsageOrangeBrush}" />
+                <TextBlock Text="{Binding LoginErrorMessage}"
+                           Margin="0,8,0,0"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}" />
+                <Button x:Name="LoginErrorTryAgainButton"
+                        Content="Try Again"
+                        Margin="0,12,0,0"
+                        HorizontalAlignment="Center"
+                        Padding="16,6"
+                        AutomationProperties.Name="Try signing in again" />
+            </StackPanel>
+
+            <!-- 3. Unauthenticated -->
+            <StackPanel Margin="16"
+                        VerticalAlignment="Center"
+                        Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=Unauthenticated}">
+                <TextBlock Text="🔋"
+                           FontSize="36"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+                <TextBlock Text="Sign in to see your Claude usage"
+                           Margin="0,8,0,0"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}" />
+                <Button x:Name="SignInButton"
+                        Content="Sign In"
+                        Margin="0,12,0,0"
+                        HorizontalAlignment="Center"
+                        Padding="16,6"
+                        AutomationProperties.Name="Sign in to Claude" />
+            </StackPanel>
+
+            <!-- 3b. Re-auth required (saved security data unreadable: a DPAPI drop, U6/R4) -->
+            <StackPanel Margin="16"
+                        VerticalAlignment="Center"
+                        Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=ReauthRequired}">
+                <TextBlock Text="🔒"
+                           FontSize="32"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+                <TextBlock Text="Re-sign-in required"
+                           Margin="0,8,0,0"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource ForegroundBrush}" />
+                <TextBlock Text="{x:Static vm:FlyoutViewModel.ReauthRequiredHint}"
+                           Margin="0,2,0,0"
+                           FontSize="11"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+                <Button x:Name="ReauthSecurityButton"
+                        Content="Sign In Again"
+                        Margin="0,12,0,0"
+                        HorizontalAlignment="Center"
+                        Padding="16,6"
+                        AutomationProperties.Name="Sign in again" />
+            </StackPanel>
+
+            <!-- 4. Authenticated -->
+            <StackPanel Margin="12"
+                        Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=Authenticated}">
+
+                <!-- Session + Weekly gauge cards side by side -->
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="8" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <ContentControl Grid.Column="0" Content="{Binding SessionCard}" ContentTemplate="{StaticResource GaugeCardTemplate}" />
+                    <ContentControl Grid.Column="2" Content="{Binding WeeklyCard}" ContentTemplate="{StaticResource GaugeCardTemplate}" />
+                </Grid>
+
+                <!-- Credits row -->
+                <Border Style="{StaticResource CardBorderStyle}"
+                        Margin="0,8,0,0"
+                        Visibility="{Binding Credits.HasCredits, Converter={StaticResource BoolToVisibility}}"
+                        AutomationProperties.Name="Credits">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <!-- Status segment flexes and truncates -->
+                            <DockPanel Grid.Column="0">
+                                <TextBlock Text="Credits"
+                                           DockPanel.Dock="Left"
+                                           FontSize="11"
+                                           FontWeight="SemiBold"
+                                           Margin="0,0,6,0"
+                                           Foreground="{DynamicResource LabelMutedBrush}" />
+                                <TextBlock Text="{Binding Credits.StatusText}"
+                                           FontSize="10"
+                                           TextTrimming="CharacterEllipsis"
+                                           Foreground="{Binding Credits.StatusColor, Converter={StaticResource SpendColorToBrush}}" />
+                            </DockPanel>
+                            <!-- Balance right-pinned, never truncates -->
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding Credits.BalanceText}"
+                                       FontSize="11"
+                                       FontWeight="SemiBold"
+                                       Margin="6,0,0,0"
+                                       Foreground="{DynamicResource ForegroundBrush}" />
+                        </Grid>
+                        <!-- Spend bar (empty track when disabled) -->
+                        <Grid Height="6" Margin="0,6,0,0">
+                            <Border x:Name="SpendTrack" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" />
+                            <Border CornerRadius="3"
+                                    HorizontalAlignment="Left"
+                                    Background="{Binding Credits.BarColor, Converter={StaticResource SpendColorToBrush}}">
+                                <Border.Width>
+                                    <MultiBinding Converter="{StaticResource PercentOfWidth}">
+                                        <Binding Path="Credits.BarPercent" />
+                                        <Binding ElementName="SpendTrack" Path="ActualWidth" />
+                                    </MultiBinding>
+                                </Border.Width>
+                            </Border>
+                        </Grid>
+                        <!-- Enabled detail lines -->
+                        <StackPanel Margin="0,2,0,0"
+                                    Visibility="{Binding Credits.HasMonthlySpendLimit, Converter={StaticResource BoolToVisibility}}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Monthly spend limit" FontSize="10" Foreground="{DynamicResource LabelSubtleBrush}" />
+                                <TextBlock Grid.Column="1" Text="{Binding Credits.MonthlySpendLimitText}" FontSize="10" FontWeight="Medium" Foreground="{DynamicResource LabelDetailBrush}" />
+                            </Grid>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Resets" FontSize="10" Foreground="{DynamicResource LabelSubtleBrush}" />
+                                <TextBlock Grid.Column="1" Text="{Binding Credits.ResetsText}" FontSize="10" FontWeight="Medium" Foreground="{DynamicResource LabelDetailBrush}" />
+                            </Grid>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Resets + Models. When there are model bars they sit side by side; otherwise
+                     Resets spans full width (KTD3). Two layouts, visibility-gated on HasModelBars. -->
+                <!-- Full-width Resets (no models) -->
+                <ContentControl Margin="0,8,0,0"
+                                Content="{Binding Resets}"
+                                ContentTemplate="{StaticResource ResetsCardTemplate}"
+                                Visibility="{Binding HasModelBars, Converter={StaticResource BoolToVisibility}, ConverterParameter=Invert}" />
+                <!-- Resets + Models split -->
+                <Grid Margin="0,8,0,0"
+                      Visibility="{Binding HasModelBars, Converter={StaticResource BoolToVisibility}}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="8" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <ContentControl Grid.Column="0" Content="{Binding Resets}" ContentTemplate="{StaticResource ResetsCardTemplate}" />
+                    <Border Grid.Column="2" Style="{StaticResource CardBorderStyle}" AutomationProperties.Name="Models">
+                        <StackPanel>
+                            <TextBlock Text="Models" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" />
+                            <ItemsControl Margin="0,6,0,0" ItemsSource="{Binding ModelBars}" ItemTemplate="{StaticResource ModelBarTemplate}" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <!-- Claude Design row (informational, shares standard limits) -->
+                <Border Style="{StaticResource CardBorderStyle}"
+                        Margin="0,8,0,0"
+                        AutomationProperties.Name="Claude Design, shares standard usage limits">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Claude Design" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource LabelMutedBrush}" />
+                        <TextBlock Grid.Column="1" Text="Shares standard usage limits" FontSize="10" Foreground="{DynamicResource LabelFaintBrush}" />
+                    </Grid>
+                </Border>
+
+                <!-- Account list (more than one account) -->
+                <Border Style="{StaticResource CardBorderStyle}"
+                        Margin="0,8,0,0"
+                        Padding="0"
+                        Visibility="{Binding ShowAccountList, Converter={StaticResource BoolToVisibility}}"
+                        AutomationProperties.Name="Accounts">
+                    <ItemsControl ItemsSource="{Binding AccountRows}" ItemTemplate="{StaticResource AccountRowTemplate}" />
+                </Border>
+
+                <!-- Single-account "Add Account" link -->
+                <Button x:Name="AddAccountLinkButton"
+                        Margin="0,4,0,0"
+                        HorizontalAlignment="Center"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Cursor="Hand"
+                        Visibility="{Binding ShowAddAccountLink, Converter={StaticResource BoolToVisibility}}"
+                        AutomationProperties.Name="Add account"
+                        Content="+ Add Account"
+                        Foreground="{DynamicResource LabelSubtleBrush}"
+                        FontSize="11"
+                        FontWeight="Medium" />
+
+                <!-- Version / update row -->
+                <StackPanel Margin="0,6,0,0" HorizontalAlignment="Center">
+                    <Button x:Name="UpdateLinkButton"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Cursor="Hand"
+                            HorizontalAlignment="Center"
+                            Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVisibility}}"
+                            Content="{Binding UpdateLinkText}"
+                            Foreground="{DynamicResource SpendCyanBrush}"
+                            FontSize="11"
+                            AutomationProperties.Name="{Binding UpdateLinkText}" />
+                    <TextBlock Text="{Binding LastUpdatedText}"
+                               HorizontalAlignment="Center"
+                               Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVisibility}, ConverterParameter=Invert}"
+                               FontSize="11"
+                               Foreground="{DynamicResource LabelMutedBrush}" />
+                    <TextBlock Text="Right-click the tray icon for Settings."
+                               Margin="0,2,0,0"
+                               FontSize="9"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap"
+                               Foreground="{DynamicResource LabelMutedBrush}" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- 5. Auth failed (session expired) -->
+            <StackPanel Margin="16"
+                        VerticalAlignment="Center"
+                        Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=AuthFailed}">
+                <TextBlock Text="🔑" FontSize="32" HorizontalAlignment="Center" Foreground="{DynamicResource LabelMutedBrush}" />
+                <TextBlock Text="Session expired" Margin="0,8,0,0" HorizontalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}" />
+                <TextBlock Text="Please sign in again to continue."
+                           Margin="0,2,0,0"
+                           FontSize="11"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+                <Button x:Name="ReauthButton"
+                        Content="Sign In Again"
+                        Margin="0,12,0,0"
+                        HorizontalAlignment="Center"
+                        Padding="16,6"
+                        AutomationProperties.Name="Sign in again" />
+            </StackPanel>
+
+            <!-- 6. Failure error -->
+            <StackPanel Margin="16"
+                        VerticalAlignment="Center"
+                        Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=Error}">
+                <TextBlock Text="⚠" FontSize="32" HorizontalAlignment="Center" Foreground="{DynamicResource LabelMutedBrush}" />
+                <TextBlock Text="Unable to reach Claude" Margin="0,8,0,0" HorizontalAlignment="Center" Foreground="{DynamicResource ForegroundBrush}" />
+                <TextBlock Text="Check your connection, or sign in again."
+                           Margin="0,2,0,0"
+                           FontSize="11"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+                <!-- The error card must never be a dead end: a persistent Cloudflare block on the
+                     poll transport is only cleared by a fresh sign-in, so offer it here. Click
+                     handlers are attached by App.WireFlyoutInteractions (HookButton by x:Name). -->
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,12,0,0">
+                    <Button x:Name="ErrorSignInButton"
+                            Content="Sign In Again"
+                            Padding="16,6"
+                            AutomationProperties.Name="Sign in again" />
+                    <Button x:Name="ErrorRetryButton"
+                            Content="Retry Now"
+                            Margin="8,0,0,0"
+                            Padding="16,6"
+                            AutomationProperties.Name="Retry fetching usage now" />
+                </StackPanel>
+                <TextBlock Text="Right-click the tray icon for Settings."
+                           Margin="0,10,0,0"
+                           FontSize="9"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+            </StackPanel>
+
+            <!-- 7. Loading -->
+            <StackPanel Margin="16"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Center"
+                        Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=Loading}">
+                <ProgressBar IsIndeterminate="True" Width="120" Height="4" />
+                <TextBlock Text="Fetching usage..."
+                           Margin="0,12,0,0"
+                           HorizontalAlignment="Center"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+                <TextBlock Text="Right-click the tray icon for Settings."
+                           Margin="0,10,0,0"
+                           FontSize="9"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource LabelMutedBrush}" />
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>

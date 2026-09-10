@@ -1,0 +1,165 @@
+name: Windows CI
+
+# Build + test the Windows port (windows/). The Mac app and the GitHub Pages deploy are untouched:
+# this workflow is scoped to the windows/ tree and runs only on the port branch and on PRs.
+on:
+  push:
+    branches: [feat/windows-port]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build -c Release
+
+      - name: Test
+        # The icon render test writes every tray-icon state as PNG (plus an 8x upscale) into this
+        # folder so the icon can be judged from the run without a Windows machine.
+        env:
+          CLAUDE_BATTERY_ICON_ARTIFACTS: ${{ github.workspace }}\windows\artifacts\tray-icons
+        run: dotnet test -c Release --no-build
+
+      - name: Upload tray icon renders
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tray-icons
+          path: windows/artifacts/tray-icons
+          if-no-files-found: warn
+
+  # Launch the published exe on the runner's desktop for real. This is the only place the app ever
+  # runs on Windows before a tester does: it proves the process boots, creates its tray icon, survives
+  # 20 seconds, and (via the second-launch signal) shows the flyout. A crash writes
+  # %LOCALAPPDATA%\ClaudeBatteryWin\crash.log, which fails the job and is uploaded with the desktop
+  # screenshots and the .NET Runtime event-log entries.
+  smoke-launch:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Publish self-contained single-file exe
+        run: dotnet publish src/ClaudeBatteryWin/ClaudeBatteryWin.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
+
+      - name: Launch, wait, open the flyout, screenshot, verify alive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path artifacts/smoke | Out-Null
+          $exe = Resolve-Path publish/ClaudeBatteryWin.exe
+          $crash = Join-Path $env:LOCALAPPDATA 'ClaudeBatteryWin\crash.log'
+          if (Test-Path $crash) { Remove-Item $crash -Force }
+
+          function Take-Screenshot($name) {
+            try {
+              Add-Type -AssemblyName System.Windows.Forms
+              Add-Type -AssemblyName System.Drawing
+              $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+              $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+              $g = [System.Drawing.Graphics]::FromImage($bmp)
+              $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+              $bmp.Save("artifacts/smoke/$name.png")
+              $g.Dispose(); $bmp.Dispose()
+              Write-Host "screenshot $name.png ($($b.Width)x$($b.Height))"
+            } catch {
+              Write-Host "screenshot $name failed: $($_.Exception.Message)"
+            }
+          }
+
+          Write-Host "session: interactive=$([Environment]::UserInteractive) user=$env:USERNAME"
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 12
+          Take-Screenshot 'after-launch'
+
+          # Windows hides a new tray icon behind the overflow chevron. Open it through UI Automation
+          # so the icon itself lands in a screenshot, then close it again with Escape.
+          try {
+            Add-Type -AssemblyName UIAutomationClient
+            Add-Type -AssemblyName UIAutomationTypes
+            $root = [System.Windows.Automation.AutomationElement]::RootElement
+            $cond = New-Object System.Windows.Automation.PropertyCondition(
+              [System.Windows.Automation.AutomationElement]::NameProperty, 'Show Hidden Icons')
+            $chevron = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)
+            if ($null -ne $chevron) {
+              $chevron.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+              Start-Sleep -Seconds 3
+              Take-Screenshot 'overflow-open'
+              Add-Type -AssemblyName System.Windows.Forms
+              [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+              Start-Sleep -Seconds 2
+            } else {
+              Write-Host "overflow chevron not found via UI Automation"
+            }
+          } catch {
+            Write-Host "overflow screenshot failed: $($_.Exception.Message)"
+          }
+
+          # A second launch signals the running instance to show the flyout, then exits.
+          $second = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+          Take-Screenshot 'after-flyout-signal'
+
+          $windows = Get-Process -Name ClaudeBatteryWin -ErrorAction SilentlyContinue | ForEach-Object { "pid=$($_.Id) title='$($_.MainWindowTitle)' hwnd=$($_.MainWindowHandle)" }
+          Write-Host "processes: $($windows -join '; ')"
+          $secondExited = $second.HasExited
+          Write-Host "second instance exited: $secondExited"
+
+          $alive = -not $p.HasExited
+          Write-Host "primary alive after 20s: $alive"
+          $failed = $false
+          if (-not $alive) {
+            Write-Host "::error::primary instance exited early with code $($p.ExitCode)"
+            $failed = $true
+          }
+          if (Test-Path $crash) {
+            Write-Host "::error::crash.log was written:"
+            Get-Content $crash | Write-Host
+            Copy-Item $crash artifacts/smoke/crash.log
+            $failed = $true
+          }
+          if (-not $secondExited) {
+            Write-Host "::warning::second instance did not exit (single-instance signal path)"
+            Stop-Process -Id $second.Id -Force -ErrorAction SilentlyContinue
+          }
+
+          try {
+            Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = '.NET Runtime' } -MaxEvents 5 -ErrorAction Stop |
+              ForEach-Object { "[$($_.TimeCreated)] id=$($_.Id) $($_.Message)" } |
+              Set-Content artifacts/smoke/dotnet-runtime-events.txt
+          } catch {
+            Set-Content artifacts/smoke/dotnet-runtime-events.txt "no .NET Runtime events: $($_.Exception.Message)"
+          }
+
+          if ($alive) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          if ($failed) { exit 1 }
+
+      - name: Upload smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-launch
+          path: windows/artifacts/smoke
+          if-no-files-found: warn

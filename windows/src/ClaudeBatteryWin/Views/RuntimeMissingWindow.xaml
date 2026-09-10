@@ -1,0 +1,89 @@
+<Window x:Class="ClaudeBatteryWin.Views.RuntimeMissingWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Claude Battery"
+        Width="420"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize"
+        ShowInTaskbar="True"
+        Background="{DynamicResource RuntimeMissingBackgroundBrush}">
+    <!-- A SEPARATE window, not a flyout state (RenderState has no runtime-missing variant by
+         design). It gates login: the tray click routes here while the WebView2 runtime is absent,
+         and login stays blocked until a bootstrap succeeds. A failed/offline install surfaces the
+         retry button below plus a link to Microsoft's download page (the manual route) rather
+         than a blank window or a crash. -->
+    <Window.Resources>
+        <!-- Directional fallbacks; the merged light/dark token dictionaries (U9/U10) override these
+             keys when present so this window honors the system theme like the rest of the app. -->
+        <SolidColorBrush x:Key="RuntimeMissingBackgroundBrush" Color="#FF202020" />
+        <SolidColorBrush x:Key="RuntimeMissingForegroundBrush" Color="#FFF3F3F3" />
+        <SolidColorBrush x:Key="RuntimeMissingMutedBrush" Color="#FFA0A0A0" />
+        <SolidColorBrush x:Key="RuntimeMissingErrorBrush" Color="#FFE74C3C" />
+    </Window.Resources>
+
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Text="WebView2 Runtime needed"
+                   FontSize="18"
+                   FontWeight="SemiBold"
+                   Foreground="{DynamicResource RuntimeMissingForegroundBrush}" />
+
+        <TextBlock Grid.Row="1"
+                   Margin="0,12,0,0"
+                   TextWrapping="Wrap"
+                   Foreground="{DynamicResource RuntimeMissingMutedBrush}"
+                   Text="Claude Battery signs in to claude.ai through the Microsoft WebView2 runtime. It is not installed on this PC. Install it to sign in (about 2 MB download, then Microsoft's installer runs)." />
+
+        <!-- Status line: shows install progress or the failure reason. Hidden until an attempt runs. -->
+        <TextBlock x:Name="StatusText"
+                   Grid.Row="2"
+                   Margin="0,16,0,0"
+                   TextWrapping="Wrap"
+                   Visibility="Collapsed"
+                   Foreground="{DynamicResource RuntimeMissingMutedBrush}" />
+
+        <ProgressBar x:Name="InstallProgress"
+                     Grid.Row="3"
+                     Height="4"
+                     Margin="0,12,0,0"
+                     IsIndeterminate="True"
+                     Visibility="Collapsed" />
+
+        <StackPanel Grid.Row="4"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Margin="0,20,0,0">
+            <!-- Manual fallback, shown only after an in-app install fails: opens Microsoft's WebView2
+                 download page in the default browser. Retry then re-probes for the hand-installed
+                 runtime. -->
+            <Button x:Name="GetFromMicrosoftButton"
+                    Content="Get it from Microsoft"
+                    MinWidth="88"
+                    Margin="0,0,8,0"
+                    Padding="12,6"
+                    Visibility="Collapsed"
+                    Click="OnGetFromMicrosoftClicked" />
+            <Button x:Name="CancelButton"
+                    Content="Not now"
+                    MinWidth="88"
+                    Margin="0,0,8,0"
+                    Padding="12,6"
+                    Click="OnCancelClicked" />
+            <Button x:Name="InstallButton"
+                    Content="Install"
+                    MinWidth="88"
+                    Padding="12,6"
+                    IsDefault="True"
+                    Click="OnInstallClicked" />
+        </StackPanel>
+    </Grid>
+</Window>

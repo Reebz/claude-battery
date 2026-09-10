@@ -1,0 +1,20 @@
+<Window x:Class="ClaudeBatteryWin.Views.OAuthPopupWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="Sign in"
+        Width="520"
+        Height="680"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False">
+    <!-- The host for an OAuth popup (window.open from the login page: Google, Apple). Its only
+         content is a WebView2 control, which LoginWindow hands to NewWindowRequestedEventArgs.NewWindow
+         after initialising it on the login view's environment AND InPrivate profile. The control has
+         to live in a real window: the WPF WebView2 is an HwndHost, and EnsureCoreWebView2Async waits
+         for the host HWND, which only exists once the control is in a shown window's visual tree.
+         No Source is set here on purpose - WebView2 performs the popup's first navigation itself once
+         NewWindow is assigned, and a NewWindow view must not have been navigated. -->
+    <Grid>
+        <wv2:WebView2 x:Name="WebView" />
+    </Grid>
+</Window>

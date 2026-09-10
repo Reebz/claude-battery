@@ -1,0 +1,42 @@
+<Application x:Class="ClaudeBatteryWin.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:tb="clr-namespace:H.NotifyIcon;assembly=H.NotifyIcon.Wpf"
+             ShutdownMode="OnExplicitShutdown">
+    <!-- No StartupUri: this is a windowless tray app (R1). The TaskbarIcon below is the only
+         persistent UI surface; the flyout and login/settings windows are created on demand.
+         ShutdownMode=OnExplicitShutdown is REQUIRED: with the WPF default (OnLastWindowClose) the
+         process starts with zero windows and would quit the moment the first on-demand window (e.g.
+         Settings) is closed, taking the tray icon with it. Every real exit path calls Shutdown()
+         explicitly (the tray Quit item and the second-instance bail), so nothing else changes. -->
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <!-- Tray icon resource dictionary. Kept inline here for U1; theme token
+                     dictionaries (light/dark) merge in later (U9/U10). -->
+                <ResourceDictionary>
+                    <!-- The tray icon. No Id here on purpose: the Id is assigned in code from
+                         TrayIconIdentity (a hash of the exe path) before ForceCreate, and
+                         Shell_NotifyIconGetRect (flyout placement) keys on that same live value.
+                         Windows binds an unsigned exe's tray GUID to the path that first registered
+                         it, so a fixed GUID makes Shell_NotifyIcon(NIM_ADD) fail after any move,
+                         rename or re-download ("ClaudeBatteryWin (1).exe") and the process dies
+                         before any UI exists. Revisit a fixed GUID only once the exe is
+                         Authenticode-signed; under a Velopack install the path is stable anyway. -->
+                    <tb:TaskbarIcon x:Key="TrayIcon"
+                                    ToolTipText="Claude Battery"
+                                    Visibility="Visible"
+                                    NoLeftClickDelay="True"
+                                    MenuActivation="RightClick">
+                        <!-- The tray icon is driven imperatively from the composition root
+                             (App.AcquireTrayIcon): the TaskbarIcon.Icon (System.Drawing.Icon) is set
+                             from the Dual Horizontal renderer output (U9), the left-click is handled
+                             via the TrayLeftMouseUp event (-> ShowFlyout), and the ContextMenu is
+                             built in code. No LeftClickCommand binding here, since this resource has
+                             no DataContext and the click is wired in code instead. -->
+                    </tb:TaskbarIcon>
+                </ResourceDictionary>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>
