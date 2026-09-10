@@ -144,6 +144,210 @@ final class RunOutForecastTests: XCTestCase {
         XCTAssertEqual(UsagePopoverView.paceCaption(pace), "Limited by weekly")
     }
 
+    // MARK: - runOutSeconds (KTD1: the projection reads the pace status, never re-derives it)
+
+    /// Projection on the same inputs as `pace`, with the pace supplied from `paceStatus` unless
+    /// `paceOverride` is given.
+    private func runOut(_ remaining: Double, _ r: TimeInterval?, _ window: TimeInterval,
+                        paceOverride: UsagePopoverView.PaceStatus? = nil) -> TimeInterval? {
+        UsagePopoverView.runOutSeconds(remainingPercent: remaining,
+                                       resetsAt: r.map(resetsIn),
+                                       window: window,
+                                       pace: paceOverride ?? pace(remaining, r, window),
+                                       now: now)
+    }
+
+    private func assertSeconds(_ value: TimeInterval?, _ expected: TimeInterval,
+                               file: StaticString = #file, line: UInt = #line) {
+        guard let value else { return XCTFail("expected \(expected)s, got nil", file: file, line: line) }
+        XCTAssertEqual(value, expected, accuracy: 1, file: file, line: line)
+    }
+
+    // Session window 18000s. (20, 7200): time 40%, delta +20 -> Caution; elapsed 60%.
+    func testRunOut01_caution_session_projects2700s() {
+        XCTAssertEqual(pace(20, 7200, s), .caution)
+        assertSeconds(runOut(20, 7200, s), 2700)
+        XCTAssertEqual(UsagePopoverView.quantiseRunOut(2700, window: s), 45 * 60)  // AE1: "Out in ~45m"
+    }
+    func testRunOut02_slowerThanClock_onTrack_nil()  { XCTAssertEqual(pace(70, 7200, s), .onTrack); XCTAssertNil(runOut(70, 7200, s)) }
+    func testRunOut03_deltaZero_onTrack_nil()         { XCTAssertEqual(pace(40, 7200, s), .onTrack); XCTAssertNil(runOut(40, 7200, s)) }
+    func testRunOut04_underTenPercentElapsed_nil() {
+        // 98% of the window left: the pace gate passes (delta +58) but only 1.7% has elapsed, and
+        // a burst at the start of a fresh window would project a run-out minutes away.
+        XCTAssertNotEqual(pace(40, 17700, s), .onTrack)
+        XCTAssertNil(runOut(40, 17700, s))
+    }
+    func testRunOut05_lessTimeThanUsageLeft_onTrack_nil() { XCTAssertEqual(pace(10, 300, s), .onTrack); XCTAssertNil(runOut(10, 300, s)) }
+    func testRunOut06_depleted_danger_nil() {
+        // The caption already says Danger; there is nothing left to project.
+        XCTAssertEqual(pace(0, 3600, s), .danger)
+        XCTAssertNil(runOut(0, 3600, s))
+    }
+    func testRunOut07_nothingUsed_onTrack_nil_noDivideByZero() { XCTAssertEqual(pace(100, 7200, s), .onTrack); XCTAssertNil(runOut(100, 7200, s)) }
+    func testRunOut08_tooLittleUsed_onTrack_nil() {
+        // AE3: 97% and 95% left early in the window are On Track, so the gate hides them.
+        XCTAssertEqual(pace(97, 16000, s), .onTrack); XCTAssertNil(runOut(97, 16000, s))
+        XCTAssertEqual(pace(95, 16000, s), .onTrack); XCTAssertNil(runOut(95, 16000, s))
+    }
+    func testRunOut09_boundaryCaution_projects6000s() {
+        // (40, 9000): time 50%, delta +10 -> Caution (inclusive). (18000 - 9000) * 40 / 60 = 6000.
+        XCTAssertEqual(pace(40, 9000, s), .caution)
+        assertSeconds(runOut(40, 9000, s), 6000)
+    }
+    func testRunOut10_resetBeyondWindow_clockSkew_nil() {
+        // r=21600 > window 18000: paceStatus caps time at 100 and says Danger, but elapsed time
+        // would be negative, so the projection declines.
+        XCTAssertEqual(pace(20, 21600, s), .danger)
+        XCTAssertNil(runOut(20, 21600, s))
+    }
+    func testRunOut11_nilAndPastReset_nil() {
+        XCTAssertNil(runOut(20, nil, s))
+        XCTAssertNil(runOut(20, -3600, s))
+    }
+    func testRunOut12_weekly_danger_projects38400s() {
+        // (10, 259200, w): time ~42.9%, delta ~+32.9 -> Danger. (604800 - 259200) * 10 / 90 = 38400.
+        XCTAssertEqual(pace(10, 259200, w), .danger)
+        assertSeconds(runOut(10, 259200, w), 38400)
+        XCTAssertEqual(UsagePopoverView.quantiseRunOut(38400, window: w), 11 * 3600)
+    }
+    func testRunOut13_weekly_freshWindow_onTrack_nil() { XCTAssertEqual(pace(98, 596160, w), .onTrack); XCTAssertNil(runOut(98, 596160, w)) }
+
+    func testRunOut_invariant_projectionLandsBeforeReset() {
+        // For every Caution and Danger case in the table that projects, the run-out is below the
+        // seconds to reset: (window - r) * remaining / (100 - remaining) < r exactly when the pace
+        // delta is positive (KTD1).
+        let cases: [(Double, TimeInterval, TimeInterval)] = [(20, 7200, s), (40, 9000, s), (10, 259200, w)]
+        for (remaining, r, window) in cases {
+            let p = pace(remaining, r, window)
+            XCTAssertTrue(p == .caution || p == .danger, "case \(remaining)/\(r) is \(p)")
+            guard let seconds = runOut(remaining, r, window) else {
+                return XCTFail("case \(remaining)/\(r) projected nil")
+            }
+            XCTAssertLessThan(seconds, r, "case \(remaining)/\(r) projects past its own reset")
+        }
+    }
+
+    func testRunOut_paceGate_onlyCautionAndDangerProject() {
+        // Same inputs as testRunOut01, but the pace handed in is not Caution or Danger.
+        XCTAssertNil(runOut(20, 7200, s, paceOverride: .onTrack))
+        XCTAssertNil(runOut(20, 7200, s, paceOverride: .weeklyLimited))
+        XCTAssertNil(runOut(20, 7200, s, paceOverride: .unknown))
+        assertSeconds(runOut(20, 7200, s, paceOverride: .danger), 2700)
+    }
+
+    // MARK: - quantiseRunOut (5 min on the session, 1 h on the weekly, never below one quantum)
+
+    func testQuantise_session_nearestFiveMinutes() {
+        XCTAssertEqual(UsagePopoverView.quantiseRunOut(2710, window: s), 45 * 60)
+        XCTAssertEqual(UsagePopoverView.quantiseRunOut(2880, window: s), 50 * 60)
+    }
+    func testQuantise_weekly_nearestHour() {
+        XCTAssertEqual(UsagePopoverView.quantiseRunOut(38400, window: w), 11 * 3600)
+    }
+    func testQuantise_floorsAtOneQuantum() {
+        XCTAssertEqual(UsagePopoverView.quantiseRunOut(200, window: s), 5 * 60)
+        XCTAssertEqual(UsagePopoverView.quantiseRunOut(1, window: s), 5 * 60)
+        XCTAssertEqual(UsagePopoverView.quantiseRunOut(1, window: w), 3600)
+    }
+
+    // MARK: - runOutLine (KD6: relative, "Out in ~")
+
+    func testRunOutLine_formatsMinuteResolution() {
+        XCTAssertEqual(UsagePopoverView.runOutLine(seconds: 6000), "Out in ~1h 40m")
+        XCTAssertEqual(UsagePopoverView.runOutLine(seconds: 45 * 60), "Out in ~45m")
+        XCTAssertEqual(UsagePopoverView.runOutLine(seconds: 11 * 3600), "Out in ~11h 00m")
+    }
+    func testRunOutLine_nilHidesTheLine() {
+        // AE2 together with the pace gate: On Track projects nil, and nil prints nothing.
+        XCTAssertNil(UsagePopoverView.runOutLine(seconds: nil))
+        XCTAssertNil(UsagePopoverView.runOutLine(seconds: runOut(45, 9000, s)))
+    }
+
+    // MARK: - sessionDialLines(...).runOutSeconds (KD7: weekly-limited hides the run-out unless the raw session is in Danger)
+
+    func testSessionRunOut_weeklyLimitedAndRawOnTrack_nil() {
+        let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
+        XCTAssertEqual(UsagePopoverView.sessionPace(for: usage, now: now), .weeklyLimited)
+        XCTAssertNil(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds)
+    }
+
+    func testSessionRunOut_weeklyLimitedButRawDanger_projectsRawSession() {
+        // AE4 second half: the raw session (15%, half the window left) is in Danger, so the
+        // run-out shows and it is the RAW session's projection: 9000 * 15 / 85 (1588 s), which
+        // `sessionDialLines` quantises to the nearest 5 minutes on the session window (1500 s).
+        let usage = makeUsage(session: 15, weekly: 1, sessionResetsIn: 9000)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        XCTAssertEqual(UsagePopoverView.sessionPace(for: usage, now: now), .danger)
+        assertSeconds(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds,
+                      UsagePopoverView.quantiseRunOut(9000 * 15 / 85, window: s))
+        assertSeconds(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds, 25 * 60)
+    }
+
+    func testSessionRunOut_healthyWeek_projectsRawSession() {
+        // 6000 s is already on a 5-minute boundary, so quantising leaves it unchanged.
+        let usage = makeUsage(session: 40, weekly: 50, sessionResetsIn: 9000)
+        XCTAssertFalse(usage.isSessionWeeklyLimited)
+        assertSeconds(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds,
+                      UsagePopoverView.quantiseRunOut(6000, window: s))
+        assertSeconds(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds, 6000)
+    }
+
+    func testSessionRunOut_neverProjectsTheCappedValue() {
+        // Discriminator: the capped display value (weekly 1 -> 12.6 in session units) over the 5h
+        // window would grade Danger and project a run-out; the raw session (90) is ahead, so the
+        // Session card must show nothing.
+        let usage = makeUsage(session: 90, weekly: 1, sessionResetsIn: 9000)
+        let wrongPace = UsagePopoverView.paceStatus(remainingPercent: usage.sessionDisplayRemaining,
+                                                    resetsAt: usage.sessionResetDate, window: s, now: now)
+        XCTAssertEqual(wrongPace, .danger)
+        XCTAssertNotNil(UsagePopoverView.runOutSeconds(remainingPercent: usage.sessionDisplayRemaining,
+                                                       resetsAt: usage.sessionResetDate, window: s,
+                                                       pace: wrongPace, now: now))
+        XCTAssertNil(UsagePopoverView.sessionDialLines(for: usage, now: now).runOutSeconds)
+    }
+
+    // MARK: - ringColor (KD5: pace colour with a red floor below the nearly-empty threshold)
+
+    func testRingColor_followsPaceAboveTheFloor() {
+        XCTAssertEqual(UsagePopoverView.ringColor(remaining: 30, pace: .danger), Color.red)    // AE6
+        XCTAssertEqual(UsagePopoverView.ringColor(remaining: 30, pace: .onTrack), Color.green)  // AE6
+        XCTAssertEqual(UsagePopoverView.ringColor(remaining: 30, pace: .caution), Color.orange)
+    }
+    func testRingColor_redFloorBelowThreshold() {
+        XCTAssertEqual(UsagePopoverView.ringColor(remaining: 15, pace: .onTrack), Color.red)    // AE6
+        XCTAssertEqual(UsagePopoverView.ringColor(remaining: 19.9, pace: .caution), Color.red)
+        XCTAssertEqual(UsagePopoverView.ringColor(remaining: 20, pace: .caution), Color.orange) // boundary
+    }
+    func testRingColor_fallsBackToLevelColourWithoutAPace() {
+        XCTAssertEqual(UsagePopoverView.ringColor(remaining: 60, pace: .unknown), Color.green)
+        XCTAssertEqual(UsagePopoverView.ringColor(remaining: 30, pace: .unknown), Color.orange)
+        XCTAssertEqual(UsagePopoverView.ringColor(remaining: 30, pace: .weeklyLimited), Color.orange)
+    }
+
+    // MARK: - paceCaptionColor (KD13: the word shares the ring's red floor)
+
+    func testPaceCaptionColor_sharesTheRedFloor() {
+        XCTAssertEqual(UsagePopoverView.paceCaptionColor(remaining: 15, pace: .onTrack), Color.red)        // AE6
+        XCTAssertEqual(UsagePopoverView.paceCaptionColor(remaining: 19.9, pace: .weeklyLimited), Color.red)
+    }
+    func testPaceCaptionColor_isPaceColourAboveTheFloor() {
+        XCTAssertEqual(UsagePopoverView.paceCaptionColor(remaining: 30, pace: .onTrack), Color.green)
+        XCTAssertEqual(UsagePopoverView.paceCaptionColor(remaining: 30, pace: .danger), Color.red)
+        // "Limited by weekly" keeps its muted colour above the floor.
+        XCTAssertEqual(UsagePopoverView.paceCaptionColor(remaining: 30, pace: .weeklyLimited),
+                       UsagePopoverView.paceColor(.weeklyLimited))
+        XCTAssertNotEqual(UsagePopoverView.paceCaptionColor(remaining: 30, pace: .weeklyLimited), Color.red)
+    }
+
+    // MARK: - lowRemainingThreshold (KTD2: one owner for "nearly empty")
+
+    func testLowRemainingThreshold_isTwentyAndBatteryColorReadsIt() {
+        XCTAssertEqual(UsageData.lowRemainingThreshold, 20, accuracy: 0.0001)
+        XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 19.9), Color.red)
+        XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: 20), Color.orange)
+        XCTAssertEqual(UsagePopoverView.batteryColor(remainingPercent: UsageData.lowRemainingThreshold - 0.1), Color.red)
+    }
+
     // MARK: - gaugeAccessibilityLabel
 
     func testGaugeA11y_weeklyLimited_omitsSessionTimeAndSaysLimited() {
@@ -169,5 +373,215 @@ final class RunOutForecastTests: XCTestCase {
         let label = UsagePopoverView.gaugeAccessibilityLabel(
             name: "Weekly", usage: 66, timeRemaining: 84, pace: .caution)
         XCTAssertEqual(label, "Weekly usage 66 percent, time remaining 84 percent, caution, over pace")
+    }
+
+    // MARK: - dialLines (KTD3: the three lines under a dial from one pure function, never the display value)
+
+    /// Lines for one card on the same inputs as `pace`, with the pace supplied from `paceStatus`
+    /// unless `paceOverride` is given.
+    private func lines(_ remaining: Double, _ r: TimeInterval?, _ window: TimeInterval,
+                       paceOverride: UsagePopoverView.PaceStatus? = nil) -> UsagePopoverView.DialLines {
+        UsagePopoverView.dialLines(pace: paceOverride ?? pace(remaining, r, window),
+                                   rawRemaining: remaining,
+                                   resetsAt: r.map(resetsIn),
+                                   window: window,
+                                   now: now)
+    }
+
+    func testDialLines_caution_captionRunOutCountdown() {
+        // (40, 9000, s): Caution, run-out 6000 s (already a 5 min multiple), 2h 30m to reset.
+        let l = lines(40, 9000, s)
+        XCTAssertEqual(l.caption, "Caution")
+        XCTAssertEqual(l.runOut, "Out in ~1h 40m")
+        XCTAssertEqual(l.countdown, "Resets in 2h 30m")
+        XCTAssertEqual(l.runOutSeconds ?? -1, 6000, accuracy: 1)
+        XCTAssertEqual(l.resetSeconds ?? -1, 9000, accuracy: 1)
+    }
+
+    func testDialLines_onTrack_noRunOutButCountdown() {
+        // AE2: the maths would give a time, but On Track hides it. The countdown still shows.
+        let l = lines(45, 9000, s)
+        XCTAssertEqual(l.caption, "On Track")
+        XCTAssertNil(l.runOut)
+        XCTAssertNil(l.runOutSeconds)
+        XCTAssertEqual(l.countdown, "Resets in 2h 30m")
+    }
+
+    func testDialLines_runOutIsQuantisedBeforePrinting() {
+        // AE1 shape: (20, 7200, s) projects 2700 s, which prints as the quantised "~45m", and the
+        // weekly (10, 259200, w) projects 38400 s, printed to the hour. runOutLine prints what it
+        // is given, so dialLines must quantise first.
+        let session = lines(20, 7200, s)
+        XCTAssertEqual(session.caption, "Caution")
+        XCTAssertEqual(session.runOut, "Out in ~45m")
+        XCTAssertEqual(session.countdown, "Resets in 2h 00m")
+        let weekly = lines(10, 259200, w)
+        XCTAssertEqual(weekly.caption, "Danger")
+        XCTAssertEqual(weekly.runOut, "Out in ~11h 00m")
+        XCTAssertEqual(weekly.countdown, "Resets in 3d 00h")
+    }
+
+    func testDialLines_noResetTime_singleUnavailableLine() {
+        // AE5: no reset time -> no caption, no run-out, one "Reset time unavailable" line.
+        let l = lines(40, nil, s)
+        XCTAssertNil(l.caption)
+        XCTAssertNil(l.runOut)
+        XCTAssertEqual(l.countdown, "Reset time unavailable")
+        XCTAssertNil(l.resetSeconds)
+        XCTAssertNil(l.runOutSeconds)
+        XCTAssertEqual(l.countdown, UsagePopoverView.resetUnavailableLine)
+    }
+
+    func testDialLines_pastResetTime_sameAsNoResetTime() {
+        // A stale poll whose reset is already behind us self-omits exactly like a missing one,
+        // even when the caller hands in a pace that would otherwise print a word.
+        XCTAssertEqual(lines(40, -3600, s), lines(40, nil, s))
+        let stale = lines(40, -3600, s, paceOverride: .caution)
+        XCTAssertNil(stale.caption)
+        XCTAssertNil(stale.runOut)
+        XCTAssertEqual(stale.countdown, "Reset time unavailable")
+    }
+
+    func testDialLines_underAMinuteToReset_printsLessThanAMinute() {
+        let l = lines(40, 30, s)
+        XCTAssertEqual(l.countdown, "Resets in <1m")
+    }
+
+    func testDialLines_stalePaceProjectingPastTheReset_dropsRunOutKeepsCountdown() {
+        // The pace is graded at poll time; the lines re-print on the minute clock. 29% left with
+        // 2h to reset is Caution (time 40%, delta +11). 35 minutes later the same snapshot has
+        // 5100 s to reset but projects 12900 * 29 / 71 = 5269 s (quantised to 5400 s), past the
+        // reset. The run-out must go, the countdown must stay.
+        let stalePace = pace(29, 7200, s)
+        XCTAssertEqual(stalePace, .caution)
+        let l = UsagePopoverView.dialLines(pace: stalePace, rawRemaining: 29,
+                                           resetsAt: resetsIn(7200), window: s,
+                                           now: now.addingTimeInterval(35 * 60))
+        XCTAssertEqual(l.caption, "Caution")
+        XCTAssertNil(l.runOut)
+        XCTAssertNil(l.runOutSeconds)
+        XCTAssertEqual(l.countdown, "Resets in 1h 25m")
+        XCTAssertEqual(l.resetSeconds ?? -1, 5100, accuracy: 1)
+    }
+
+    // MARK: - sessionDialLines (KD7: mirrors sessionPace and picks the RAW session itself)
+
+    func testSessionDialLines_planRatioNil_cautionCase() {
+        // The packet's shape case: 40% left, 9000 s to reset, no plan ratio.
+        let usage = makeUsage(session: 40, weekly: 50, sessionResetsIn: 9000, planRatio: nil)
+        let l = UsagePopoverView.sessionDialLines(for: usage, now: now)
+        XCTAssertEqual(l.caption, "Caution")
+        XCTAssertEqual(l.runOut, "Out in ~1h 40m")
+        XCTAssertEqual(l.countdown, "Resets in 2h 30m")
+    }
+
+    func testSessionDialLines_weeklyLimitedRawOnTrack_wordAndSessionCountdownOnly() {
+        // AE4 first half: "Limited by weekly", the SESSION reset countdown, no run-out.
+        let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        let l = UsagePopoverView.sessionDialLines(for: usage, now: now)
+        XCTAssertEqual(l.caption, "Limited by weekly")
+        XCTAssertNil(l.runOut)
+        XCTAssertEqual(l.countdown, "Resets in 2h 30m")
+    }
+
+    func testSessionDialLines_weeklyLimitedRawDanger_allThreeLines() {
+        // AE4 second half: raw session (15%, half the window left) is in Danger, so the word is
+        // "Danger", the run-out is the RAW session's 9000 * 15 / 85 = 1588 s quantised to 25m, and
+        // the countdown shows.
+        let usage = makeUsage(session: 15, weekly: 1, sessionResetsIn: 9000)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        let l = UsagePopoverView.sessionDialLines(for: usage, now: now)
+        XCTAssertEqual(l.caption, "Danger")
+        XCTAssertEqual(l.runOut, "Out in ~25m")
+        XCTAssertEqual(l.countdown, "Resets in 2h 30m")
+    }
+
+    func testSessionDialLines_neverProjectsTheCappedValue() {
+        // The raw-value discriminator: the capped display value (weekly 1 -> 12.6 in session
+        // units) would project a run-out over the 5h window, but the raw session (90) is ahead.
+        let usage = makeUsage(session: 90, weekly: 1, sessionResetsIn: 9000)
+        let wrong = UsagePopoverView.dialLines(pace: .danger, rawRemaining: usage.sessionDisplayRemaining,
+                                               resetsAt: usage.sessionResetDate, window: s, now: now)
+        XCTAssertNotNil(wrong.runOut, "the capped value would print a run-out")
+        let l = UsagePopoverView.sessionDialLines(for: usage, now: now)
+        XCTAssertNil(l.runOut)
+        XCTAssertEqual(l.caption, "Limited by weekly")
+    }
+
+    func testSessionDialLines_noSessionReset_unavailable() {
+        let usage = makeUsage(session: 40, weekly: 50, sessionResetsIn: nil)
+        let l = UsagePopoverView.sessionDialLines(for: usage, now: now)
+        XCTAssertNil(l.caption)
+        XCTAssertNil(l.runOut)
+        XCTAssertEqual(l.countdown, "Reset time unavailable")
+    }
+
+    func testSessionDialInputs_weeklyLimited_picksSessionPaceAndRawSession() {
+        // The inputs `sessionCard` hands to the dial's lines: the pace from `sessionPace(for:)`
+        // and the RAW session, never the weekly-capped display value (KD7).
+        let usage = makeUsage(session: 90, weekly: 5, sessionResetsIn: 9000)
+        XCTAssertTrue(usage.isSessionWeeklyLimited)
+        let inputs = UsagePopoverView.sessionDialInputs(for: usage, now: now)
+        XCTAssertEqual(inputs.pace, .weeklyLimited)
+        XCTAssertEqual(inputs.pace, UsagePopoverView.sessionPace(for: usage, now: now))
+        XCTAssertEqual(inputs.rawRemaining, usage.sessionRemaining)
+        XCTAssertEqual(inputs.rawRemaining, 90, accuracy: 0.001)
+        XCTAssertNotEqual(inputs.rawRemaining, usage.sessionDisplayRemaining,
+                          "the display value is the capped weekly conversion, not what the lines project")
+    }
+
+    // MARK: - gaugeAccessibilityLabel with the lines folded in (one spoken dial, KTD3)
+
+    func testGaugeA11y_foldsInCountdownAndRunOut() {
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Session", usage: 40, timeRemaining: 50, pace: .caution, lines: lines(40, 9000, s))
+        XCTAssertTrue(label.contains("caution, over pace"), label)
+        XCTAssertTrue(label.contains("resets in 2 hours 30 minutes"), label)
+        XCTAssertTrue(label.contains("projected to run out in about 1 hour 40 minutes"), label)
+        XCTAssertEqual(label, "Session usage 40 percent, time remaining 50 percent, caution, over pace, "
+                       + "projected to run out in about 1 hour 40 minutes, resets in 2 hours 30 minutes")
+    }
+
+    func testGaugeA11y_noResetTime_speaksUnavailableAndNoTimePhrase() {
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Session", usage: 40, timeRemaining: nil, pace: .unknown, lines: lines(40, nil, s))
+        XCTAssertFalse(label.contains("resets in"), label)
+        XCTAssertFalse(label.contains("projected to run out"), label)
+        XCTAssertEqual(label, "Session usage 40 percent, reset time unavailable")
+    }
+
+    func testGaugeA11y_onTrack_speaksCountdownWithoutRunOut() {
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Weekly", usage: 45, timeRemaining: 50, pace: .onTrack, lines: lines(45, 9000, s))
+        XCTAssertEqual(label, "Weekly usage 45 percent, time remaining 50 percent, on track, resets in 2 hours 30 minutes")
+    }
+
+    func testGaugeA11y_roundingUnchangedWithLines() {
+        // Usage 16.5 still speaks "16", like the dial prints, with the lines present.
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Session", usage: 16.5, timeRemaining: 42.5, pace: .onTrack, lines: lines(16.5, 9000, s))
+        XCTAssertTrue(label.hasPrefix("Session usage 16 percent, time remaining 42 percent"), label)
+    }
+
+    func testSpokenDuration_wordsForTheLinesTheDialPrints() {
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 2 * 3600 + 30 * 60), "2 hours 30 minutes")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 3600 + 40 * 60), "1 hour 40 minutes")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 7200), "2 hours")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 45 * 60), "45 minutes")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 60), "1 minute")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 3 * 86400), "3 days")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 86400 + 3600), "1 day 1 hour")
+        XCTAssertEqual(UsagePopoverView.spokenDuration(seconds: 30), "less than a minute")
+    }
+
+    // MARK: - lastUpdatedText (the footer freshness line the minute clock refreshes, KTD10)
+
+    func testLastUpdatedText_movesWithNowNotWithAPoll() {
+        let fetched = now
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: nil, now: now), "Not yet updated")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(30)), "Updated just now")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(60)), "Updated 1 minute ago")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(5 * 60 + 10)), "Updated 5 minutes ago")
     }
 }

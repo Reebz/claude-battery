@@ -6,6 +6,8 @@ final class AuthManagerTests: XCTestCase {
     private var suiteName: String!
     private var defaults: UserDefaults!
     private var mockSession: MockHTTPSession!
+    /// Temp directory of the injected `DiagnosticsLogger` (blocked-navigation record tests).
+    private var diagDir: URL?
 
     override func setUp() {
         super.setUp()
@@ -23,6 +25,10 @@ final class AuthManagerTests: XCTestCase {
         defaults = nil
         suiteName = nil
         mockSession = nil
+        if let diagDir {
+            try? FileManager.default.removeItem(at: diagDir)
+            self.diagDir = nil
+        }
         super.tearDown()
     }
 
@@ -3394,6 +3400,477 @@ final class AuthManagerTests: XCTestCase {
                        "and the credential repair still happened")
     }
 
+    // MARK: - Blocked navigation feedback and diagnostics (U4, issue #49)
+    // The allow-list is unchanged. A blocked main-frame or popup hop before capture shows the
+    // error overlay with the SSO copy and writes a host-only `nav-decision` record; link and
+    // subframe blocks only write the record. The delegate methods are driven with the WebKit
+    // fakes at the bottom of this file.
+
+    @MainActor
+    private func makeMainFrameAction(_ url: String) -> WKNavigationAction {
+        WebKitFakes.action(url: url, targetFrame: WebKitFakes.frame(isMainFrame: true), navigationType: .other)
+    }
+
+    @MainActor
+    private func makeSubframeAction(_ url: String) -> WKNavigationAction {
+        WebKitFakes.action(url: url, targetFrame: WebKitFakes.frame(isMainFrame: false), navigationType: .other)
+    }
+
+    @MainActor
+    private func makeNilTargetAction(_ url: String, navigationType: WKNavigationType) -> WKNavigationAction {
+        WebKitFakes.action(url: url, targetFrame: nil, navigationType: navigationType)
+    }
+
+    /// Drive `decidePolicyFor` and return the policy it chose.
+    @MainActor
+    @discardableResult
+    private func decide(_ auth: AuthManager, _ webView: WKWebView, _ action: WKNavigationAction) -> WKNavigationActionPolicy? {
+        var decided: WKNavigationActionPolicy?
+        auth.webView(webView, decidePolicyFor: action) { decided = $0 }
+        return decided
+    }
+
+    /// An enabled `DiagnosticsLogger` on a per-test temp directory, injected into the manager so
+    /// the records it writes can be read back. The directory is removed in `tearDown`.
+    private func makeDiagnostics() -> DiagnosticsLogger {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AuthManagerDiag-\(UUID().uuidString)", isDirectory: true)
+        diagDir = dir
+        return DiagnosticsLogger(directoryOverride: dir, enabledOverride: true)
+    }
+
+    /// Every record of `kind` the logger wrote, as decoded payloads. `flush()` waits for the
+    /// serial write queue, so everything emitted before the call is on disk when it returns.
+    private func records(kind: String, from logger: DiagnosticsLogger) -> [[String: Any]] {
+        logger.flush()
+        guard let url = logger.currentSessionFileURL,
+              let content = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        return content.split(separator: "\n").compactMap { line -> [String: Any]? in
+            guard let data = line.data(using: .utf8),
+                  let entry = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  entry["kind"] as? String == kind else { return nil }
+            return entry["payload"] as? [String: Any]
+        }
+    }
+
+    @MainActor
+    func testNavigationBlockKind_table() {
+        typealias Kind = AuthManager.NavigationBlockKind
+        XCTAssertEqual(AuthManager.navigationBlockKind(isMainFrame: true, targetFrameIsNil: false, navigationType: .other, onPopup: false), Kind.main)
+        XCTAssertEqual(AuthManager.navigationBlockKind(isMainFrame: true, targetFrameIsNil: false, navigationType: .other, onPopup: true), Kind.popupMain)
+        XCTAssertEqual(AuthManager.navigationBlockKind(isMainFrame: false, targetFrameIsNil: true, navigationType: .other, onPopup: false), Kind.popup)
+        XCTAssertEqual(AuthManager.navigationBlockKind(isMainFrame: false, targetFrameIsNil: true, navigationType: .linkActivated, onPopup: false), Kind.link)
+        XCTAssertEqual(AuthManager.navigationBlockKind(isMainFrame: false, targetFrameIsNil: false, navigationType: .other, onPopup: false), Kind.subframe)
+        XCTAssertEqual(AuthManager.navigationBlockKind(isMainFrame: false, targetFrameIsNil: false, navigationType: .linkActivated, onPopup: true), Kind.subframe)
+        // The record kinds are the exact strings the #49 reply names.
+        XCTAssertEqual(Kind.popupMain.rawValue, "popup-main")
+        XCTAssertEqual([Kind.main, .popup, .link, .subframe].map(\.rawValue), ["main", "popup", "link", "subframe"])
+    }
+
+    @MainActor
+    func testHostForDiagnostics_table() {
+        XCTAssertEqual(AuthManager.hostForDiagnostics("acme.okta.com"), "acme.okta.com")
+        XCTAssertEqual(AuthManager.hostForDiagnostics("login.microsoftonline.com"), "login.microsoftonline.com")
+        XCTAssertEqual(AuthManager.hostForDiagnostics("a-b.example"), "a-b.example")
+        XCTAssertEqual(AuthManager.hostForDiagnostics("a.b@c"), "(invalid)", "userinfo is not a host")
+        XCTAssertEqual(AuthManager.hostForDiagnostics(String(repeating: "a", count: 300)), "(invalid)", "over 253 characters")
+        XCTAssertEqual(AuthManager.hostForDiagnostics(String(repeating: "a", count: 64) + ".com"), "(invalid)", "a label over 63 characters")
+        XCTAssertEqual(AuthManager.hostForDiagnostics("a..b"), "(invalid)", "an empty label")
+        XCTAssertEqual(AuthManager.hostForDiagnostics(""), "(invalid)")
+        XCTAssertEqual(AuthManager.hostForDiagnostics("acme.okta.com/app?state=x"), "(invalid)", "a path or query is not a host")
+        XCTAssertEqual(AuthManager.hostForDiagnostics("müller.de"), "(invalid)", "only ASCII labels are written")
+    }
+
+    @MainActor
+    func testDecidePolicy_subframeAndLinkBlocks_leaveStateUnchanged() {
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+
+        XCTAssertEqual(decide(auth, login, makeSubframeAction("https://tracker.example/pixel")), .cancel)
+        XCTAssertEqual(auth.loginState, .idle, "A subframe block only leaves a record")
+        XCTAssertEqual(auth.loginOverlayKind, .none)
+
+        // A policy link on the login page that opens a new window on a host outside the list
+        // (anthropic.com itself is allowed, so it is not the case here).
+        XCTAssertEqual(decide(auth, login, makeNilTargetAction("https://policies.example/privacy", navigationType: .linkActivated)), .cancel)
+        XCTAssertEqual(auth.loginState, .idle, "A clicked link opening outside the window must not draw the SSO card")
+        XCTAssertEqual(auth.loginOverlayKind, .none)
+
+        let kinds = records(kind: "nav-decision", from: diagnostics).map { $0["kind"] as? String }
+        XCTAssertEqual(kinds, ["subframe", "link"], "Both blocks are still recorded")
+    }
+
+    @MainActor
+    func testDecidePolicy_mainBlockWhileSigningIn_leavesStateUnchanged() {
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        auth.loginState = .signingIn
+
+        decide(auth, login, makeMainFrameAction("https://acme.okta.com/app/sso"))
+
+        XCTAssertEqual(auth.loginState, .signingIn, "A block after capture must not replace Finishing sign-in")
+        XCTAssertEqual(auth.loginOverlayKind, .signingIn)
+    }
+
+    @MainActor
+    func testDecidePolicy_mainBlockAfterCapture_leavesStateUnchanged() {
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        auth.captureSessionCookie(from: [makeCookie(value: "sk-captured")])
+        XCTAssertEqual(auth.loginState, .signingIn)
+        // Even if the state were idle again, a captured session alone must keep the card away:
+        // "Try again" under a live org discovery would throw the working sign-in away.
+        auth.loginState = .idle
+
+        decide(auth, login, makeMainFrameAction("https://acme.okta.com/app/sso"))
+
+        XCTAssertEqual(auth.loginState, .idle)
+        XCTAssertEqual(auth.loginOverlayKind, .none)
+        XCTAssertEqual(auth.pendingSessionKey, "sk-captured", "The captured key is untouched")
+    }
+
+    @MainActor
+    func testRecordBlockedNavigation_collapsesIdenticalRepeats() {
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+
+        decide(auth, login, makeMainFrameAction("https://acme.okta.com/app/sso?state=one"))
+        decide(auth, login, makeMainFrameAction("https://acme.okta.com/app/sso?state=two"))
+        XCTAssertEqual(records(kind: "nav-decision", from: diagnostics).count, 1,
+                       "Two identical consecutive blocks write one record")
+
+        for attempt in 0..<50 {
+            decide(auth, login, makeMainFrameAction("https://acme.okta.com/app/sso?attempt=\(attempt)"))
+        }
+        XCTAssertEqual(records(kind: "nav-decision", from: diagnostics).count, 1,
+                       "Fifty identical blocks still write one record")
+        XCTAssertEqual(auth.loginState, .error(AuthManager.ssoBlockedMessage), "Setting the error is idempotent")
+        XCTAssertEqual(auth.loginOverlayKind, .error)
+        XCTAssertEqual(login.subviews.filter { $0.identifier == AuthManager.loginOverlayIdentifier }.count, 1,
+                       "The overlay is built once, not once per retried hop")
+
+        // A different host is a new bounce and is recorded again.
+        decide(auth, login, makeMainFrameAction("https://login.microsoftonline.com/common/oauth2"))
+        XCTAssertEqual(records(kind: "nav-decision", from: diagnostics).map { $0["host"] as? String },
+                       ["acme.okta.com", "login.microsoftonline.com"])
+    }
+
+    @MainActor
+    func testRecordBlockedNavigation_retryRecordsTheSameHopAgain() {
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+
+        decide(auth, login, makeMainFrameAction("https://acme.okta.com/app/sso"))
+        auth.retryLogin()
+        decide(auth, login, makeMainFrameAction("https://acme.okta.com/app/sso"))
+
+        XCTAssertEqual(records(kind: "nav-decision", from: diagnostics).count, 2,
+                       "After Try again the same blocked hop is a fresh attempt and is recorded again")
+        XCTAssertEqual(auth.loginState, .error(AuthManager.ssoBlockedMessage), "and the card is offered again")
+    }
+
+    @MainActor
+    func testRecordBlockedNavigation_teardownThenNewWindowRecordsTheSameHopAgain() {
+        // The window closed (timeout, Cancel, quit-and-reopen) and the user opens sign-in again
+        // into the same blocked identity provider. Teardown must forget the collapse key, or the
+        // second window's hop is silent in the export.
+        let auth = makeAuthManager()
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+        let first = makeLoginWebView()
+        auth.loginWebView = first
+
+        decide(auth, first, makeMainFrameAction("https://acme.okta.com/app/sso"))
+        // What windowWillClose does on a real close: back to idle, then teardown. retryLogin is
+        // deliberately NOT called here so only the teardown reset is under test.
+        auth.loginState = .idle
+        auth.stopLoginWindow()
+        XCTAssertNil(auth.loginWebView, "stopLoginWindow releases the first window's web view")
+
+        let second = makeLoginWebView()
+        auth.loginWebView = second
+        decide(auth, second, makeMainFrameAction("https://acme.okta.com/app/sso"))
+
+        XCTAssertEqual(records(kind: "nav-decision", from: diagnostics).count, 2,
+                       "After teardown the same blocked hop on a new window is recorded again")
+        XCTAssertEqual(auth.loginState, .error(AuthManager.ssoBlockedMessage), "and the card is shown on the new window")
+    }
+
+    @MainActor
+    func testNavDecisionBlockPayload_hasExactKeysAndHostOnly() {
+        // AE7: the main frame redirects to acme.okta.com with a query the record must not carry.
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+
+        decide(auth, login, makeMainFrameAction("https://acme.okta.com/app?state=abc"))
+
+        let blocks = records(kind: "nav-decision", from: diagnostics)
+        XCTAssertEqual(blocks.count, 1)
+        let payload = blocks.first ?? [:]
+        XCTAssertEqual(Set(payload.keys), ["decision", "kind", "host"], "exactly decision, kind and host: \(payload)")
+        XCTAssertEqual(payload["decision"] as? String, "block")
+        XCTAssertEqual(payload["kind"] as? String, "main")
+        XCTAssertEqual(payload["host"] as? String, "acme.okta.com", "host only, never the path or query")
+    }
+
+    @MainActor
+    func testNavDecisionAllow_recordsThroughInjectedLogger() {
+        // Both branches of decidePolicyFor write through the injected sink, so an allowed hop
+        // is readable here too (and a host that should be blocked but is allowed shows up as
+        // an `allow` record rather than vanishing into the shared logger).
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+
+        let policy = decide(auth, login, makeMainFrameAction("https://claude.ai/login?return=LEAKEDQUERY"))
+
+        XCTAssertEqual(policy, .allow)
+        let decisions = records(kind: "nav-decision", from: diagnostics)
+        XCTAssertEqual(decisions.count, 1)
+        let payload = decisions.first ?? [:]
+        XCTAssertEqual(Set(payload.keys), ["decision", "host"], "exactly decision and host: \(payload)")
+        XCTAssertEqual(payload["decision"] as? String, "allow")
+        XCTAssertEqual(payload["host"] as? String, "claude.ai", "host only, never the path or query")
+        XCTAssertEqual(auth.loginState, .idle, "An allowed hop never touches the login state")
+    }
+
+    @MainActor
+    func testCreateWebView_disallowedHost_returnsNilAndRecordsPopup() {
+        // AE8: a script window.open on an identity-provider URL. No popup, same overlay, kind popup.
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+
+        let popup = auth.webView(login, createWebViewWith: WKWebViewConfiguration(),
+                                 for: makeNilTargetAction("https://login.microsoftonline.com/common/oauth2/authorize?state=abc", navigationType: .other),
+                                 windowFeatures: WKWindowFeatures())
+
+        XCTAssertNil(popup, "A disallowed host must not get a popup")
+        XCTAssertNil(auth.popupWebView)
+        XCTAssertEqual(auth.loginState, .error(AuthManager.ssoBlockedMessage))
+        XCTAssertEqual(auth.loginOverlayKind, .error)
+        let blocks = records(kind: "nav-decision", from: diagnostics)
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks.first?["kind"] as? String, "popup")
+        XCTAssertEqual(blocks.first?["host"] as? String, "login.microsoftonline.com")
+        XCTAssertEqual(Set((blocks.first ?? [:]).keys), ["decision", "kind", "host"])
+    }
+
+    @MainActor
+    func testPopupMainBlock_retiresPopup_andRetryLeavesNoPopup() {
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+        guard let popup = auth.webView(login, createWebViewWith: WKWebViewConfiguration(),
+                                       for: makeNilTargetAction("about:blank", navigationType: .other),
+                                       windowFeatures: WKWindowFeatures()) else {
+            return XCTFail("about:blank must mount a popup first")
+        }
+        XCTAssertTrue(popup.superview === login)
+
+        // The mounted popup's main frame hops to an identity provider.
+        XCTAssertEqual(decide(auth, popup, makeMainFrameAction("https://acme.okta.com/app/sso")), .cancel)
+
+        XCTAssertEqual(records(kind: "nav-decision", from: diagnostics).first?["kind"] as? String, "popup-main")
+        XCTAssertNil(auth.popupWebView, "The popup is retired so Try again does not reload under a blank pane")
+        XCTAssertNil(popup.superview, "and it is out of the view hierarchy")
+        XCTAssertNil(popup.navigationDelegate)
+        XCTAssertNil(popup.uiDelegate)
+        XCTAssertEqual(auth.loginState, .error(AuthManager.ssoBlockedMessage))
+
+        auth.retryLogin()
+
+        XCTAssertNil(auth.popupWebView)
+        XCTAssertNil(popup.superview)
+        XCTAssertEqual(auth.loginState, .idle)
+    }
+
+    @MainActor
+    func testNavFailed_payloadHasCodeAndDomainOnly_andLeavesStateAlone() {
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+        // The legacy domain string WebKit still reports for "frame load interrupted by policy
+        // change", with the failing URL in userInfo the way WebKit supplies it.
+        let error = NSError(domain: "WebKitErrorDomain", code: 102, userInfo: [
+            NSURLErrorFailingURLStringErrorKey: "https://idp.example/cb?code=LEAKEDCODE&state=LEAKEDSTATE",
+            NSURLErrorFailingURLErrorKey: URL(string: "https://idp.example/cb?code=LEAKEDCODE&state=LEAKEDSTATE")!,
+            NSLocalizedDescriptionKey: "Frame load interrupted https://idp.example/cb?code=LEAKEDCODE"
+        ])
+
+        auth.webView(login, didFailProvisionalNavigation: nil, withError: error)
+
+        let failures = records(kind: "nav-failed", from: diagnostics)
+        XCTAssertEqual(failures.count, 1)
+        let payload = failures.first ?? [:]
+        XCTAssertEqual(Set(payload.keys), ["code", "domain"], "exactly code and domain: \(payload)")
+        XCTAssertEqual(payload["code"] as? Int, 102)
+        XCTAssertEqual(payload["domain"] as? String, "WebKitErrorDomain", "the domain string is recorded verbatim")
+        XCTAssertEqual(auth.loginState, .idle, "nav-failed never touches the login state")
+        XCTAssertEqual(auth.loginOverlayKind, .none)
+        let raw = (try? String(contentsOf: diagnostics.currentSessionFileURL!, encoding: .utf8)) ?? ""
+        XCTAssertFalse(raw.contains("LEAKEDCODE") || raw.contains("idp.example"), "the failing URL never reaches the file: \(raw)")
+    }
+
+    @MainActor
+    func testNavFailed_collapsesIdenticalRepeats_andRecordsADifferentCode() {
+        // A page looping on one blocked redirect echoes the same WebKitErrorDomain 102 per attempt.
+        // The block record is collapsed; its echo must be too, or the export fills with the noise
+        // the collapse was built to stop.
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+        let interrupted = NSError(domain: "WebKitErrorDomain", code: 102, userInfo: nil)
+
+        auth.webView(login, didFailProvisionalNavigation: nil, withError: interrupted)
+        auth.webView(login, didFailProvisionalNavigation: nil, withError: interrupted)
+        XCTAssertEqual(records(kind: "nav-failed", from: diagnostics).count, 1,
+                       "Two identical consecutive failures write one record")
+
+        let cancelled = NSError(domain: "NSURLErrorDomain", code: -999, userInfo: nil)
+        auth.webView(login, didFailProvisionalNavigation: nil, withError: cancelled)
+        XCTAssertEqual(records(kind: "nav-failed", from: diagnostics).map { $0["code"] as? Int }, [102, -999],
+                       "A different failure is a new record")
+
+        // Try again is a fresh attempt: the same failure is recorded once more.
+        auth.retryLogin()
+        auth.webView(login, didFailProvisionalNavigation: nil, withError: cancelled)
+        XCTAssertEqual(records(kind: "nav-failed", from: diagnostics).count, 3)
+        XCTAssertEqual(auth.loginState, .idle, "nav-failed never touches the login state")
+    }
+
+    @MainActor
+    func testSSOBlockedMessage_isStaticAndNamesTheRoute() {
+        let copy = AuthManager.ssoBlockedMessage
+        XCTAssertTrue(copy.contains("single sign-on"))
+        XCTAssertTrue(copy.contains("Sign in manually"))
+        XCTAssertFalse(copy.contains("\u{2014}"), "No em dashes in user-facing copy")
+    }
+
+    @MainActor
+    func testSettingsCopy_disclosesBlockedHostsAndPasteOnlyHere() {
+        XCTAssertTrue(SettingsCopy.diagnosticsCaption.contains("blocked"),
+                      "The diagnostics caption must disclose that blocked hosts are recorded")
+        XCTAssertTrue(SettingsCopy.diagnosticsCaption.contains("identity provider"))
+        XCTAssertTrue(SettingsCopy.cookieHeaderHelp.contains("only here"),
+                      "The paste help must say the cookie header goes only into this field")
+        XCTAssertTrue(SettingsCopy.cookieHeaderHelp.contains("never into a web page"))
+        XCTAssertFalse(SettingsCopy.diagnosticsCaption.contains("\u{2014}"))
+        XCTAssertFalse(SettingsCopy.cookieHeaderHelp.contains("\u{2014}"))
+    }
+
+    @MainActor
+    func testEmailCodeAlert_copyNamesSingleSignOn() {
+        let copy = AuthManager.makeEmailCodeAlert().informativeText
+        XCTAssertTrue(copy.contains("single sign-on"),
+                      "The email-code sheet must list single sign-on beside Google and passkey as unavailable: \(copy)")
+    }
+
+    @MainActor
+    func testDecidePolicy_mainFrameBlock_showsSSOErrorOverlay() {
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+
+        let policy = decide(auth, login, makeMainFrameAction("https://acme.okta.com/app/sso?state=abc"))
+
+        XCTAssertEqual(policy, .cancel, "The allow-list must still reject the host")
+        guard case .error(let message) = auth.loginState else {
+            return XCTFail("A blocked main-frame hop before capture must set the error state, got \(auth.loginState)")
+        }
+        XCTAssertTrue(message.contains("single sign-on"), "Copy must name single sign-on: \(message)")
+        XCTAssertTrue(message.contains("Sign in manually"), "Copy must offer the manual route: \(message)")
+        XCTAssertFalse(message.contains("okta"), "Copy must never carry the blocked host: \(message)")
+        XCTAssertFalse(message.contains("\u{2014}"), "No em dashes in user-facing copy")
+        XCTAssertEqual(auth.loginOverlayKind, .error, "The existing error overlay renders the copy")
+        XCTAssertTrue(hasMountedOverlay(login))
+    }
+
+    @MainActor
+    func testPresentLoginReset_afterCompletedSignIn_blockedHopShowsSSOErrorAgain() async {
+        // One WebView sign-in completes (say a personal account), then the user opens sign-in
+        // again to add a company account that bounces to an identity provider. Success leaves
+        // `hasCapturedSession` true on the way out; the fresh window must forget it, or the
+        // blocked hop is recorded and the SSO card never shows (the silent nothing of #49).
+        // presentLogin builds a real window and sheet, so the reset it performs is driven here
+        // through `resetLoginAttemptState`, the seam it calls.
+        let auth = makeAuthManager()
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        let first = WKWebView(frame: .zero, configuration: config)
+        await config.websiteDataStore.httpCookieStore.setCookie(makeCookie(value: "sk-first-account"))
+        auth.loginWebView = first
+        mockSession.responseData = #"[{"uuid": "org-first-account"}]"#.data(using: .utf8)!
+        mockSession.responseStatusCode = 200
+
+        auth.captureSessionCookie(from: [makeCookie(value: "sk-first-account")])
+        XCTAssertEqual(auth.loginState, .signingIn)
+        // The success path ends in stopLoginWindow, which releases the web view.
+        let finished = await waitUntil(timeout: 20) { auth.loginWebView == nil }
+        XCTAssertTrue(finished, "the first sign-in did not complete within timeout")
+        XCTAssertEqual(auth.accountStore.accounts.count, 1)
+        XCTAssertEqual(auth.loginState, .idle, "success returns to idle")
+
+        // Second window, same as presentLogin's fresh-window branch.
+        auth.resetLoginAttemptState()
+        auth.loginState = .idle
+        let second = makeLoginWebView()
+        auth.loginWebView = second
+
+        let policy = decide(auth, second, makeMainFrameAction("https://acme.okta.com/app/sso?state=abc"))
+
+        XCTAssertEqual(policy, .cancel)
+        XCTAssertEqual(auth.loginState, .error(AuthManager.ssoBlockedMessage),
+                       "A blocked hop on the second window must show the SSO card, not stay idle")
+        XCTAssertEqual(auth.loginOverlayKind, .error)
+        XCTAssertTrue(hasMountedOverlay(second))
+        XCTAssertEqual(records(kind: "nav-decision", from: diagnostics).map { $0["decision"] as? String }, ["block"])
+    }
+
+    @MainActor
+    func testCreateWebView_aboutBlankStillOpensPopup() {
+        // Pattern #7 regression: the about: scheme is checked before the host, so Google's
+        // about:blank OAuth bootstrap still gets a popup after the block recording is added.
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+
+        let popup = auth.webView(login, createWebViewWith: WKWebViewConfiguration(),
+                                 for: makeNilTargetAction("about:blank", navigationType: .other),
+                                 windowFeatures: WKWindowFeatures())
+
+        XCTAssertNotNil(popup, "about:blank must still open a popup (pattern #7)")
+        XCTAssertTrue(popup === auth.popupWebView)
+        XCTAssertEqual(auth.loginState, .idle, "An allowed popup never touches the login state")
+    }
+
     // MARK: - LoginState equality
 
     func testLoginStateEquality() {
@@ -3427,4 +3904,61 @@ private final class InFlightHookSession: HTTPDataFetching {
         let response = HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: "HTTP/1.1", headerFields: nil)!
         return (responseData, response)
     }
+}
+
+// MARK: - WebKit fakes for the navigation-policy delegates (U4, issue #49)
+
+/// `WKNavigationAction` and `WKFrameInfo` have no public initialisers, so the policy delegates are
+/// driven with subclasses that override the properties the policy code reads. Every instance is
+/// kept alive in `retained` for the life of the process: a subclassed action or frame that
+/// deallocates tears down a WebKit-internal object that was never built and crashes the test
+/// runner (EXC_BAD_ACCESS in os_unfair_lock_lock, verified with a scratch bundle on 2026-09-04).
+@MainActor
+enum WebKitFakes {
+    static var retained: [NSObject] = []
+
+    static func frame(isMainFrame: Bool) -> WKFrameInfo {
+        let frame = FakeFrameInfo(isMainFrame: isMainFrame)
+        retained.append(frame)
+        return frame
+    }
+
+    static func action(url: String, targetFrame: WKFrameInfo?, navigationType: WKNavigationType) -> WKNavigationAction {
+        let action = FakeNavigationAction(request: URLRequest(url: URL(string: url)!),
+                                          targetFrame: targetFrame,
+                                          navigationType: navigationType)
+        retained.append(action)
+        return action
+    }
+}
+
+final class FakeFrameInfo: WKFrameInfo {
+    private let fakeIsMainFrame: Bool
+
+    init(isMainFrame: Bool) {
+        self.fakeIsMainFrame = isMainFrame
+        super.init()
+    }
+
+    override var isMainFrame: Bool { fakeIsMainFrame }
+}
+
+final class FakeNavigationAction: WKNavigationAction {
+    private let fakeRequest: URLRequest
+    private let fakeTargetFrame: WKFrameInfo?
+    private let fakeSourceFrame: WKFrameInfo
+    private let fakeNavigationType: WKNavigationType
+
+    init(request: URLRequest, targetFrame: WKFrameInfo?, navigationType: WKNavigationType) {
+        self.fakeRequest = request
+        self.fakeTargetFrame = targetFrame
+        self.fakeSourceFrame = FakeFrameInfo(isMainFrame: true)
+        self.fakeNavigationType = navigationType
+        super.init()
+    }
+
+    override var request: URLRequest { fakeRequest }
+    override var targetFrame: WKFrameInfo? { fakeTargetFrame }
+    override var sourceFrame: WKFrameInfo { fakeSourceFrame }
+    override var navigationType: WKNavigationType { fakeNavigationType }
 }

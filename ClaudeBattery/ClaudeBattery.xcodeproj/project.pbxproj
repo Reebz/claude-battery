@@ -18,6 +18,8 @@
 		A10000040000000000000004 /* UsageService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000040000000000000004 /* UsageService.swift */; };
 		A10000050000000000000005 /* MenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000050000000000000005 /* MenuBarController.swift */; };
 		A10000060000000000000006 /* UsagePopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000060000000000000006 /* UsagePopoverView.swift */; };
+		A10000DF0000000000000DF1 /* DialForecast.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000DF0000000000000DF1 /* DialForecast.swift */; };
+		A10000BC0000000000000BC1 /* PopoverBodyCounters.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000BC0000000000000BC1 /* PopoverBodyCounters.swift */; };
 		A10000070000000000000007 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000070000000000000007 /* SettingsView.swift */; };
 		A10000080000000000000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000080000000000000008 /* Assets.xcassets */; };
 		A10000090000000000000009 /* AccountStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000090000000000000010 /* AccountStore.swift */; };
@@ -93,6 +95,8 @@
 		A20000040000000000000004 /* UsageService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageService.swift; sourceTree = "<group>"; };
 		A20000050000000000000005 /* MenuBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarController.swift; sourceTree = "<group>"; };
 		A20000060000000000000006 /* UsagePopoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsagePopoverView.swift; sourceTree = "<group>"; };
+		A20000DF0000000000000DF1 /* DialForecast.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DialForecast.swift; sourceTree = "<group>"; };
+		A20000BC0000000000000BC1 /* PopoverBodyCounters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PopoverBodyCounters.swift; sourceTree = "<group>"; };
 		A20000070000000000000007 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		A20000080000000000000008 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A20000090000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -263,6 +267,8 @@
 			children = (
 				A20000050000000000000005 /* MenuBarController.swift */,
 				A20000060000000000000006 /* UsagePopoverView.swift */,
+				A20000DF0000000000000DF1 /* DialForecast.swift */,
+				A20000BC0000000000000BC1 /* PopoverBodyCounters.swift */,
 				A20000070000000000000007 /* SettingsView.swift */,
 				B40000020000000000000002 /* IconRendering */,
 			);
@@ -428,6 +434,8 @@
 				A10000040000000000000004 /* UsageService.swift in Sources */,
 				A10000050000000000000005 /* MenuBarController.swift in Sources */,
 				A10000060000000000000006 /* UsagePopoverView.swift in Sources */,
+				A10000DF0000000000000DF1 /* DialForecast.swift in Sources */,
+				A10000BC0000000000000BC1 /* PopoverBodyCounters.swift in Sources */,
 				A10000070000000000000007 /* SettingsView.swift in Sources */,
 				A10000090000000000000009 /* AccountStore.swift in Sources */,
 				A1000000000000000000000A /* ClaudeAPI.swift in Sources */,
@@ -674,7 +682,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.5;
-				MARKETING_VERSION = 1.70;
+				MARKETING_VERSION = 1.72;
 				PRODUCT_BUNDLE_IDENTIFIER = com.reebz.claudebattery;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE = "";
@@ -712,7 +720,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.5;
-				MARKETING_VERSION = 1.70;
+				MARKETING_VERSION = 1.72;
 				PRODUCT_BUNDLE_IDENTIFIER = com.reebz.claudebattery;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE = "";

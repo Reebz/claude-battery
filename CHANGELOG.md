@@ -1,5 +1,18 @@
 # Change Log
 
+### v1.72
+
+**Session and Weekly Dials**
+- Each dial now shows a run-out estimate under its pace word, such as "Out in ~1h 20m", when usage is running ahead of the clock. It is relative, so it cannot be mistaken for a reset time, and it hides when there is nothing sound to project (issue #31).
+- Each dial's reset countdown now sits directly under it, refreshed once a minute while the popover is open, and the separate Resets card is gone. A plan with no reset window reads "Reset time unavailable" (issue #44).
+- The outer ring now follows the pace word under it, green for On Track, orange for Caution, red for Danger, and both turn red whenever less than 20% is left, which is the same point the menu-bar icon turns red. Between 20% and 45% left the ring can differ from the icon, since the ring reads pace and the icon reads level. The inner time ring is now a neutral grey so it no longer competes with the pace colour (issue #46).
+
+**Version**
+- The running version now shows in the popover footer ("v1.72 · Updated just now") and as the first row of the right-click menu (issue #48).
+
+**Sign-In**
+- When the sign-in window blocks a single sign-on redirect, it now says so and offers "Sign in manually" instead of doing nothing. Every blocked hop is recorded in the diagnostics export with its kind and host, never the full URL, so the cause can be diagnosed. The list of allowed hosts is unchanged (issue #49).
+
 ### v1.70
 
 **Session Dial**

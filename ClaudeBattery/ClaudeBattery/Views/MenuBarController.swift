@@ -36,6 +36,12 @@ class MenuBarController: NSObject {
     /// render per countdown-string change by the IconSignature `countdown` field (issue #11 safe).
     private var countdownTimer: Timer?
 
+    /// The popover's one minute clock (KD10, KTD10). Started in `popoverWillShow`, stopped in
+    /// `popoverDidClose`, so it runs only while the popover is on screen. Its tick is observed by
+    /// the three text-line views in the popover and by nothing else: it writes no published
+    /// property on the services, no defaults, and never calls `updateIcon`.
+    private let popoverClock = PopoverClock()
+
     @AppStorage("iconStyle") private var iconStyleRaw: String = IconStyle.dualHorizontal.rawValue
 
     /// Signature of the last successful render. Used by updateIcon to short-circuit
@@ -88,12 +94,17 @@ class MenuBarController: NSObject {
     private func setupPopover() {
         popover.contentSize = NSSize(width: 300, height: 300)
         popover.behavior = .transient
+        // The delegate hooks start and stop the minute clock on AppKit's show/close signals; SwiftUI
+        // onAppear/onDisappear are not reliable for a hosting view that stays in the popover
+        // between shows (KTD10 rule 3).
+        popover.delegate = self
         popover.contentViewController = NSHostingController(
             rootView: UsagePopoverView(
                 accountStore: accountStore,
                 authManager: authManager,
                 usageService: usageService,
                 updateChecker: updateChecker,
+                clock: popoverClock,
                 onSignIn: { [weak self] in self?.authManager.presentLogin() }
             )
         )
@@ -256,6 +267,15 @@ class MenuBarController: NSObject {
 
     private func showContextMenu() {
         let menu = NSMenu()
+        // Greyed version row first (#48). Its action is nil, so the target loop below skips it
+        // and it stays inert; disabled explicitly so it never highlights. Omitted when the
+        // bundle carries no version (the test host).
+        if let versionTitle = Self.versionMenuTitle(AppVersion.marketing) {
+            let versionItem = NSMenuItem(title: versionTitle, action: nil, keyEquivalent: "")
+            versionItem.isEnabled = false
+            menu.addItem(versionItem)
+            menu.addItem(.separator())
+        }
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
@@ -397,6 +417,13 @@ class MenuBarController: NSObject {
         return CountdownFormat.compactCountdown(until: resetDate, now: now) ?? ""
     }
 
+    /// Title for the disabled first row of the right-click menu, "Claude Battery v1.70", or nil
+    /// when there is no version to show (the row is then omitted). `nonisolated static` so it is
+    /// reachable from tests like `countdownTitle`.
+    nonisolated static func versionMenuTitle(_ version: String?) -> String? {
+        UsagePopoverView.versionLabel(version).map { "Claude Battery \($0)" }
+    }
+
     /// Compose a leading rounded "tag cell" carrying the countdown onto the front of the
     /// battery image, matching the battery visual language: `[ 3h+ ] [75] [43]`. This renders
     /// INSIDE the icon image rather than as a floating `button.attributedTitle`, so the timer
@@ -481,6 +508,53 @@ class MenuBarController: NSObject {
             countdownTimer?.invalidate()
             countdownTimer = nil
         }
+    }
+}
+
+// MARK: - Popover minute clock (KD10, KTD10)
+
+/// The one clock behind the popover's three text lines (each dial's pace word, run-out and reset
+/// countdown, and the footer freshness line). `now` is the only thing it publishes; the leaf views
+/// that draw those lines are its only observers, so a tick re-prints text and re-renders nothing
+/// else. Owned by `MenuBarController`, which starts it when the popover is about to show and stops
+/// it when the popover closes, so a closed popover has no timer at all. The same `Timer` pattern as
+/// the controller's other clocks (weak self, main run loop, `.common` mode) with a tolerance of at
+/// most 10 s so the OS can coalesce the wake.
+@MainActor
+final class PopoverClock: ObservableObject {
+    @Published private(set) var now: Date
+    private let interval: TimeInterval
+    private var timer: Timer?
+
+    var isRunning: Bool { timer != nil }
+
+    init(interval: TimeInterval = 60, now: Date = Date()) {
+        self.interval = interval
+        self.now = now
+    }
+
+    /// Refreshes `now` at once (the popover must open on the current minute, not the minute it
+    /// last closed on) and arms the timer if it is not already running. Idempotent.
+    func start() {
+        now = Date()
+        guard timer == nil else { return }
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.now = Date()
+            }
+        }
+        timer.tolerance = min(10, interval / 6)
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    deinit {
+        timer?.invalidate()
     }
 }
 
@@ -587,5 +661,21 @@ extension MenuBarController: NSMenuDelegate {
 extension MenuBarController: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         settingsWindowController = nil
+    }
+}
+
+// MARK: - NSPopoverDelegate (the minute clock's start and stop signals, KTD10)
+
+extension MenuBarController: NSPopoverDelegate {
+    func popoverWillShow(_ notification: Notification) {
+        #if DEBUG
+        // The trip-wire measures re-evaluations within one open, not the opens themselves.
+        PopoverBodyCounters.reset()
+        #endif
+        popoverClock.start()
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        popoverClock.stop()
     }
 }
