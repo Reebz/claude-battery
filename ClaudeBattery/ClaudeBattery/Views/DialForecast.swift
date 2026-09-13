@@ -64,8 +64,9 @@ extension UsagePopoverView {
         return max(1, (seconds / quantum).rounded()) * quantum
     }
 
-    /// Copy for the run-out line under the pace word, relative so it cannot be mistaken for a
-    /// reset time (KD6). Prints the seconds it is given; the caller quantises first. nil hides it.
+    /// Copy for the run-out line, the last line under a dial (R11), relative so it cannot be
+    /// mistaken for a reset time (KD6). Prints the seconds it is given; the caller quantises first.
+    /// nil hides it.
     static func runOutLine(seconds: TimeInterval?) -> String? {
         guard let seconds else { return nil }
         return "Out in ~" + CountdownFormat.minuteResolution(seconds: seconds)
@@ -73,10 +74,12 @@ extension UsagePopoverView {
 
     // MARK: - Dial lines (#44, KTD3)
 
-    /// The three text lines under a dial, in display order: the pace word (nil hides it), the
-    /// run-out estimate (nil hides it), and the reset countdown, which is always present. The two
-    /// durations behind the strings ride along for the spoken label; `runOutSeconds` is already
-    /// quantised, so the voice and the line agree.
+    /// The three text lines under a dial. The fields are declared caption, run-out, countdown, but
+    /// the display order is the pace word (nil hides it), then the reset countdown, which is always
+    /// present, then the run-out estimate last (nil hides it). The countdown is read far more often
+    /// than the forecast (R11), so it sits in the same slot whether or not a forecast is there, and
+    /// the optional line is the one that moves. The two durations behind the strings ride along for
+    /// the spoken label; `runOutSeconds` is already quantised, so the voice and the line agree.
     struct DialLines: Equatable {
         let caption: String?
         let runOut: String?
@@ -85,13 +88,16 @@ extension UsagePopoverView {
         let runOutSeconds: TimeInterval?
     }
 
-    /// The single line a dial shows when its reset time is nil or already past (AE5).
-    static let resetUnavailableLine = "Reset time unavailable"
+    /// The single line a dial shows when its reset time is nil or already past (AE5). Short on
+    /// purpose: at the 11pt medium the countdown now uses (R11) the old, longer wording
+    /// measured about 130pt against the 114pt card content width, so `minimumScaleFactor` would
+    /// quietly shrink the one line the reporter said was already hard to read. This fits.
+    static let resetUnavailableLine = "No reset time"
 
     /// The lines under one dial from the current snapshot (KTD3). Takes no display value and no
     /// weekly-limited flag: `pace` already encodes weekly-limited-versus-Danger through
     /// `sessionPace(for:)`, and `rawRemaining` is the value the run-out projects. A nil or past
-    /// reset self-omits everything but "Reset time unavailable", whatever `pace` says, matching the
+    /// reset self-omits everything but "No reset time", whatever `pace` says, matching the
     /// dial's own inner-arc rule (KTD4). The run-out is quantised here, before `runOutLine`, which
     /// prints exactly what it is given, and then dropped unless it still lands strictly before the
     /// reset: `pace` is graded at poll time while these lines re-print on the minute clock, so a
@@ -142,8 +148,9 @@ extension UsagePopoverView {
     }
 
     /// One spoken label per dial combining usage, time-remaining, the pace status (R9) and, when
-    /// `lines` is given, the run-out and the reset countdown from under the dial, so each dial is
-    /// spoken once and the three text lines can hide from the accessibility tree (KTD3). The pace
+    /// `lines` is given, the reset countdown and then the run-out from under the dial, in that
+    /// order because that is the order they are drawn in (R11), so each dial is spoken once and the
+    /// three text lines can hide from the accessibility tree (KTD3). The pace
     /// is spelled out with its meaning ("over pace") rather than reusing the terse visual caption,
     /// and `.unknown` has nothing to add.
     ///
@@ -165,13 +172,14 @@ extension UsagePopoverView {
         case .unknown:       break
         }
         if let lines {
-            if let runOut = lines.runOutSeconds {
-                parts.append("projected to run out in about \(spokenDuration(seconds: runOut))")
-            }
+            // Reset before run-out, so the voice reads the lines in the order the eye does (R11).
             if let reset = lines.resetSeconds {
                 parts.append("resets in \(spokenDuration(seconds: reset))")
             } else {
                 parts.append(resetUnavailableLine.lowercased())
+            }
+            if let runOut = lines.runOutSeconds {
+                parts.append("projected to run out in about \(spokenDuration(seconds: runOut))")
             }
         }
         return parts.joined(separator: ", ")

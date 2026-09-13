@@ -110,9 +110,11 @@ struct UsagePopoverView: View {
 
     // Gauge cards (Session/Weekly) give the concentric dial and the three lines under it room
     // (#31, #44). Taller than the arc alone needs: the enlarged dial (frame height 80) plus the pace
-    // word, the run-out and the reset countdown (10pt each) sit with vertical slack so nothing
-    // clips. 160 fitted one line; the three-line content measures 171 in the render harness, so
-    // 185 leaves the same slack the old card had and keeps the two cards in a row equal.
+    // word (10pt) and the reset countdown and run-out (11pt medium, R11) sit with vertical slack so
+    // nothing clips. 160 fitted one line; the three-line content measured 171 in the render harness
+    // at 10pt and grows 2.4 at 11pt, so 185 still leaves about 12 of the original 14 of slack and
+    // keeps the two cards in a row equal. Going to 11pt did not need a taller card and must not
+    // quietly get one.
     private let gaugeCardHeight: CGFloat = 185
     // The Models card takes no fixed height: it sizes to its content, with content vertically
     // centered, so it hugs the bars (no excess bottom padding) and never clips the 3-bar case the
@@ -151,8 +153,8 @@ struct UsagePopoverView: View {
 
     /// Shared Session/Weekly card: a concentric dual-arc gauge (outer = usage remaining coloured by
     /// pace with the red floor, KD5; inner = time remaining in neutral grey, KD8) over the pace word,
-    /// the run-out estimate and the reset countdown (KTD3). The inner arc and time % self-omit when
-    /// the reset time is unknown (KTD4); the lines then collapse to "Reset time unavailable".
+    /// the reset countdown and the run-out estimate (KTD3). The inner arc and time % self-omit when
+    /// the reset time is unknown (KTD4); the lines then collapse to "No reset time".
     ///
     /// `remaining` is the DISPLAY value (what the dial draws, and what colours it); `rawRemaining`
     /// is what the lines project. They differ only on a weekly-limited Session card.
@@ -245,8 +247,9 @@ struct UsagePopoverView: View {
 
     /// Shared bar-track gray for the usage-credits bar row.
     private static let trackColor = Color(white: 0.25)
-    /// Shared muted-label gray for secondary label/percent text (bar rows and the run-out and
-    /// countdown lines under the dials, drawn by the file-scope `DialLinesView`).
+    /// Shared muted-label gray for secondary label/percent text (bar rows, and the "Limited by
+    /// weekly" pace word). The lines under the dials left this grey in R11: white at 11pt medium
+    /// is the readable contrast, and this grey is what made them hard to read.
     fileprivate static let mutedLabelColor = Color(white: 0.6)
 
     // MARK: - Pace (U2)
@@ -905,7 +908,8 @@ private struct UsageCard<Content: View>: View {
 
 // MARK: - Minute-clock scope (KTD10)
 
-/// The three text lines under a dial: pace word, run-out, reset countdown, each 10pt (#44, KTD3).
+/// The three text lines under a dial, in drawn order: pace word (10pt), reset countdown, run-out
+/// (both 11pt medium and white, R11) (#44, KTD3).
 /// This is the whole tick scope for a card: it is the only view here that observes `PopoverClock`,
 /// so a minute tick re-prints these lines and nothing else. `ArcGauge` is its sibling in
 /// `gaugeCard`, never its child. Hidden from the accessibility tree because the dial's combined
@@ -932,18 +936,24 @@ private struct DialLinesView: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(UsagePopoverView.paceCaptionColor(remaining: displayRemaining, pace: pace))
             }
+            // The countdown comes second and the forecast last, so the countdown sits in the same
+            // place whether or not a forecast is there, and both lines are white at 11pt medium:
+            // at 10pt regular in the muted grey they measured 5.3:1 against the card background
+            // where the removed full-width Resets row measured 15:1, which is the R11 complaint.
+            Text(lines.countdown)
+                .font(.system(size: 11, weight: .medium))
+                .monospacedDigit()
+                .foregroundColor(.white)
             if let runOut = lines.runOut {
                 Text(runOut)
-                    .font(.system(size: 10))
-                    .foregroundColor(UsagePopoverView.mutedLabelColor)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white)
             }
-            Text(lines.countdown)
-                .font(.system(size: 10))
-                .monospacedDigit()
-                .foregroundColor(UsagePopoverView.mutedLabelColor)
         }
-        // "Reset time unavailable" is the widest line and sits within a few points of the 114pt
-        // card content width; one line with a little shrink is insurance against a wider font.
+        // The countdown is now the widest line: inside the last day of a window it prints hours and
+        // minutes, so the widest it gets is "Resets in 23h 59m", about 100pt of the 114pt card
+        // content width at 11pt medium; one line with a little shrink stays as insurance against a
+        // wider system font.
         .lineLimit(1)
         .minimumScaleFactor(0.85)
         .accessibilityHidden(true)
