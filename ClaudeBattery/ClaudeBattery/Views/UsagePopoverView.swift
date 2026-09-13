@@ -13,8 +13,9 @@ import SwiftUI
 /// The four semantic styles this file used are pinned, at their 9 call sites, to the point sizes
 /// macOS actually renders them at, measured on this system rather than assumed: `.caption` is
 /// 10 regular, `.caption2` is 10 medium, `.subheadline` is 11 regular and `.headline` is 13 bold.
-/// The trade is deliberate and it is the whole trade: those 9 sites give up Dynamic Type, and in
-/// return one slider moves all 40 text sites in the panel together.
+/// The trade is deliberate: those 9 sites, plus the three bordered button titles that had been
+/// on the style's own body font, give up Dynamic Type, and in return one slider moves all 43
+/// text sites in the panel together.
 enum PopoverTextSize {
     /// The UserDefaults key behind the Settings slider. Renaming it would silently reset every
     /// user's choice back to the default, so a test pins the literal.
@@ -82,7 +83,7 @@ struct UsagePopoverView: View {
     let clock: PopoverClock
     let onSignIn: () -> Void
     /// The text-size position the Settings slider writes (R12, grew out of #53). Read here and
-    /// published into the environment, so one value drives all 40 text sites in the popover.
+    /// published into the environment, so one value drives all 43 text sites in the popover.
     @AppStorage(PopoverTextSize.positionKey) private var textSizePosition = PopoverTextSize.defaultPosition
 
     /// The offset this view's own text sites use. The root cannot read `\.popoverTextOffset`
