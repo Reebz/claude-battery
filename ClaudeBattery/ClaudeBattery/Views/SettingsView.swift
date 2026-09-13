@@ -12,6 +12,9 @@ struct SettingsView: View {
     @AppStorage("notificationsEnabled") private var notificationsEnabled = false
     @AppStorage(MenuBarDefaults.showSessionCountdownKey) private var showSessionCountdown = false
     @AppStorage("iconStyle") private var iconStyleRaw: String = IconStyle.dualHorizontal.rawValue
+    /// Drives the one text-size offset the whole usage popover reads (R12, grew out of #53). This
+    /// window's own text is not scaled by it, and neither is the menu bar countdown cell.
+    @AppStorage(PopoverTextSize.positionKey) private var textSizePosition = PopoverTextSize.defaultPosition
     @State private var confirmRemoveId: UUID?
     /// Scales the decorative coffee-button font with Dynamic Type (the only fixed-size SwiftUI font
     /// in this view); the rest use semantic styles.
@@ -58,6 +61,26 @@ struct SettingsView: View {
             Section {
                 Toggle("Show session countdown in menu bar", isOn: $showSessionCountdown)
                 Text("Adds a compact session countdown (e.g. \"4h+\", \"32m\") to the left of the menu bar icon. Hidden when there is no active session.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(PopoverTextSize.settingsLabel(for: textSizePosition))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Slider(
+                        value: Binding(
+                            get: { Double(textSizePosition) },
+                            set: { textSizePosition = Int($0.rounded()) }
+                        ),
+                        in: Double(PopoverTextSize.positions.lowerBound)...Double(PopoverTextSize.positions.upperBound),
+                        step: 1
+                    )
+                }
+                Text("Scales every text size in the usage popover together. The menu bar and this window do not change.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -139,7 +162,10 @@ struct SettingsView: View {
         // which grew when it started naming the plan sample it now collects (R6).
         // +30 over the prior 760 covers the blocked-host sentence added to the same caption
         // (issue #49). The paste help sits in a collapsed DisclosureGroup and adds nothing.
-        let base: CGFloat = 790
+        // +75 over the prior 790 covers the text-size section: the section gap, the size
+        // caption, the slider, and the two-line explanation under it. An estimate like the
+        // numbers above it, with the same 90% screen cap below as the backstop.
+        let base: CGFloat = 865
         // Each account row: ~40pt, plus ~45pt for threshold slider when notifications on
         let perAccount: CGFloat = notificationsEnabled ? 85 : 40
         let accountCount = CGFloat(max(accountStore.accounts.count, 1))

@@ -1,6 +1,76 @@
 import AppKit
 import SwiftUI
 
+// MARK: - Popover text scale (R12)
+
+/// The popover's one text-size control (R12, grew out of #53): every text size in the usage popover
+/// moves together by a point offset the user picks in Settings. Popover only by decision - the
+/// menu bar countdown cell and the Settings window's own text keep the sizes they have.
+///
+/// Six positions, 1 to 6, for offsets -3 to +2. The popover is a fixed 300pt panel and its cards
+/// have a fixed height, so there is no position above 6.
+///
+/// The four semantic styles this file used are pinned, at their 9 call sites, to the point sizes
+/// macOS actually renders them at, measured on this system rather than assumed: `.caption` is
+/// 10 regular, `.caption2` is 10 medium, `.subheadline` is 11 regular and `.headline` is 13 bold.
+/// The trade is deliberate: those 9 sites, plus the three bordered button titles that had been
+/// on the style's own body font, give up Dynamic Type, and in return one slider moves all 43
+/// text sites in the panel together.
+enum PopoverTextSize {
+    /// The UserDefaults key behind the Settings slider. Renaming it would silently reset every
+    /// user's choice back to the default, so a test pins the literal.
+    static let positionKey = "popoverTextSizePosition"
+    static let defaultPosition = 4
+    static let positions = 1...6
+
+    /// The reset countdown's size at position 4 (R11), the line #53 was about, so the Settings
+    /// caption reports the size of the line the user most wants to read.
+    static let labelReferenceSize: CGFloat = 11
+
+    /// Point offset for a slider position: 1 to 6 gives -3 to +2. A position outside the range
+    /// clamps into it, because a stale or hand-edited UserDefaults value (0, 7, 99, -1) has to
+    /// land on a size the layout was measured against, not off the end of the table.
+    static func offset(for position: Int) -> CGFloat {
+        let clamped = min(max(position, positions.lowerBound), positions.upperBound)
+        return CGFloat(clamped - defaultPosition)
+    }
+
+    /// A base point size with the offset applied, floored at 1: the smallest bases here are the
+    /// 7pt centre clock glyph and the 9pt footer hint, and zero or negative is not a font size.
+    static func size(_ base: CGFloat, offset: CGFloat) -> CGFloat {
+        max(1, base + offset)
+    }
+
+    /// The scaled font for one site. Weight and design pass straight through, so every call site
+    /// keeps the exact face it had before the offset existed.
+    static func font(_ base: CGFloat, weight: Font.Weight = .regular,
+                     design: Font.Design = .default, offset: CGFloat) -> Font {
+        .system(size: size(base, offset: offset), weight: weight, design: design)
+    }
+
+    /// Caption above the Settings slider, reporting the live result: "Text size: 11pt" at the
+    /// default position, 8pt at position 1 and 13pt at position 6.
+    static func settingsLabel(for position: Int) -> String {
+        "Text size: \(Int(size(labelReferenceSize, offset: offset(for: position))))pt"
+    }
+}
+
+/// The point offset every popover text site adds to its base size. It travels through the
+/// environment rather than each subview reading UserDefaults for itself, because SwiftUI observes
+/// an environment value and re-renders the views that read it, where a hidden global read would
+/// leave stale sizes on screen until something else happened to invalidate the view. Reading it
+/// adds no `PopoverClock` observer, so the minute-tick scope (KTD10) is unchanged.
+private struct PopoverTextOffsetKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
+extension EnvironmentValues {
+    var popoverTextOffset: CGFloat {
+        get { self[PopoverTextOffsetKey.self] }
+        set { self[PopoverTextOffsetKey.self] = newValue }
+    }
+}
+
 struct UsagePopoverView: View {
     @ObservedObject var accountStore: AccountStore
     @ObservedObject var authManager: AuthManager
@@ -12,6 +82,14 @@ struct UsagePopoverView: View {
     /// three text lines and nothing else (the arcs are siblings of that scope, never children).
     let clock: PopoverClock
     let onSignIn: () -> Void
+    /// The text-size position the Settings slider writes (R12, grew out of #53). Read here and
+    /// published into the environment, so one value drives all 43 text sites in the popover.
+    @AppStorage(PopoverTextSize.positionKey) private var textSizePosition = PopoverTextSize.defaultPosition
+
+    /// The offset this view's own text sites use. The root cannot read `\.popoverTextOffset`
+    /// back: `.environment(_:_:)` feeds the children of the view it is applied to, not that view,
+    /// so an `@Environment` property here would always read the default 0.
+    private var textOffset: CGFloat { PopoverTextSize.offset(for: textSizePosition) }
 
     var body: some View {
         Group {
@@ -33,6 +111,9 @@ struct UsagePopoverView: View {
         }
         .frame(width: 300)
         .preferredColorScheme(.dark)
+        // One place the whole popover reads its text scale from (R12). Applied here, on the
+        // root, so every card, row and line below moves together when the Settings slider moves.
+        .environment(\.popoverTextOffset, textOffset)
     }
 
     // MARK: - Authenticated
@@ -80,9 +161,9 @@ struct UsagePopoverView: View {
                 Button(action: onSignIn) {
                     HStack(spacing: 4) {
                         Image(systemName: "plus")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(PopoverTextSize.font(10, weight: .medium, offset: textOffset))
                         Text("Add Account")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(PopoverTextSize.font(11, weight: .medium, offset: textOffset))
                     }
                     .foregroundColor(Color(white: 0.5))
                 }
@@ -97,7 +178,7 @@ struct UsagePopoverView: View {
                 // and without re-evaluating anything above it (KTD10).
                 FooterStatusLineView(clock: clock, lastFetch: usageService.lastSuccessfulFetch)
                 Text("Right-click the battery icon in your menu bar for Settings.")
-                    .font(.system(size: 9))
+                    .font(PopoverTextSize.font(9, offset: textOffset))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
             }
@@ -110,9 +191,12 @@ struct UsagePopoverView: View {
 
     // Gauge cards (Session/Weekly) give the concentric dial and the three lines under it room
     // (#31, #44). Taller than the arc alone needs: the enlarged dial (frame height 80) plus the pace
-    // word, the run-out and the reset countdown (10pt each) sit with vertical slack so nothing
-    // clips. 160 fitted one line; the three-line content measures 171 in the render harness, so
-    // 185 leaves the same slack the old card had and keeps the two cards in a row equal.
+    // word (10pt) and the reset countdown and run-out (11pt medium, R11) sit with vertical slack so
+    // nothing clips. 160 fitted one line; the three-line content measured 171 in the render harness
+    // at 10pt and grows 2.4 at 11pt, so 185 still leaves about 12 of the original 14 of slack and
+    // keeps the two cards in a row equal. At slider position 6 the three-line stack grows from
+    // 38.0 to 47.0 and spends 9 of that 12, leaving about 3. Going to 11pt did not need a taller
+    // card and must not quietly get one.
     private let gaugeCardHeight: CGFloat = 185
     // The Models card takes no fixed height: it sizes to its content, with content vertically
     // centered, so it hugs the bars (no excess bottom padding) and never clips the 3-bar case the
@@ -151,8 +235,8 @@ struct UsagePopoverView: View {
 
     /// Shared Session/Weekly card: a concentric dual-arc gauge (outer = usage remaining coloured by
     /// pace with the red floor, KD5; inner = time remaining in neutral grey, KD8) over the pace word,
-    /// the run-out estimate and the reset countdown (KTD3). The inner arc and time % self-omit when
-    /// the reset time is unknown (KTD4); the lines then collapse to "Reset time unavailable".
+    /// the reset countdown and the run-out estimate (KTD3). The inner arc and time % self-omit when
+    /// the reset time is unknown (KTD4); the lines then collapse to "No reset time".
     ///
     /// `remaining` is the DISPLAY value (what the dial draws, and what colours it); `rawRemaining`
     /// is what the lines project. They differ only on a weekly-limited Session card.
@@ -179,6 +263,15 @@ struct UsagePopoverView: View {
                     // width the height binds, so 80 (was 58) grows the rings enough that even the
                     // widest 100%-over-100% readout (right after a window reset) clears the inner
                     // arc with margin, while the inner inset (9) keeps the two rings visibly apart.
+                    // That margin holds at the default text size, and it is thin: the 15pt bold
+                    // rounded "100%" measures 41.9pt wide, putting its cap corner 23.7 from the
+                    // centre against the inner ring's inner edge at 26. At slider position 6 the
+                    // readout is 17pt and 47.0pt wide, corner 26.6 against the same 26, so the
+                    // corners touch the inner ring by about half a point. That happens only while
+                    // both numbers read 100%, in the moment after a window reset, and it was
+                    // accepted: position 6 is the top of the slider precisely because that is
+                    // where the panel only roughly fits. Every popover size moves together, so the
+                    // readout is not carved out of the scale to buy the margin back.
                     .frame(height: 80)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(Self.gaugeAccessibilityLabel(name: title, usage: remaining,
@@ -245,8 +338,9 @@ struct UsagePopoverView: View {
 
     /// Shared bar-track gray for the usage-credits bar row.
     private static let trackColor = Color(white: 0.25)
-    /// Shared muted-label gray for secondary label/percent text (bar rows and the run-out and
-    /// countdown lines under the dials, drawn by the file-scope `DialLinesView`).
+    /// Shared muted-label gray for secondary label/percent text (bar rows, and the "Limited by
+    /// weekly" pace word). The lines under the dials left this grey in R11: white at 11pt medium
+    /// is the readable contrast, and this grey is what made them hard to read.
     fileprivate static let mutedLabelColor = Color(white: 0.6)
 
     // MARK: - Pace (U2)
@@ -357,7 +451,7 @@ struct UsagePopoverView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
                 Text(label)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(PopoverTextSize.font(11, weight: .semibold, offset: textOffset))
                     .foregroundColor(Self.mutedLabelColor)
                 Spacer()
                 trailing()
@@ -474,11 +568,11 @@ struct UsagePopoverView: View {
             // percent is uncapped (KTD7); over-limit colors red via spendColor.
             Text(Self.usageCreditsEnabledStatus(spentFormatted: formatCurrency(spent, code: currency),
                                                 percent: percent))
-                .font(.system(size: 10))
+                .font(PopoverTextSize.font(10, offset: textOffset))
                 .foregroundColor(spendColor(for: percent))
         case let .disabled(reason, resetDate):
             Text(Self.usageCreditsDisabledText(reason: reason, resetDate: resetDate))
-                .font(.system(size: 10))
+                .font(PopoverTextSize.font(10, offset: textOffset))
                 .foregroundColor(Color(white: 0.6))
         case nil:
             EmptyView()
@@ -487,18 +581,18 @@ struct UsagePopoverView: View {
 
     private func creditsBalanceSegment(balance: UsageCreditsData.Balance) -> some View {
         Text(formatCurrency(balance.major, code: balance.currency))
-            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .font(PopoverTextSize.font(11, weight: .semibold, design: .rounded, offset: textOffset))
             .foregroundColor(.white)
     }
 
     private func creditsDetailRow(label: String, value: String) -> some View {
         HStack {
             Text(label)
-                .font(.system(size: 10))
+                .font(PopoverTextSize.font(10, offset: textOffset))
                 .foregroundColor(Color(white: 0.5))
             Spacer()
             Text(value)
-                .font(.system(size: 10, weight: .medium))
+                .font(PopoverTextSize.font(10, weight: .medium, offset: textOffset))
                 .foregroundColor(Color(white: 0.7))
         }
         .padding(.horizontal, 10)
@@ -576,9 +670,9 @@ struct UsagePopoverView: View {
             Button(action: { NSWorkspace.shared.open(banner.url) }) {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 12))
+                        .font(PopoverTextSize.font(12, offset: textOffset))
                     Text(banner.title)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(PopoverTextSize.font(11, weight: .semibold, offset: textOffset))
                     Spacer(minLength: 0)
                 }
                 // Cyan is the colour the footer update link already used. The tint sits on the same
@@ -607,7 +701,7 @@ struct UsagePopoverView: View {
             ProgressView()
                 .scaleEffect(0.8)
             Text("Signing in...")
-                .font(.headline)
+                .font(PopoverTextSize.font(13, weight: .bold, offset: textOffset))
         }
         .frame(maxWidth: .infinity, minHeight: 100)
         .padding(16)
@@ -616,14 +710,23 @@ struct UsagePopoverView: View {
     private func loginErrorContent(_ message: String) -> some View {
         VStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 32))
+                .font(PopoverTextSize.font(32, offset: textOffset))
                 .foregroundColor(.orange)
             Text(message)
-                .font(.subheadline)
+                .font(PopoverTextSize.font(11, offset: textOffset))
                 .multilineTextAlignment(.center)
-            Button("Try Again") {
+            // A label closure, not `Button("Try Again")`, so the title can carry the R12 offset
+            // like every other line here: the bordered styles resolve the title font themselves, so
+            // an outer `.font` never reaches a string-initialised label (a 24pt bold one renders
+            // byte-identical to no font in the render harness). A font on the `Text` inside does
+            // scale the title, and the button chrome grows with it. 13 regular is what the unstyled
+            // label already measured as, so position 4 looks exactly as it did before.
+            Button {
                 authManager.loginState = .idle
                 onSignIn()
+            } label: {
+                Text("Try Again")
+                    .font(PopoverTextSize.font(13, offset: textOffset))
             }
             .buttonStyle(.borderedProminent)
         }
@@ -635,7 +738,7 @@ struct UsagePopoverView: View {
         VStack(spacing: 12) {
             ProgressView()
             Text("Fetching usage...")
-                .font(.subheadline)
+                .font(PopoverTextSize.font(11, offset: textOffset))
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, minHeight: 100)
@@ -645,13 +748,17 @@ struct UsagePopoverView: View {
     private var unauthenticatedContent: some View {
         VStack(spacing: 16) {
             Image(systemName: "battery.0percent")
-                .font(.system(size: 40))
+                .font(PopoverTextSize.font(40, offset: textOffset))
                 .foregroundColor(.secondary)
             Text("Sign in to see your Claude usage")
-                .font(.subheadline)
+                .font(PopoverTextSize.font(11, offset: textOffset))
                 .multilineTextAlignment(.center)
-            Button("Sign In") { onSignIn() }
-                .buttonStyle(.borderedProminent)
+            // Label closure for the reason the "Try Again" button above spells out.
+            Button { onSignIn() } label: {
+                Text("Sign In")
+                    .font(PopoverTextSize.font(13, offset: textOffset))
+            }
+            .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, minHeight: 120)
         .padding(16)
@@ -660,16 +767,20 @@ struct UsagePopoverView: View {
     private var reauthContent: some View {
         VStack(spacing: 12) {
             Image(systemName: "key.slash")
-                .font(.system(size: 32))
+                .font(PopoverTextSize.font(32, offset: textOffset))
                 .foregroundColor(.secondary)
             Text("Session expired")
-                .font(.subheadline)
+                .font(PopoverTextSize.font(11, offset: textOffset))
             Text("Please sign in again to continue.")
-                .font(.caption)
+                .font(PopoverTextSize.font(10, offset: textOffset))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-            Button("Sign In Again") { onSignIn() }
-                .buttonStyle(.borderedProminent)
+            // Label closure for the reason the "Try Again" button above spells out.
+            Button { onSignIn() } label: {
+                Text("Sign In Again")
+                    .font(PopoverTextSize.font(13, offset: textOffset))
+            }
+            .buttonStyle(.borderedProminent)
         }
         .frame(maxWidth: .infinity, minHeight: 120)
         .padding(16)
@@ -678,12 +789,12 @@ struct UsagePopoverView: View {
     private var errorContent: some View {
         VStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 32))
+                .font(PopoverTextSize.font(32, offset: textOffset))
                 .foregroundColor(.secondary)
             Text("Unable to reach Claude")
-                .font(.subheadline)
+                .font(PopoverTextSize.font(11, offset: textOffset))
             Text("The app may need an update.")
-                .font(.caption)
+                .font(PopoverTextSize.font(10, offset: textOffset))
                 .foregroundColor(.secondary)
         }
         .frame(maxWidth: .infinity, minHeight: 100)
@@ -711,6 +822,9 @@ private struct AccountListSection: View {
     let onAddAccount: () -> Void
     @State private var editingAccountId: UUID?
     @State private var editText: String = ""
+
+    /// R12 text scale: the point offset every text size in this view adds to its base.
+    @Environment(\.popoverTextOffset) private var textOffset
 
     /// How many account rows show before the list starts scrolling, and what a row costs: a 24pt
     /// control with 5pt of padding either side, plus the 1pt divider under it.
@@ -744,10 +858,10 @@ private struct AccountListSection: View {
                 Button(action: onAddAccount) {
                     HStack(spacing: 6) {
                         Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 12))
+                            .font(PopoverTextSize.font(12, offset: textOffset))
                             .foregroundColor(.green)
                         Text("Add Account")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(PopoverTextSize.font(11, weight: .medium, offset: textOffset))
                             .foregroundColor(Color(white: 0.7))
                         Spacer()
                     }
@@ -793,7 +907,7 @@ private struct AccountListSection: View {
                     .frame(width: 7, height: 7)
 
                 Text(accountStore.disambiguatedName(for: account))
-                    .font(.system(size: 11))
+                    .font(PopoverTextSize.font(11, offset: textOffset))
                     .foregroundColor(.white)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -805,7 +919,7 @@ private struct AccountListSection: View {
                     editingAccountId = account.id
                 } label: {
                     Image(systemName: "pencil")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(PopoverTextSize.font(12, weight: .semibold, offset: textOffset))
                         .foregroundColor(Color(white: 0.5))
                         .frame(width: 24, height: 24)
                         .contentShape(Rectangle())
@@ -838,7 +952,7 @@ private struct AccountListSection: View {
                 editingAccountId = nil
             })
             .textFieldStyle(.plain)
-            .font(.system(size: 11))
+            .font(PopoverTextSize.font(11, offset: textOffset))
             .foregroundColor(.white)
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
@@ -854,7 +968,7 @@ private struct AccountListSection: View {
                 editingAccountId = nil
             } label: {
                 Image(systemName: "checkmark")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(PopoverTextSize.font(11, weight: .semibold, offset: textOffset))
                     .foregroundColor(.green)
                     .frame(width: 24, height: 24)
                     .contentShape(Rectangle())
@@ -865,7 +979,7 @@ private struct AccountListSection: View {
                 editingAccountId = nil
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(PopoverTextSize.font(10, weight: .medium, offset: textOffset))
                     .foregroundColor(Color(white: 0.5))
                     .frame(width: 24, height: 24)
                     .contentShape(Rectangle())
@@ -884,6 +998,9 @@ private struct UsageCard<Content: View>: View {
     let title: String
     let content: Content
 
+    /// R12 text scale: the point offset every text size in this view adds to its base.
+    @Environment(\.popoverTextOffset) private var textOffset
+
     init(title: String, @ViewBuilder content: () -> Content) {
         self.title = title
         self.content = content()
@@ -892,7 +1009,7 @@ private struct UsageCard<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
-                .font(.system(size: 13, weight: .semibold))
+                .font(PopoverTextSize.font(13, weight: .semibold, offset: textOffset))
                 .foregroundColor(.white)
             content
         }
@@ -905,7 +1022,8 @@ private struct UsageCard<Content: View>: View {
 
 // MARK: - Minute-clock scope (KTD10)
 
-/// The three text lines under a dial: pace word, run-out, reset countdown, each 10pt (#44, KTD3).
+/// The three text lines under a dial, in drawn order: pace word (10pt), reset countdown, run-out
+/// (both 11pt medium and white, R11) (#44, KTD3).
 /// This is the whole tick scope for a card: it is the only view here that observes `PopoverClock`,
 /// so a minute tick re-prints these lines and nothing else. `ArcGauge` is its sibling in
 /// `gaugeCard`, never its child. Hidden from the accessibility tree because the dial's combined
@@ -919,6 +1037,9 @@ private struct DialLinesView: View {
     let resetsAt: Date?
     let window: TimeInterval
 
+    /// R12 text scale: the point offset every text size in this view adds to its base.
+    @Environment(\.popoverTextOffset) private var textOffset
+
     var body: some View {
         #if DEBUG
         PopoverBodyCounters.recordLineView(title)
@@ -929,21 +1050,29 @@ private struct DialLinesView: View {
             if let caption = lines.caption {
                 // The word shares the ring's red floor, on the DISPLAY value the ring uses (KD13).
                 Text(caption)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(PopoverTextSize.font(10, weight: .medium, offset: textOffset))
                     .foregroundColor(UsagePopoverView.paceCaptionColor(remaining: displayRemaining, pace: pace))
             }
+            // The countdown comes second and the forecast last, so the countdown sits in the same
+            // place whether or not a forecast is there, and both lines are white at 11pt medium:
+            // at 10pt regular in the muted grey they measured 5.3:1 against the card background
+            // where the removed full-width Resets row measured 15:1, which is the R11 complaint.
+            Text(lines.countdown)
+                .font(PopoverTextSize.font(11, weight: .medium, offset: textOffset))
+                .monospacedDigit()
+                .foregroundColor(.white)
             if let runOut = lines.runOut {
                 Text(runOut)
-                    .font(.system(size: 10))
-                    .foregroundColor(UsagePopoverView.mutedLabelColor)
+                    .font(PopoverTextSize.font(11, weight: .medium, offset: textOffset))
+                    .foregroundColor(.white)
             }
-            Text(lines.countdown)
-                .font(.system(size: 10))
-                .monospacedDigit()
-                .foregroundColor(UsagePopoverView.mutedLabelColor)
         }
-        // "Reset time unavailable" is the widest line and sits within a few points of the 114pt
-        // card content width; one line with a little shrink is insurance against a wider font.
+        // The countdown is now the widest line: inside the last day of a window it prints hours and
+        // minutes, so the widest it gets is "Resets in 23h 59m", about 100pt of the 114pt card
+        // content width at 11pt medium; one line with a little shrink stays as insurance against a
+        // wider system font. At slider position 6 the shrink stops being insurance and does its
+        // job: that same string at 13pt medium measures 115.6pt against the 114pt card and scales
+        // to 0.986, the squeeze that was accepted in return for capping the slider at 6.
         .lineLimit(1)
         .minimumScaleFactor(0.85)
         .accessibilityHidden(true)
@@ -957,6 +1086,9 @@ private struct FooterStatusLineView: View {
     @ObservedObject var clock: PopoverClock
     let lastFetch: Date?
 
+    /// R12 text scale: the point offset every text size in this view adds to its base.
+    @Environment(\.popoverTextOffset) private var textOffset
+
     var body: some View {
         #if DEBUG
         PopoverBodyCounters.recordLineView("Footer")
@@ -964,7 +1096,7 @@ private struct FooterStatusLineView: View {
         return Text(UsagePopoverView.footerStatusLine(
             version: AppVersion.marketing,
             updated: UsagePopoverView.lastUpdatedText(lastFetch: lastFetch, now: clock.now)))
-            .font(.caption2)
+            .font(PopoverTextSize.font(10, weight: .medium, offset: textOffset))
             .foregroundColor(.secondary)
     }
 }
@@ -981,6 +1113,9 @@ private struct ArcGauge: View {
     /// Number of evenly-spaced quota segments; `count - 1` interior ticks are drawn.
     /// 0 disables ticks (e.g. the menu-bar gauge, which is excluded - U6).
     var tickCount: Int = 0
+
+    /// R12 text scale: the point offset every text size in this view adds to its base.
+    @Environment(\.popoverTextOffset) private var textOffset
 
     private let lineWidth: CGFloat = 5
     private let innerLineWidth: CGFloat = 4      // thinner than the outer ring so the neutral grey time ring reads as secondary (KD8)
@@ -1018,14 +1153,14 @@ private struct ArcGauge: View {
             // Centre: big usage %, and a small clock + time % when the inner arc is shown (R5).
             VStack(spacing: 1) {
                 Text(String(format: "%.0f%%", value))
-                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .font(PopoverTextSize.font(15, weight: .bold, design: .rounded, offset: textOffset))
                     .foregroundColor(.white)
                 if let innerValue {
                     HStack(spacing: 2) {
                         Image(systemName: "clock")
-                            .font(.system(size: 7, weight: .medium))
+                            .font(PopoverTextSize.font(7, weight: .medium, offset: textOffset))
                         Text(String(format: "%.0f%%", innerValue))
-                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                            .font(PopoverTextSize.font(9, weight: .medium, design: .rounded, offset: textOffset))
                             .monospacedDigit()
                     }
                     .foregroundColor(Color(white: 0.6))
@@ -1097,15 +1232,18 @@ private struct ModelBar: View {
     let value: Double
     let color: Color
 
+    /// R12 text scale: the point offset every text size in this view adds to its base.
+    @Environment(\.popoverTextOffset) private var textOffset
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text(name)
-                    .font(.system(size: 10))
+                    .font(PopoverTextSize.font(10, offset: textOffset))
                     .foregroundColor(Color(white: 0.6))
                 Spacer()
                 Text(String(format: "%.0f%%", value))
-                    .font(.system(size: 10, weight: .medium))
+                    .font(PopoverTextSize.font(10, weight: .medium, offset: textOffset))
                     .foregroundColor(.white)
             }
             GeometryReader { geo in

@@ -804,12 +804,33 @@ final class AuthManagerTests: XCTestCase {
     }
 
     @MainActor
+    func testIsAllowedDomain_hCaptchaChallengeHosts() {
+        let auth = makeAuthManager()
+        // The claude.ai login page loads its captcha challenge from hCaptcha in a subframe, and
+        // blocking it means a visible challenge cannot draw and the window looks stuck (#52).
+        // hCaptcha's CSP guidance covers the apex plus every subdomain and warns that the
+        // individual subdomains change, so the whole family is allowed rather than the one host
+        // the diagnostics export happened to name.
+        for host in ["hcaptcha.com", "newassets.hcaptcha.com", "api.hcaptcha.com",
+                     "imgs.hcaptcha.com", "js.hcaptcha.com"] {
+            XCTAssertTrue(auth.isAllowedDomain(host), "\(host) should be allowed")
+        }
+        // Exact/leading-dot matching still rejects an attacker-injected prefix, a trailing
+        // domain glued onto an allowed host, and a lookalike TLD.
+        for host in ["evilhcaptcha.com", "hcaptcha.com.evil.com",
+                     "newassets.hcaptcha.com.attacker.net", "hcaptcha.co"] {
+            XCTAssertFalse(auth.isAllowedDomain(host), "\(host) must be rejected (pattern #2)")
+        }
+    }
+
+    @MainActor
     func testAllowsOAuthPopup_schemeBeforeHost() {
         let auth = makeAuthManager()
         // about: bootstraps have no host and must be allowed BEFORE any host check (pattern #7).
         XCTAssertTrue(auth.allowsOAuthPopup(for: URL(string: "about:blank")!))
         XCTAssertTrue(auth.allowsOAuthPopup(for: URL(string: "about:srcdoc")!))
         XCTAssertTrue(auth.allowsOAuthPopup(for: URL(string: "https://accounts.google.com/o/oauth2")!))
+        XCTAssertTrue(auth.allowsOAuthPopup(for: URL(string: "https://newassets.hcaptcha.com/captcha/v1/api.js")!))
         XCTAssertFalse(auth.allowsOAuthPopup(for: URL(string: "https://evil.com")!))
         XCTAssertFalse(auth.allowsOAuthPopup(for: URL(string: "https://evil-claude.ai")!))
     }
@@ -3648,6 +3669,28 @@ final class AuthManagerTests: XCTestCase {
         XCTAssertEqual(payload["decision"] as? String, "allow")
         XCTAssertEqual(payload["host"] as? String, "claude.ai", "host only, never the path or query")
         XCTAssertEqual(auth.loginState, .idle, "An allowed hop never touches the login state")
+    }
+
+    @MainActor
+    func testNavDecisionAllow_hCaptchaSubframeIsAllowedAndRecorded() {
+        // #52: the challenge arrives as a subframe load, the exact kind the export showed
+        // blocked every time. Drive the same delegate path and confirm it is allowed now and
+        // recorded as an `allow`, so the predicate change is covered end to end.
+        let auth = makeAuthManager()
+        let login = makeLoginWebView()
+        auth.loginWebView = login
+        let diagnostics = makeDiagnostics()
+        auth.diagnostics = diagnostics
+
+        let policy = decide(auth, login, makeSubframeAction("https://newassets.hcaptcha.com/captcha/v1/api.js"))
+
+        XCTAssertEqual(policy, .allow)
+        let decisions = records(kind: "nav-decision", from: diagnostics)
+        XCTAssertEqual(decisions.count, 1)
+        let payload = decisions.first ?? [:]
+        XCTAssertEqual(payload["decision"] as? String, "allow")
+        XCTAssertEqual(payload["host"] as? String, "newassets.hcaptcha.com", "host only, never the path")
+        XCTAssertEqual(auth.loginState, .idle, "An allowed subframe hop never touches the login state")
     }
 
     @MainActor

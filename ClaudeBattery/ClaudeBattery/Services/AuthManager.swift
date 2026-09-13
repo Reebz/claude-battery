@@ -1892,7 +1892,15 @@ class AuthManager: NSObject, ObservableObject {
         host.hasSuffix(".appleid.apple.com") ||
         host.hasSuffix(".icloud.com") ||
         host.hasSuffix(".challenges.cloudflare.com") ||
-        host == "cf-chl-widget.cloudflare.com"
+        host == "cf-chl-widget.cloudflare.com" ||
+        // Issue #52: the claude.ai login page loads its captcha challenge into a subframe from
+        // hCaptcha, and every diagnostics export showed `newassets.hcaptcha.com` blocked there.
+        // A visible challenge on the email-code path would leave the window looking stuck.
+        // hCaptcha's own CSP guidance asks for `https://hcaptcha.com` plus `https://*.hcaptcha.com`
+        // and warns against hard-coding individual subdomains because they change, so this is the
+        // apex plus the leading-dot suffix, not the single host the export happened to name.
+        host == "hcaptcha.com" ||
+        host.hasSuffix(".hcaptcha.com")
     }
 
     /// Whether a `window.open()` to `url` should spawn an OAuth popup. Pattern #7: the `about:`
