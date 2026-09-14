@@ -65,6 +65,9 @@ public sealed class SwappableClaudeApi : IClaudeApi, IDisposable
     public Task<Credits?> GetCreditsAsync(string organizationId, CancellationToken cancellationToken)
         => Current.GetCreditsAsync(organizationId, cancellationToken);
 
+    public Task<string?> GetAccountEmailAsync(CancellationToken cancellationToken)
+        => Current.GetAccountEmailAsync(cancellationToken);
+
     public Task<IReadOnlyList<Organization>> GetOrganizationsAsync(CancellationToken cancellationToken)
         => Current.GetOrganizationsAsync(cancellationToken);
 

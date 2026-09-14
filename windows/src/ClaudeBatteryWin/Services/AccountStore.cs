@@ -407,6 +407,65 @@ public sealed class AccountStore
         return string.Join("; ", pairs);
     }
 
+    /// <summary>
+    /// Replace an account's label with a real address (R19). The caller decides whether it is allowed
+    /// to; see the never-relabel guard in <c>AuthManager</c>. No-op when the id is unknown or the
+    /// label has not changed.
+    /// </summary>
+    public void UpdateEmail(Guid id, string email)
+    {
+        var index = _accounts.FindIndex(a => a.Id == id);
+        if (index < 0 || string.Equals(_accounts[index].Email, email, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _accounts[index] = _accounts[index] with { Email = email };
+        PersistMetadata();
+    }
+
+    /// <summary>
+    /// Record an organization's own name, which is what tells two organizations of the same login
+    /// apart in the account list (R20). No-op when the id is unknown or nothing changed.
+    /// </summary>
+    public void UpdateOrganizationName(Guid id, string? name)
+    {
+        var index = _accounts.FindIndex(a => a.Id == id);
+        if (index < 0 || string.Equals(_accounts[index].OrganizationName, name, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _accounts[index] = _accounts[index] with { OrganizationName = name };
+        PersistMetadata();
+    }
+
+    /// <summary>
+    /// What to show for one account in a list (R20).
+    ///
+    /// A nickname always wins. Otherwise, when two accounts share an address - which is exactly what
+    /// two organizations of one login look like - the organization name is appended, so the rows are
+    /// not two identical lines the user has to guess between. An account stored before organization
+    /// names were kept has none to append, and falls back to the address.
+    /// </summary>
+    public string DisambiguatedName(Account account) => DisambiguatedName(account, _accounts);
+
+    /// <inheritdoc cref="DisambiguatedName(Account)"/>
+    public static string DisambiguatedName(Account account, IReadOnlyList<Account> accounts)
+    {
+        if (account.Nickname is { Length: > 0 } nickname)
+        {
+            return nickname;
+        }
+
+        var shared = accounts.Any(a => a.Id != account.Id
+            && string.Equals(a.Email, account.Email, StringComparison.Ordinal));
+
+        return shared && account.OrganizationName is { Length: > 0 } org
+            ? $"{account.Email} ({org})"
+            : account.DisplayName;
+    }
+
     /// <summary>Update a nickname (trimmed, capped at 30 chars; empty becomes null). Mac parity.</summary>
     public void UpdateNickname(Guid id, string nickname)
     {

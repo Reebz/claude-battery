@@ -557,6 +557,11 @@ internal sealed class FakeLoginWebView : ILoginWebView
 
     public void Navigate(string url) => LastNavigatedUrl = url;
 
+    /// True once a blocked popup navigation retired the popup.
+    public bool PopupClosed { get; private set; }
+
+    public void ClosePopup() => PopupClosed = true;
+
     public void StartCookiePolling() => PollingStarted = true;
 
     public void Dispose() => Disposed = true;
@@ -664,4 +669,22 @@ internal sealed class FakeClaudeApi : IClaudeApi
 
     public Task<Credits?> GetCreditsAsync(string organizationId, CancellationToken cancellationToken) =>
         Task.FromResult<Credits?>(null);
+
+    /// The address GET /api/account returns, or null when the endpoint gives nothing usable.
+    public string? AccountEmail { get; set; }
+
+    /// When set, the account-email lookup throws it, the way a blocked or timed-out request would.
+    public Exception? AccountEmailThrows { get; set; }
+
+    public int AccountEmailCalls { get; private set; }
+
+    public Task<string?> GetAccountEmailAsync(CancellationToken cancellationToken)
+    {
+        AccountEmailCalls++;
+        if (AccountEmailThrows is not null)
+        {
+            throw AccountEmailThrows;
+        }
+        return Task.FromResult(AccountEmail);
+    }
 }

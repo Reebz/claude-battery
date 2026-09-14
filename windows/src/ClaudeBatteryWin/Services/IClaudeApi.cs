@@ -34,6 +34,15 @@ public interface IClaudeApi
     Task<Credits?> GetCreditsAsync(string organizationId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// The signed-in address, from <c>GET /api/account</c> (R19).
+    ///
+    /// Returns null on anything at all that goes wrong - a non-200, a Cloudflare block, a decode
+    /// failure, a timeout - because this is a cosmetic label lookup and a sign-in must never fail
+    /// over it. Runs once per sign-in, never on the poll.
+    /// </summary>
+    Task<string?> GetAccountEmailAsync(CancellationToken cancellationToken);
+
+    /// <summary>
     /// Fetch and decode <c>GET /api/organizations</c> for org discovery (U7). Never returns the
     /// first org as a default; the caller decides auto-select vs picker. An empty list means no
     /// organizations were found (a Pro/Max plan may be required).

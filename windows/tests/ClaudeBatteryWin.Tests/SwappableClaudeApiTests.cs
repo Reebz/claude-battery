@@ -100,6 +100,14 @@ public class SwappableClaudeApiTests
         public Task<Credits?> GetCreditsAsync(string organizationId, CancellationToken cancellationToken)
             => Task.FromResult<Credits?>(null);
 
+        public Task<string?> GetAccountEmailAsync(CancellationToken cancellationToken)
+        {
+            AccountEmailCalls++;
+            return Task.FromResult<string?>(null);
+        }
+
+        public int AccountEmailCalls { get; private set; }
+
         public Task<IReadOnlyList<Organization>> GetOrganizationsAsync(CancellationToken cancellationToken)
             => Task.FromResult<IReadOnlyList<Organization>>(Array.Empty<Organization>());
 

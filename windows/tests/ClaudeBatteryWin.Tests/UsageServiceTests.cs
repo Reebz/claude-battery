@@ -925,6 +925,15 @@ internal sealed class FakeApi : IClaudeApi
         return Task.FromResult<Credits?>(null);
     }
 
+    /// The poll never calls this; a test asserts the count stays zero.
+    public int AccountEmailCalls { get; private set; }
+
+    public Task<string?> GetAccountEmailAsync(CancellationToken cancellationToken)
+    {
+        AccountEmailCalls++;
+        return Task.FromResult<string?>(null);
+    }
+
     public Task<IReadOnlyList<Organization>> GetOrganizationsAsync(CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<Organization>>(Array.Empty<Organization>());
 }

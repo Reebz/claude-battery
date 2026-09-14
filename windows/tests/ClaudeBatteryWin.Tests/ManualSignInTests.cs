@@ -74,6 +74,11 @@ public sealed class ManualSignInTests : IDisposable
         public Task<Credits?> GetCreditsAsync(string organizationId, CancellationToken cancellationToken)
             => Task.FromResult<Credits?>(null);
 
+        public string? AccountEmail;
+
+        public Task<string?> GetAccountEmailAsync(CancellationToken cancellationToken)
+            => Task.FromResult(AccountEmail);
+
         public Task<IReadOnlyList<Organization>> GetOrganizationsAsync(CancellationToken cancellationToken)
         {
             if (JarToObserve is not null)

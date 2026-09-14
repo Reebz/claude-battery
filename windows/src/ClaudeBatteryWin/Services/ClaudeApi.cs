@@ -202,6 +202,41 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
         return orgs ?? new List<Organization>();
     }
 
+    /// <inheritdoc />
+    public async Task<string?> GetAccountEmailAsync(CancellationToken cancellationToken)
+    {
+        // Every failure reads as "no address". A sign-in that worked must never be turned into a
+        // failure by a lookup whose only job is to put a nicer label on the account row - including
+        // a Cloudflare block, which is why this never touches the poll path's block counter.
+        try
+        {
+            var bytes = await SendRawAsync("/api/account", throwOnAuth: false, cancellationToken).ConfigureAwait(false);
+            if (bytes is not { Length: > 0 })
+            {
+                return null;
+            }
+
+            var profile = JsonSerializer.Deserialize<AccountProfile>(bytes, JsonOptions);
+            var email = profile?.EmailAddress?.Trim();
+            return string.IsNullOrEmpty(email) ? null : email;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The one field <c>GET /api/account</c> is called for. Chosen over the bootstrap
+    /// endpoint, which returns roughly fifteen times as much for the same address.</summary>
+    private sealed record AccountProfile
+    {
+        public string? EmailAddress { get; init; }
+    }
+
     /// <summary>
     /// Build, send, and STJ-decode a GET to <paramref name="path"/> for the small, stable-shape
     /// endpoints (credits, organizations). The polymorphic, drift-prone <c>/usage</c> body does NOT

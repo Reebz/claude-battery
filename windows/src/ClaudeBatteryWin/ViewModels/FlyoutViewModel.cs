@@ -597,7 +597,9 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
                 AccountRows.Add(new AccountRow
                 {
                     Id = account.Id,
-                    DisplayName = account.DisplayName,
+                    // Two organizations of one login share an address, so the rows would otherwise
+                    // be two identical lines (R20).
+                    DisplayName = Services.AccountStore.DisambiguatedName(account, _accounts),
                     IsActive = account.Id == _activeAccountId,
                 });
             }

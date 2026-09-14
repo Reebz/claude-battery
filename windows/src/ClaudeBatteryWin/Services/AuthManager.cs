@@ -51,6 +51,10 @@ public sealed class AuthManager
     private readonly ILoginWebViewFactory _loginWebViewFactory;
     private readonly IOrgPicker _orgPicker;
 
+    /// <summary>Where blocked navigations are recorded. Resolved at emit time so the composition
+    /// root's logger is used rather than the placeholder that exists at construction.</summary>
+    private IDiagnosticsLogger _diagnostics => DiagnosticsLogger.Shared;
+
     /// Inactivity timeout. Ported verbatim from the Mac 10-minute login timeout.
     private readonly TimeSpan _loginTimeout;
 
@@ -91,6 +95,16 @@ public sealed class AuthManager
             }
 
             _loginState = value;
+
+            // The state the sign-in reached, so a report can say where it stopped. An error message
+            // can carry anything the page put in it, which is why every line is redacted.
+            _diagnostics.EmitMilestone("login-state", () => new Dictionary<string, object?>
+            {
+                ["state"] = value.Kind == LoginStateKind.Error
+                    ? "error: " + (value.Message ?? string.Empty)
+                    : value.Kind.ToString(),
+            });
+
             LoginStateChanged?.Invoke(value);
         }
     }
@@ -112,6 +126,19 @@ public sealed class AuthManager
     /// it signed in to (R16, R25). Null on a plain re-authentication, which has nothing to report.
     /// </summary>
     public Action<string>? OnSignInConfirmation { get; set; }
+
+    /// <summary>
+    /// Stops polling and waits for any in-flight poll to finish, before this sign-in writes to the
+    /// shared cookie jar (R22, KTD3). Awaited, not fire-and-forget: the point is that nothing is
+    /// reading the jar while it is rewritten.
+    /// </summary>
+    public Func<Task>? OnSuspendPolling { get; set; }
+
+    /// <summary>
+    /// Restarts polling. Runs on every exit of a sign-in route - success, every failure, and
+    /// cancellation - because a missed resume leaves polling dead until the app restarts.
+    /// </summary>
+    public Action? OnResumePolling { get; set; }
 
     /// <summary>
     /// The WebView2 session User-Agent, read from <c>CoreWebView2.Settings.UserAgent</c> after the
@@ -376,10 +403,87 @@ public sealed class AuthManager
     }
 
     /// <summary>
+    /// The address to label an account with (R19). The account endpoint first, because it is the
+    /// signed-in user's own address; the organizations response second, because an organization's
+    /// address is whoever set it up. Null when neither has one, and the caller falls back to
+    /// "Account N".
+    /// </summary>
+    private Task<string?> ResolveEmailAsync(IReadOnlyList<Organization> orgs, CancellationToken token) =>
+        ResolveEmailAsync(_api, orgs, token);
+
+    /// <inheritdoc cref="ResolveEmailAsync(IReadOnlyList{Organization}, CancellationToken)"/>
+    public static async Task<string?> ResolveEmailAsync(
+        IClaudeApi api, IReadOnlyList<Organization> orgs, CancellationToken token)
+    {
+        try
+        {
+            var fromAccount = await api.GetAccountEmailAsync(token).ConfigureAwait(true);
+            if (!string.IsNullOrEmpty(fromAccount))
+            {
+                return fromAccount;
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // Nothing about this lookup is allowed to fail a sign-in that otherwise worked.
+        }
+
+        return ExtractEmail(orgs);
+    }
+
+    /// <summary>
+    /// Whether a label is one the app made up rather than a real address (R21). Only the app's own
+    /// "Account N" shape counts: "Accountant 2" and "Account 1 (work)" are things a user typed.
+    /// </summary>
+    public static bool IsPlaceholderEmail(string email)
+    {
+        var trimmed = email.Trim(' ', '\t');
+        if (trimmed.Length == 0)
+        {
+            return true; // an empty label renders as nothing, so it is a placeholder too
+        }
+
+        const string prefix = "Account ";
+        if (!trimmed.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var digits = trimmed[prefix.Length..];
+        return digits.Length > 0 && digits.All(c => c is >= '0' and <= '9');
+    }
+
+    /// <summary>
+    /// Replaces a made-up label with a real address, and never the other way round (R21).
+    ///
+    /// Two different logins can share one organization, and the account row is labelled by whoever
+    /// added it first. Overwriting a real address on a later sign-in would rename someone else's
+    /// row out from under them. A user-chosen nickname is untouched either way.
+    /// </summary>
+    private void RepairPlaceholderEmail(Account account, string? email) =>
+        RepairPlaceholderEmail(_accountStore, account, email);
+
+    /// <inheritdoc cref="RepairPlaceholderEmail(Account, string?)"/>
+    public static void RepairPlaceholderEmail(AccountStore store, Account account, string? email)
+    {
+        if (email is null || IsPlaceholderEmail(email) || !IsPlaceholderEmail(account.Email))
+        {
+            return;
+        }
+
+        store.UpdateEmail(account.Id, email);
+    }
+
+    /// <summary>
     /// Revive every other stored organization that this login can reach, and return how many were
     /// touched (R16). The organization just signed in to is written by the caller, so it is excluded.
     /// </summary>
-    private int RefreshSiblings(IReadOnlyList<Organization> orgs, string chosenOrgId, string sessionKey)
+    private int RefreshSiblings(
+        IReadOnlyList<Organization> orgs, string chosenOrgId, string sessionKey, string? resolvedEmail)
     {
         var siblings = MatchedAccounts(orgs, _accountStore.Accounts)
             .Where(a => a.OrganizationId != chosenOrgId)
@@ -392,7 +496,9 @@ public sealed class AuthManager
             if (org is not null)
             {
                 _accountStore.UpdatePlan(sibling.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
+                _accountStore.UpdateOrganizationName(sibling.Id, org.DisplayName);
             }
+            RepairPlaceholderEmail(sibling, resolvedEmail);
         }
 
         return siblings.Count;
@@ -403,8 +509,15 @@ public sealed class AuthManager
     /// add. The switch runs last, after all the writes, so it stays the only thing that re-primes the
     /// live cookie jar.
     /// </summary>
-    private void RepairAllStoredOrganizations(IReadOnlyList<Organization> orgs, string sessionKey)
+    private async Task RepairAllStoredOrganizationsAsync(
+        IReadOnlyList<Organization> orgs, string sessionKey, CancellationToken token)
     {
+        var resolvedEmail = await ResolveEmailAsync(orgs, token).ConfigureAwait(true);
+        if (token.IsCancellationRequested)
+        {
+            return;
+        }
+
         var target = MatchedAccount(orgs);
         if (target is null)
         {
@@ -420,7 +533,9 @@ public sealed class AuthManager
             if (org is not null)
             {
                 _accountStore.UpdatePlan(account.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
+                _accountStore.UpdateOrganizationName(account.Id, org.DisplayName);
             }
+            RepairPlaceholderEmail(account, resolvedEmail);
         }
 
         if (target.Id != _accountStore.ActiveAccountId)
@@ -562,6 +677,9 @@ public sealed class AuthManager
     /// </summary>
     public void StopLoginWindow()
     {
+        // A new window is a new attempt: the same blocked hop is worth recording again.
+        _lastBlockedNavigation = null;
+
         // Resume any suspended org-picker await so a teardown never leaks the awaiting task.
         _orgPicker.CancelPending();
 
@@ -620,6 +738,7 @@ public sealed class AuthManager
     /// </summary>
     public void RetryLogin()
     {
+        _lastBlockedNavigation = null;
         _hasCapturedSession = false;
         _pendingSessionKey = null;
         _pendingCookieHeader = null;
@@ -649,10 +768,128 @@ public sealed class AuthManager
     /// </summary>
     public void RequestManualSignIn()
     {
+        _lastBlockedNavigation = null;
         OnManualSignInRequested?.Invoke();
         LoginState = LoginState.Idle;
         StopLoginWindow();
     }
+
+    // ---- Blocked navigations (U10, R49, R50) ---------------------------------------------------
+
+    /// <summary>
+    /// What the sign-in window tells a user when it cancels a hop to a company identity provider
+    /// (R49). Deliberately a fixed string with no host in it: the host is a company's identity
+    /// provider and belongs only in the opt-in diagnostics record, never in always-on error text.
+    /// </summary>
+    public const string SsoBlockedMessage =
+        "This sign-in window can't complete single sign-on (SSO). Choose \"Continue with email\" and "
+        + "enter the code Claude sends you, or use Sign in manually to paste your cookie header under Settings.";
+
+    /// <summary>The last blocked navigation recorded, so a page retrying the same hop writes once.</summary>
+    private (string Host, NavigationBlockKind Kind)? _lastBlockedNavigation;
+
+    /// <summary>
+    /// Validates a host before it is ever written to a diagnostics record (R50).
+    ///
+    /// Anything that is not a plain domain name reads as "(invalid)". The value comes from a page
+    /// the app does not control, and the record is meant to be attached to a public issue, so a
+    /// malformed host must not be able to smuggle anything into the file under the host key.
+    /// </summary>
+    public static string HostForDiagnostics(string host)
+    {
+        if (host.Length == 0 || host.Length > 253)
+        {
+            return "(invalid)";
+        }
+
+        foreach (var label in host.Split('.'))
+        {
+            if (label.Length is 0 or > 63)
+            {
+                return "(invalid)";
+            }
+            foreach (var c in label)
+            {
+                var ok = c is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '-';
+                if (!ok)
+                {
+                    return "(invalid)";
+                }
+            }
+        }
+
+        return host;
+    }
+
+    /// <summary>The host of a URL, or an empty string when it has none.</summary>
+    /// <summary>
+    /// Records how organization discovery answered: the status code and which route asked. Never the
+    /// body, which carries the address and the organization names.
+    /// </summary>
+    internal static void EmitOrgDiscoveryStatus(int status, string path) =>
+        DiagnosticsLogger.Shared.EmitMilestone("org-discovery-status", () => new Dictionary<string, object?>
+        {
+            ["status"] = status,
+            ["path"] = path,
+        });
+
+    /// <summary>The host of a URL, or an empty string when it has none.</summary>
+    private static string HostOf(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;
+
+    /// <summary>
+    /// Records one blocked navigation and, where it matters to the user, says so on screen.
+    ///
+    /// Before this, a blocked single sign-on redirect cancelled silently and the page just sat
+    /// there, which is the complaint in issue #49: nothing said what happened or what to do instead.
+    ///
+    /// Repeats collapse. A page retrying the same hop fifty times writes one record, not fifty. The
+    /// message only appears when the window is still waiting for a sign-in: a block that arrives
+    /// after a session was already captured must not replace "finishing sign-in" with an error and a
+    /// stale "Try again".
+    /// </summary>
+    private void RecordBlockedNavigation(string host, NavigationBlockKind kind)
+    {
+        var safeHost = HostForDiagnostics(host);
+
+        if (_lastBlockedNavigation != (safeHost, kind))
+        {
+            _lastBlockedNavigation = (safeHost, kind);
+            _diagnostics.EmitMilestone("nav-decision", () => new Dictionary<string, object?>
+            {
+                ["decision"] = "block",
+                ["kind"] = NavigationBlockKindName(kind),
+                ["host"] = safeHost,
+            });
+        }
+
+        if (kind is NavigationBlockKind.Link)
+        {
+            return; // the page's own policy links open in a new window; not a sign-in failure
+        }
+
+        if (kind is NavigationBlockKind.PopupMain)
+        {
+            // A dead popup showing nothing is worse than no popup: close it, so the message below
+            // lands on the window the user is actually looking at.
+            _loginWebView?.ClosePopup();
+        }
+
+        if (LoginState.Kind == LoginStateKind.Idle && !_hasCapturedSession)
+        {
+            LoginState = LoginState.ErrorWith(SsoBlockedMessage);
+        }
+    }
+
+    /// <summary>The value written to the diagnostics record for each kind.</summary>
+    private static string NavigationBlockKindName(NavigationBlockKind kind) => kind switch
+    {
+        NavigationBlockKind.Main => "main",
+        NavigationBlockKind.PopupMain => "popup-main",
+        NavigationBlockKind.Popup => "popup",
+        NavigationBlockKind.Link => "link",
+        _ => "main"
+    };
 
     // ---- Timeout ------------------------------------------------------------------------------
 
@@ -707,7 +944,16 @@ public sealed class AuthManager
     /// claude.ai allowlist plus the about: bootstrap frames. The real <see cref="ILoginWebView"/>
     /// implementation sets <c>e.Cancel = !allowed</c>.
     /// </summary>
-    private bool OnNavigationStarting(string url) => ShouldAllow(url);
+    private bool OnNavigationStarting(string url)
+    {
+        if (ShouldAllow(url))
+        {
+            return true;
+        }
+
+        RecordBlockedNavigation(HostOf(url), NavigationBlockKind.Main);
+        return false;
+    }
 
     private void OnNavigationCompleted(NavigationCompletedInfo info)
     {
@@ -744,12 +990,28 @@ public sealed class AuthManager
     {
         if (!AllowsOAuthPopup(url))
         {
+            RecordBlockedNavigation(HostOf(url), NavigationBlockKind.Popup);
             return NewWindowDecision.Block;
         }
 
         // The popup's own navigations must stay inside the allowlist so it cannot wander after the
         // OAuth bootstrap. Hand the shell the per-navigation gate to wire onto the popup WebView.
-        return NewWindowDecision.AllowWithGate(AllowsOAuthPopup);
+        return NewWindowDecision.AllowWithGate(OnPopupNavigationStarting);
+    }
+
+    /// <summary>
+    /// The popup's own navigation gate. A block here used to show nothing at all: the popup went
+    /// blank and the user was left with two windows and no explanation.
+    /// </summary>
+    private bool OnPopupNavigationStarting(string url)
+    {
+        if (AllowsOAuthPopup(url))
+        {
+            return true;
+        }
+
+        RecordBlockedNavigation(HostOf(url), NavigationBlockKind.PopupMain);
+        return false;
     }
 
     /// <summary>
@@ -792,6 +1054,12 @@ public sealed class AuthManager
         {
             return;
         }
+
+        _diagnostics.EmitMilestone("session-cookie-captured", () => new Dictionary<string, object?>
+        {
+            ["domain"] = session.Domain,
+            ["isSecure"] = session.IsSecure,
+        });
 
         HandleCookieCaptured(session, cookies);
     }
@@ -871,10 +1139,34 @@ public sealed class AuthManager
 
         LoginState = LoginState.OrgDiscovery;
 
+        // Nothing may be polling while this rewrites the jar (R22). The resume in the finally below
+        // covers every exit, including the ones that throw.
+        await SuspendPollingAsync().ConfigureAwait(true);
+        try
+        {
+            await DiscoverOrganizationsCoreAsync(sessionKey, token).ConfigureAwait(true);
+        }
+        finally
+        {
+            OnResumePolling?.Invoke();
+        }
+    }
+
+    private async Task SuspendPollingAsync()
+    {
+        if (OnSuspendPolling is { } suspend)
+        {
+            await suspend().ConfigureAwait(true);
+        }
+    }
+
+    private async Task DiscoverOrganizationsCoreAsync(string sessionKey, CancellationToken token)
+    {
         IReadOnlyList<Organization> orgs;
         try
         {
             orgs = await _api.GetOrganizationsAsync(token).ConfigureAwait(true);
+            EmitOrgDiscoveryStatus(200, "webview");
         }
         catch (OperationCanceledException)
         {
@@ -882,8 +1174,9 @@ public sealed class AuthManager
             // fight it by re-driving login state here.
             return;
         }
-        catch (ClaudeAuthException)
+        catch (ClaudeAuthException authEx)
         {
+            EmitOrgDiscoveryStatus(authEx.StatusCode, "webview");
             HandleOrgDiscoveryFailure("Sign-in failed. Please try again.");
             return;
         }
@@ -920,7 +1213,7 @@ public sealed class AuthManager
                 case { Kind: OrgSelectionKind.AllAlreadyAdded } all:
                     // Every organization in the response is already stored, so there is nothing to
                     // choose: this sign-in repairs all of them at once (R16, F2).
-                    RepairAllStoredOrganizations(all.Orgs!, sessionKey);
+                    await RepairAllStoredOrganizationsAsync(all.Orgs!, sessionKey, token).ConfigureAwait(true);
                     return;
 
                 case { Kind: OrgSelectionKind.NeedsChoice } choice:
@@ -931,6 +1224,9 @@ public sealed class AuthManager
                     // (the chosen account re-primes on commit via UpsertAccount/SwitchTo). On cancel/timeout
                     // the teardown paths restore again; on pick-cancel HandleOrgDiscoveryFailure does.
                     _accountStore.RestoreActiveCookies();
+                    // The picker waits on a person and can sit open for minutes. Polling resumes for
+                    // that wait and is suspended again once the choice triggers the next write.
+                    OnResumePolling?.Invoke();
                     Organization? picked;
                     try
                     {
@@ -939,6 +1235,10 @@ public sealed class AuthManager
                     catch (OperationCanceledException)
                     {
                         return; // Teardown resumed the picker; do not re-drive state.
+                    }
+                    finally
+                    {
+                        await SuspendPollingAsync().ConfigureAwait(true);
                     }
 
                     if (token.IsCancellationRequested)
@@ -966,13 +1266,20 @@ public sealed class AuthManager
                 return;
             }
 
-            var email = ExtractEmail(orgs) ?? $"Account {_accountStore.Accounts.Count + 1}";
+            var resolvedEmail = await ResolveEmailAsync(orgs, token).ConfigureAwait(true);
+            if (token.IsCancellationRequested)
+            {
+                return;
+            }
+            var email = resolvedEmail ?? $"Account {_accountStore.Accounts.Count + 1}";
 
             var account = new Account
             {
                 Email = email,
                 SessionKey = sessionKey,
                 OrganizationId = chosenOrg.Uuid,
+                // Kept so two organizations of one login can be told apart in every list (R20).
+                OrganizationName = chosenOrg.DisplayName,
                 AllCookieHeader = _pendingCookieHeader,
                 // Persist the session UA so a cold-start restore seeds the poll transport with the same
                 // UA the login captured (U1/U2). Null until the first NavigationCompleted captures it.
@@ -1018,7 +1325,14 @@ public sealed class AuthManager
 
             // Every OTHER stored organization under this login is revived by the same credentials.
             // Done before the switch below, so the switch stays the last thing to touch the jar.
-            var siblings = RefreshSiblings(orgs, chosenOrg.Uuid, sessionKey);
+            var siblings = RefreshSiblings(orgs, chosenOrg.Uuid, sessionKey, resolvedEmail);
+
+            // A row still carrying "Account N" gets the real address; a row that already has one
+            // keeps it (R21).
+            if (owning is not null)
+            {
+                RepairPlaceholderEmail(owning, resolvedEmail);
+            }
 
             if (owning is not null && owning.Id != _accountStore.ActiveAccountId)
             {
@@ -1159,6 +1473,31 @@ public sealed record NavigationCompletedInfo
     public string? UserAgent { get; init; }
 }
 
+/// <summary>
+/// Where a blocked navigation came from (R50). Written verbatim into the diagnostics record, and
+/// what decides whether the user sees anything: the page's own policy links opening in a new window
+/// are recorded and otherwise ignored, while a blocked main-frame or popup hop is what the single
+/// sign-on message exists for.
+///
+/// The Mac also distinguishes a blocked sub-frame. WebView2 raises frame navigations on a separate
+/// event this port does not subscribe to, so that case cannot arise here; recorded as a deliberate
+/// difference rather than carried as a gap.
+/// </summary>
+public enum NavigationBlockKind
+{
+    /// The sign-in window's own page tried to go somewhere it is not allowed.
+    Main,
+
+    /// A page inside the hosted sign-in popup tried to go somewhere it is not allowed.
+    PopupMain,
+
+    /// A new window was requested for a host that is not allowed.
+    Popup,
+
+    /// A link the user clicked asked for a new window. Recorded, never shown.
+    Link,
+}
+
 /// <summary>The decision for a <c>window.open()</c>/<c>NewWindowRequested</c> from the login page.</summary>
 public sealed record NewWindowDecision
 {
@@ -1195,6 +1534,13 @@ public interface ILoginWebView : IDisposable
 
     /// Begin polling cookies on the 0.2s timer while the window is open.
     void StartCookiePolling();
+
+    /// <summary>
+    /// Close the hosted sign-in popup, if one is open. Called when a navigation inside it is
+    /// blocked: a popup left showing a blank page with a dead "Try again" is worse than no popup
+    /// (R49).
+    /// </summary>
+    void ClosePopup();
 
     /// <summary>
     /// Main-frame navigation gate. The handler returns true to allow, false to cancel; the

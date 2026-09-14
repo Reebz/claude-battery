@@ -368,6 +368,13 @@ public partial class App : Application
         _autostart = new AutostartService();
         _manualSignIn = new ManualSignIn(_api, _accountStore);
 
+        // Nothing polls while a sign-in is rewriting the shared cookie jar, or a poll answered on
+        // half-written credentials marks a healthy account expired and stops (R22).
+        _authManager.OnSuspendPolling = () => _usageService?.SuspendPollingAsync() ?? Task.CompletedTask;
+        _authManager.OnResumePolling = () => _usageService?.ResumePolling();
+        _manualSignIn.OnSuspendPolling = () => _usageService?.SuspendPollingAsync() ?? Task.CompletedTask;
+        _manualSignIn.OnResumePolling = () => _usageService?.ResumePolling();
+
         // The flyout view-model is the single state machine the borderless window binds against.
         _flyoutViewModel = new FlyoutViewModel();
         // Tapping a flyout account row switches to it (U15); the VM raises the id, the store switches.

@@ -534,6 +534,9 @@ public partial class LoginWindow : Window, ILoginWebView
         }
     }
 
+    /// <inheritdoc />
+    public void ClosePopup() => TeardownPopup();
+
     private void TeardownPopup()
     {
         if (_popup is null)

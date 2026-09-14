@@ -29,6 +29,15 @@ namespace ClaudeBatteryWin.Services;
 /// </summary>
 public sealed class ManualSignIn
 {
+    /// <summary>
+    /// Stops polling and waits for any in-flight poll to finish, before this paste writes to the
+    /// shared cookie jar (R22, KTD3).
+    /// </summary>
+    public Func<Task>? OnSuspendPolling { get; set; }
+
+    /// <summary>Restarts polling. Runs on every exit, including failures and cancellation.</summary>
+    public Action? OnResumePolling { get; set; }
+
     private readonly IClaudeApi _api;
     private readonly AccountStore _accountStore;
 
@@ -38,7 +47,7 @@ public sealed class ManualSignIn
     /// (the Mac <c>pendingManualSignIn</c>). Cleared on every fresh <see cref="SignInAsync"/> so a
     /// stale credential is never retained.
     /// </summary>
-    private (string SessionKey, string? CookieHeader, string Email, IReadOnlyList<Organization> Orgs)? _pending;
+    private (string SessionKey, string? CookieHeader, string Email, IReadOnlyList<Organization> Orgs, string? ResolvedEmail)? _pending;
 
     public ManualSignIn(IClaudeApi api, AccountStore accountStore)
     {
@@ -151,8 +160,28 @@ public sealed class ManualSignIn
         var parsed = ParsePastedCredentials(pasted);
         if (parsed is null)
         {
-            return ManualSignInResult.InvalidInput;
+            return ManualSignInResult.InvalidInput; // nothing was written, so nothing was paused
         }
+
+        // Nothing may be polling while this rewrites the jar (R22). The resume covers every exit.
+        if (OnSuspendPolling is { } suspend)
+        {
+            await suspend().ConfigureAwait(true);
+        }
+
+        try
+        {
+            return await SignInCoreAsync(parsed, cancellationToken).ConfigureAwait(true);
+        }
+        finally
+        {
+            OnResumePolling?.Invoke();
+        }
+    }
+
+    private async Task<ManualSignInResult> SignInCoreAsync(
+        ParsedCredentials parsed, CancellationToken cancellationToken)
+    {
 
         // Org discovery MUST run with the PASTED credential, not the active account's primed jar.
         // Prime the shared jar with the pasted sessionKey/header first, so GetOrganizationsAsync
@@ -167,9 +196,11 @@ public sealed class ManualSignIn
             // ConfigureAwait(true): AccountStore is UI-thread-only, and everything after this await
             // commits into it. See the threading note on this method.
             orgs = await _api.GetOrganizationsAsync(cancellationToken).ConfigureAwait(true);
+            AuthManager.EmitOrgDiscoveryStatus(200, "manual");
         }
-        catch (ClaudeAuthException)
+        catch (ClaudeAuthException authEx)
         {
+            AuthManager.EmitOrgDiscoveryStatus(authEx.StatusCode, "manual");
             // 401/403. A bare key (no full header) most often means a missing HttpOnly __cf_bm
             // (Cloudflare block): steer the user to paste the full header. Pattern #5: the server is
             // authoritative; we do not guess validity client-side.
@@ -193,7 +224,9 @@ public sealed class ManualSignIn
             return ManualSignInResult.NoOrganizations;
         }
 
-        var email = AuthManager.ExtractEmail(orgs) ?? $"Account {_accountStore.Accounts.Count + 1}";
+        // The signed-in address, for the account label. Never fails the paste (R19).
+        var resolvedEmail = await AuthManager.ResolveEmailAsync(_api, orgs, cancellationToken).ConfigureAwait(true);
+        var email = resolvedEmail ?? $"Account {_accountStore.Accounts.Count + 1}";
 
         // ONE org-selection rule, shared with the WebView path (AuthManager.SelectOrg); never blindly
         // orgs[0]. The manual path ignores the carried account id and resolves the account by org id.
@@ -202,7 +235,7 @@ public sealed class ManualSignIn
         if (selection.Kind == OrgSelectionKind.AllAlreadyAdded)
         {
             // Nothing new to add: this paste is a repair of everything it can reach (R16).
-            return RepairAllStoredOrganizations(selection.Orgs!, parsed.SessionKey, parsed.CookieHeader);
+            return RepairAllStoredOrganizations(selection.Orgs!, parsed.SessionKey, parsed.CookieHeader, resolvedEmail);
         }
 
         if (selection.Kind == OrgSelectionKind.NeedsChoice)
@@ -210,14 +243,14 @@ public sealed class ManualSignIn
             // Stash the pasted credential for the pick and restore the active jar in the meantime, so
             // the active account's poll is undisturbed while the user chooses. CompleteWithChosenOrg
             // re-primes via UpsertAccount + SwitchTo once a choice is made.
-            _pending = (parsed.SessionKey, parsed.CookieHeader, email, orgs);
+            _pending = (parsed.SessionKey, parsed.CookieHeader, email, orgs, resolvedEmail);
             _accountStore.RestoreActiveCookies();
             return ManualSignInResult.NeedsOrgChoice(selection.Orgs!);
         }
 
         // Single organization: AddOrReactivate re-primes the jar to the chosen account on success,
         // so there is nothing to restore here.
-        return AddOrReactivate(selection.Org!, parsed.SessionKey, parsed.CookieHeader, email, orgs);
+        return AddOrReactivate(selection.Org!, parsed.SessionKey, parsed.CookieHeader, email, orgs, resolvedEmail);
     }
 
     /// <summary>
@@ -233,7 +266,7 @@ public sealed class ManualSignIn
         }
 
         _pending = null;
-        return AddOrReactivate(org, ctx.SessionKey, ctx.CookieHeader, ctx.Email, ctx.Orgs);
+        return AddOrReactivate(org, ctx.SessionKey, ctx.CookieHeader, ctx.Email, ctx.Orgs, ctx.ResolvedEmail);
     }
 
     /// <summary>
@@ -250,7 +283,7 @@ public sealed class ManualSignIn
     /// fail differently.
     /// </summary>
     private ManualSignInResult RepairAllStoredOrganizations(
-        IReadOnlyList<Organization> orgs, string sessionKey, string? cookieHeader)
+        IReadOnlyList<Organization> orgs, string sessionKey, string? cookieHeader, string? resolvedEmail)
     {
         var toRefresh = AuthManager.MatchedAccounts(orgs, _accountStore.Accounts);
         if (toRefresh.Count == 0)
@@ -269,7 +302,9 @@ public sealed class ManualSignIn
                 if (org is not null)
                 {
                     _accountStore.UpdatePlan(account.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
+                    _accountStore.UpdateOrganizationName(account.Id, org.DisplayName);
                 }
+                AuthManager.RepairPlaceholderEmail(_accountStore, account, resolvedEmail);
                 refreshedIds.Add(account.Id);
             }
         }
@@ -291,7 +326,8 @@ public sealed class ManualSignIn
     }
 
     private ManualSignInResult AddOrReactivate(
-        Organization org, string sessionKey, string? cookieHeader, string email, IReadOnlyList<Organization> orgs)
+        Organization org, string sessionKey, string? cookieHeader, string email,
+        IReadOnlyList<Organization> orgs, string? resolvedEmail)
     {
         // UpsertAccount adds a new account OR updates an existing org in place (the corrected Mac
         // re-auth path); it primes the jar + bumps the generation when the account becomes/stays
@@ -302,6 +338,7 @@ public sealed class ManualSignIn
             Email = email,
             SessionKey = sessionKey,
             OrganizationId = org.Uuid,
+            OrganizationName = org.DisplayName,
             AllCookieHeader = cookieHeader,
             // A brand-new account takes its plan from the organization just fetched; an account that
             // already existed is refreshed through UpdatePlan below (R9).
@@ -330,6 +367,7 @@ public sealed class ManualSignIn
             // Refresh the stored plan from this paste's organizations response, the same way the
             // sign-in window does (R9, R56).
             _accountStore.UpdatePlan(resolved.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
+            AuthManager.RepairPlaceholderEmail(_accountStore, resolved, resolvedEmail);
 
             // The same credentials revive every other stored organization they can reach, before the
             // switch below, so the switch stays the last thing to touch the jar (R16).
@@ -342,7 +380,9 @@ public sealed class ManualSignIn
                 if (siblingOrg is not null)
                 {
                     _accountStore.UpdatePlan(sibling.Id, siblingOrg.RateLimitTier, siblingOrg.Capabilities, siblingOrg.BillingType);
+                    _accountStore.UpdateOrganizationName(sibling.Id, siblingOrg.DisplayName);
                 }
+                AuthManager.RepairPlaceholderEmail(_accountStore, sibling, resolvedEmail);
                 repaired++;
             }
 

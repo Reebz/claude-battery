@@ -97,6 +97,14 @@ public sealed class UsageService : IDisposable
     /// Drives the chained restart: the in-flight poll task whose completion the next poll awaits,
     /// preventing the race where a new poll is silently dropped (Mac <c>restartPolling</c>).
     private Task _currentPoll = Task.CompletedTask;
+
+    /// Bumped by every sign-in suspend. A poll dispatched before the bump is discarded when it
+    /// returns, exactly like one superseded by an account switch (KTD3).
+    private int _suspendEpoch;
+
+    /// True between a sign-in's suspend and its resume. Kept so a resume that arrives after the
+    /// sign-in already restarted polling does not start a second chain.
+    private bool _suspended;
     private CancellationTokenSource? _pollCts;
 
     /// The task that decides whether to re-arm after a timer fire (U3). Held so a test can await the
@@ -232,6 +240,67 @@ public sealed class UsageService : IDisposable
     /// disarm the scheduler. Does not clear state. Nulling the CTS lets <see cref="ArmNext"/> tell a
     /// genuinely-stopped poller from a live one (RestartPolling mints a fresh CTS), so the chained
     /// re-arm cannot resurrect polling after a 401/403 (U3 zombie-timer fix).
+    /// <summary>
+    /// Stop polling for the duration of a sign-in, and wait until nothing is in flight (R22, KTD3).
+    ///
+    /// A sign-in rewrites the shared cookie jar. A poll that is already running reads that jar, so
+    /// without this it can answer with credentials that are half-written or belong to a different
+    /// account, get a 401 back, and mark a perfectly healthy account expired - with polling stopped
+    /// and nothing left to restart it. That is the bug this closes.
+    ///
+    /// Awaiting the in-flight poll is the part that matters. Cancelling it alone would still leave a
+    /// request mid-flight, reading the jar while it is being rewritten. The suspend epoch covers the
+    /// other half: a response that arrives after this returns is discarded exactly like one from a
+    /// superseded account switch.
+    /// </summary>
+    public async Task SuspendPollingAsync()
+    {
+        Task inFlight;
+        lock (_gate)
+        {
+            _suspendEpoch++;
+            _suspended = true;
+            _pollCts?.Cancel();
+            _clock.Disarm();
+            inFlight = _currentPoll;
+        }
+
+        try
+        {
+            await inFlight.ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // A poll that failed on its way out is still finished, which is all this waits for.
+        }
+    }
+
+    /// <summary>
+    /// Resume polling after a sign-in. Fires on every exit of a sign-in route, including failures
+    /// and cancellation: a missed resume leaves polling dead until the app restarts, which is worse
+    /// than the race it guards against.
+    ///
+    /// A no-op when polling was already restarted by a successful sign-in, and when there is no
+    /// account to poll.
+    /// </summary>
+    public void ResumePolling()
+    {
+        lock (_gate)
+        {
+            if (!_suspended)
+            {
+                return;
+            }
+            _suspended = false;
+            if (_disposed || _organizationId is null)
+            {
+                return;
+            }
+        }
+
+        RestartPolling();
+    }
+
     public void StopPolling()
     {
         lock (_gate)
@@ -366,6 +435,7 @@ public sealed class UsageService : IDisposable
         {
             string? org;
             int dispatchGeneration;
+            int dispatchSuspendEpoch;
             // Read once, here, so the ratio applied below belongs to the same account that produced
             // this response even if the user switches accounts while the request is in flight.
             var account = _activeAccount?.Invoke();
@@ -375,6 +445,11 @@ public sealed class UsageService : IDisposable
                 // Stamp this poll with the generation current at dispatch; every state write below
                 // re-reads the live generation under the lock and discards if it has advanced (U2).
                 dispatchGeneration = _currentGeneration?.Invoke() ?? 0;
+                dispatchSuspendEpoch = _suspendEpoch;
+                if (_suspended)
+                {
+                    return; // a sign-in is rewriting the jar; this poll must not read it
+                }
             }
             if (org is null) return; // no active account; mirror the Mac "Poll skipped" guard
 
@@ -427,18 +502,18 @@ public sealed class UsageService : IDisposable
                     // NEVER takes this arm - KTD4 holds there (re-login cannot clear an edge block).
                     if (cfStreak >= CfBlockEscalationThreshold && _transportUaIsFallback?.Invoke() == true)
                     {
-                        MarkAuthFailed(dispatchGeneration, cancellationToken);
+                        MarkAuthFailed(dispatchGeneration, dispatchSuspendEpoch, cancellationToken);
                         return;
                     }
 
-                    if (!tolerateNoNetwork) RecordHardFailure(dispatchGeneration, cancellationToken);
+                    if (!tolerateNoNetwork) RecordHardFailure(dispatchGeneration, dispatchSuspendEpoch, cancellationToken);
                     return;
                 }
 
                 // 401/403: hard auth failure. Mirror the Mac: increment, set authFailed, null usage,
                 // stop polling, notify. The generation guard inside MarkAuthFailed discards a 401 from
                 // a superseded generation so it can never flag the now-active account (U2).
-                MarkAuthFailed(dispatchGeneration, cancellationToken);
+                MarkAuthFailed(dispatchGeneration, dispatchSuspendEpoch, cancellationToken);
                 return;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -454,7 +529,7 @@ public sealed class UsageService : IDisposable
                 // (only the 401/403 arm does). An offline poll never reaches here: it is gated out
                 // above before any request is issued.
                 if (cancellationToken.IsCancellationRequested) return;
-                if (!tolerateNoNetwork) RecordHardFailure(dispatchGeneration, cancellationToken);
+                if (!tolerateNoNetwork) RecordHardFailure(dispatchGeneration, dispatchSuspendEpoch, cancellationToken);
                 return;
             }
 
@@ -488,7 +563,7 @@ public sealed class UsageService : IDisposable
                 // A decode/resolution failure on a real 2xx body is a HARD failure (the server
                 // answered but the shape was unusable): advance backoff like the Mac catch arm.
                 if (cancellationToken.IsCancellationRequested) return;
-                RecordHardFailure(dispatchGeneration, cancellationToken);
+                RecordHardFailure(dispatchGeneration, dispatchSuspendEpoch, cancellationToken);
                 return;
             }
 
@@ -517,7 +592,9 @@ public sealed class UsageService : IDisposable
 
             lock (_gate)
             {
-                if (cancellationToken.IsCancellationRequested || IsSupersededGeneration(dispatchGeneration))
+                if (cancellationToken.IsCancellationRequested
+                    || IsSupersededGeneration(dispatchGeneration)
+                    || IsSupersededBySignIn(dispatchSuspendEpoch))
                 {
                     return;
                 }
@@ -593,12 +670,15 @@ public sealed class UsageService : IDisposable
     private static string? InternetDateTime(DateTimeOffset? value) =>
         value?.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
-    private void MarkAuthFailed(int dispatchGeneration, CancellationToken cancellationToken)
+    private void MarkAuthFailed(int dispatchGeneration, int dispatchSuspendEpoch, CancellationToken cancellationToken)
     {
         lock (_gate)
         {
-            // Discard a 401/403 from a superseded poll: it must never flag the now-active account.
-            if (cancellationToken.IsCancellationRequested || IsSupersededGeneration(dispatchGeneration))
+            // Discard a 401/403 from a superseded poll: it must never flag the now-active account,
+            // and a 401 caused by a sign-in rewriting the jar mid-poll must never flag anything.
+            if (cancellationToken.IsCancellationRequested
+                || IsSupersededGeneration(dispatchGeneration)
+                || IsSupersededBySignIn(dispatchSuspendEpoch))
             {
                 return;
             }
@@ -611,11 +691,13 @@ public sealed class UsageService : IDisposable
         AuthFailureDetected?.Invoke(this, EventArgs.Empty);
     }
 
-    private void RecordHardFailure(int dispatchGeneration, CancellationToken cancellationToken)
+    private void RecordHardFailure(int dispatchGeneration, int dispatchSuspendEpoch, CancellationToken cancellationToken)
     {
         lock (_gate)
         {
-            if (cancellationToken.IsCancellationRequested || IsSupersededGeneration(dispatchGeneration))
+            if (cancellationToken.IsCancellationRequested
+                || IsSupersededGeneration(dispatchGeneration)
+                || IsSupersededBySignIn(dispatchSuspendEpoch))
             {
                 return;
             }
@@ -631,6 +713,15 @@ public sealed class UsageService : IDisposable
     /// </summary>
     private bool IsSupersededGeneration(int dispatchGeneration)
         => _currentGeneration is not null && _currentGeneration() != dispatchGeneration;
+
+    /// <summary>
+    /// True when a sign-in began after this poll was dispatched. Treated exactly like a superseded
+    /// generation: the response belongs to credentials that are no longer the ones in the jar, so it
+    /// must not land - least of all a 401 that would mark a healthy account expired (R22).
+    /// MUST be called inside the <c>_gate</c> lock.
+    /// </summary>
+    private bool IsSupersededBySignIn(int dispatchSuspendEpoch)
+        => _suspended || _suspendEpoch != dispatchSuspendEpoch;
 
     private void RaiseStateChanged() => StateChanged?.Invoke(this, EventArgs.Empty);
 

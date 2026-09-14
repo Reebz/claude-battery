@@ -430,13 +430,13 @@ public partial class SettingsWindow : Window
             var nameStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             var nameLabel = new TextBlock
             {
-                Text = account.DisplayName,
+                Text = _accountStore.DisambiguatedName(account),
                 Foreground = (Brush)FindResource("SettingsForegroundBrush"),
                 ToolTip = "Click to rename",
                 Cursor = Cursors.Hand,
                 Tag = account.Id,
             };
-            AutomationProperties.SetName(nameLabel, $"Account {account.DisplayName}, click to rename");
+            AutomationProperties.SetName(nameLabel, $"Account {_accountStore.DisambiguatedName(account)}, click to rename");
             nameLabel.MouseLeftButtonUp += OnNicknameLabelClicked;
             nameStack.Children.Add(nameLabel);
 
@@ -494,7 +494,7 @@ public partial class SettingsWindow : Window
                 Foreground = (Brush)FindResource("SettingsDangerBrush"),
                 Tag = account.Id,
             };
-            AutomationProperties.SetName(remove, $"Remove account {account.DisplayName}");
+            AutomationProperties.SetName(remove, $"Remove account {_accountStore.DisambiguatedName(account)}");
             remove.Click += OnRemoveClicked;
             actions.Children.Add(remove);
         }
