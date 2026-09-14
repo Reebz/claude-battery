@@ -105,6 +105,12 @@ public sealed record GaugeCard
     public required int TickCount { get; init; }
     public required PaceBar Pace { get; init; }
 
+    /// <summary>
+    /// True when this dial is showing a value capped by the weekly quota rather than its own window.
+    /// U11 renders the "Limited by weekly" line from it.
+    /// </summary>
+    public bool IsWeeklyLimited { get; init; }
+
     /// "<n>%" center label for the arc, matching the Mac <c>String(format: "%.0f%%")</c>.
     public string PercentLabel => $"{(int)Math.Round(RemainingPercent)}%";
 }
@@ -232,8 +238,12 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     /// Weekly window length: 7 days. Verbatim Mac value.
     public const double WeeklyWindowSeconds = 7 * 24 * 3600;
 
-    private const int SessionTickCount = 5;
-    private const int WeeklyTickCount = 7;
+    /// <summary>Quota notches on the Session dial. Shared with the Mac through
+    /// <c>parity-constants.json</c>.</summary>
+    public const int SessionTickCount = 5;
+
+    /// <inheritdoc cref="SessionTickCount"/>
+    public const int WeeklyTickCount = 7;
 
     private readonly Func<DateTimeOffset> _now;
 
@@ -247,7 +257,7 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     private LoginState _loginState = LoginState.Idle;
     private bool _isAuthenticated;
     private bool _securityDataUnreadable;
-    private UsageSnapshot? _latestUsage;
+    private UsageReading? _latestReading;
     private bool _authFailed;
     private int _consecutiveFailures;
     private DateTimeOffset? _lastSuccessfulFetch;
@@ -350,11 +360,18 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         set { if (_securityDataUnreadable != value) { _securityDataUnreadable = value; MaybeRefresh(); } }
     }
 
-    public UsageSnapshot? LatestUsage
+    /// <summary>
+    /// The latest reading: the poll's numbers plus the conversion that applies to them. The Session
+    /// dial reads its display value from here so it cannot disagree with the tray (KTD9).
+    /// </summary>
+    public UsageReading? LatestReading
     {
-        get => _latestUsage;
-        set { _latestUsage = value; MaybeRefresh(); }
+        get => _latestReading;
+        set { _latestReading = value; MaybeRefresh(); }
     }
+
+    /// <summary>The raw numbers from the latest reading, for the surfaces that need them unconverted.</summary>
+    public UsageSnapshot? LatestUsage => _latestReading?.Snapshot;
 
     public bool AuthFailed
     {
@@ -489,12 +506,12 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     /// </summary>
     public void Refresh()
     {
-        State = ResolveState(_loginState, _isAuthenticated, _latestUsage, _authFailed, _consecutiveFailures, _securityDataUnreadable);
+        State = ResolveState(_loginState, _isAuthenticated, _latestReading?.Snapshot, _authFailed, _consecutiveFailures, _securityDataUnreadable);
         LoginErrorMessage = _loginState.Kind == LoginStateKind.Error ? _loginState.Message ?? string.Empty : string.Empty;
 
-        if (State == FlyoutContentState.Authenticated && _latestUsage is { } usage)
+        if (State == FlyoutContentState.Authenticated && _latestReading is { } reading)
         {
-            BuildAuthenticatedSections(usage);
+            BuildAuthenticatedSections(reading);
         }
         else
         {
@@ -504,17 +521,22 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         RaiseChanged(null); // null property name => "all properties changed", per WPF convention.
     }
 
-    private void BuildAuthenticatedSections(UsageSnapshot usage)
+    private void BuildAuthenticatedSections(UsageReading reading)
     {
+        var usage = reading.Snapshot;
         var now = _now();
 
+        // The dial shows the display value: when the week converts to less session than the session
+        // window itself has left, the week is what is actually stopping the user (R10, R11). Pace
+        // still reads the raw session value, which is the true five-hour window (KTD9).
         SessionCard = new GaugeCard
         {
             Title = "Session",
-            RemainingPercent = usage.SessionRemaining,
-            Color = RemainingColor(usage.SessionRemaining),
+            RemainingPercent = reading.SessionDisplayRemaining,
+            Color = RemainingColor(reading.SessionDisplayRemaining),
             TickCount = SessionTickCount,
             Pace = MakePaceBar(usage.SessionResetDate, SessionWindowSeconds, now),
+            IsWeeklyLimited = reading.IsSessionWeeklyLimited,
         };
 
         WeeklyCard = new GaugeCard

@@ -296,7 +296,13 @@ public partial class App : Application
             // Live fallback-UA signal for the CF-block escalation (review F1): true only while the
             // transport runs the frozen DefaultUserAgent. Updated on every re-seed in
             // RebuildApiWithUserAgent, so a login swap or activation re-seed retires it.
-            () => _transportUaIsFallback);
+            () => _transportUaIsFallback,
+            // The account being polled, read once per poll, so a reading carries the conversion for
+            // the plan that actually produced it (KTD9).
+            () => _accountStore?.ActiveAccount,
+            // What the account learns about its own conversion is stored back on it, so the next
+            // launch starts from what it already knew rather than from nothing.
+            (id, measurement) => _accountStore?.UpdateRatioMeasurement(id, measurement));
         _usageService.StateChanged += OnUsageStateChanged;
         _usageService.AuthFailureDetected += OnAuthFailureDetected;
 
@@ -529,9 +535,9 @@ public partial class App : Application
 
         var state = ResolveTrayState();
         var theme = _themeWatcher.CurrentTrayBucket;
-        var usage = _usageService?.LatestUsage;
+        var reading = _usageService?.LatestReading;
         var countdown = DualHorizontalRenderer.CountdownCellText(
-            usage,
+            reading?.Snapshot,
             _settings?.ShowSessionCountdown ?? false,
             DateTimeOffset.UtcNow);
 
@@ -545,7 +551,7 @@ public partial class App : Application
         //     identical next refresh would never retry. TrayIcon.ToolTip only advances on a successful
         //     write (and is what TaskbarCreated's re-create passes to NIM_ADD), so comparing against it
         //     retries until the shell accepts the text.
-        var tooltip = BuildTooltip(usage, countdown);
+        var tooltip = BuildTooltip(reading, countdown);
         if (!string.Equals(_trayIcon.TrayIcon.ToolTip, tooltip, StringComparison.Ordinal))
         {
             try
@@ -590,14 +596,17 @@ public partial class App : Application
     /// the square icon no longer draws. Stays well under the shell's 127-character tooltip limit.
     /// Pure + internal so it is unit-tested directly.
     /// </summary>
-    internal static string BuildTooltip(UsageSnapshot? usage, string countdown)
+    internal static string BuildTooltip(UsageReading? reading, string countdown)
     {
-        if (usage is null)
+        if (reading is null)
         {
             return "Claude Battery";
         }
 
-        var text = $"Claude Battery - Session {Math.Round(usage.SessionRemaining)}% - Weekly {Math.Round(usage.WeeklyRemaining)}%";
+        // The session figure is the display value, the same one the icon draws and the panel shows.
+        var session = Math.Round(reading.SessionDisplayRemaining);
+        var weekly = Math.Round(reading.Snapshot.WeeklyRemaining);
+        var text = $"Claude Battery - Session {session}% - Weekly {weekly}%";
         return countdown.Length > 0 ? $"{text} - resets in {countdown}" : text;
     }
 
@@ -617,7 +626,7 @@ public partial class App : Application
             isAuthenticated: store?.IsAuthenticated ?? false,
             serviceReady: svc is not null,
             authFailed: svc?.AuthFailed ?? false,
-            latestUsage: svc?.LatestUsage,
+            latestUsage: svc?.LatestReading,
             consecutiveFailures: svc?.ConsecutiveFailures ?? 0,
             isStale: svc?.IsStale ?? true);
     }
@@ -734,7 +743,7 @@ public partial class App : Application
 
             if (svc is not null)
             {
-                _flyoutViewModel.LatestUsage = svc.LatestUsage;
+                _flyoutViewModel.LatestReading = svc.LatestReading;
                 _flyoutViewModel.AuthFailed = svc.AuthFailed;
                 _flyoutViewModel.ConsecutiveFailures = svc.ConsecutiveFailures;
                 _flyoutViewModel.LastSuccessfulFetch = svc.LastSuccessfulFetch;

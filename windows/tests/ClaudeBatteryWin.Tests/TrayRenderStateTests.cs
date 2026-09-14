@@ -14,13 +14,17 @@ public class TrayRenderStateTests
     private static UsageSnapshot Snapshot(double session = 50, double weekly = 50)
         => new() { SessionRemaining = session, WeeklyRemaining = weekly };
 
+    /// A reading with no plan conversion, which is what these branch tests are about.
+    private static UsageReading Reading(double session = 50, double weekly = 50) =>
+        new(Snapshot(session, weekly), null);
+
     [Fact]
     public void PresentSnapshot_ButStale_RendersBattery_NotStale()
     {
         // The regression: stale + present used to yield StatusStale ("..."), hiding a known value.
         var state = TrayRenderState.Resolve(
             isAuthenticated: true, serviceReady: true, authFailed: false,
-            latestUsage: Snapshot(), consecutiveFailures: 4, isStale: true);
+            latestUsage: Reading(), consecutiveFailures: 4, isStale: true);
 
         var battery = Assert.IsType<TrayRenderState.Battery>(state);
         Assert.Equal(50, battery.Usage.SessionRemaining);
@@ -31,7 +35,7 @@ public class TrayRenderStateTests
     {
         var state = TrayRenderState.Resolve(
             isAuthenticated: true, serviceReady: true, authFailed: false,
-            latestUsage: Snapshot(), consecutiveFailures: 0, isStale: false);
+            latestUsage: Reading(), consecutiveFailures: 0, isStale: false);
 
         Assert.IsType<TrayRenderState.Battery>(state);
     }

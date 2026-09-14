@@ -2,6 +2,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Text;
 using System.Text.RegularExpressions;
+using ClaudeBatteryWin.Models;
 using ClaudeBatteryWin.Services;
 using Xunit;
 
@@ -246,6 +247,95 @@ public class NoSecretsExportGateTests : IDisposable
         Assert.DoesNotContain("sk-ant-CRASHRAW", combined, StringComparison.Ordinal);
         Assert.DoesNotContain("sk-ant-ACCOUNTSRAW", combined, StringComparison.Ordinal);
         Assert.DoesNotContain("sk-ant-WRONGSUFFIX", combined, StringComparison.Ordinal);
+    }
+
+
+    // --- The plan sample -----------------------------------------------------------------------
+
+    [Fact]
+    public void EndToEnd_PlanSample_CarriesTheSignalAndNoIdentity()
+    {
+        var accountId = Guid.Parse("3f2504e0-4f89-41d3-9a0c-0305e82c3301");
+        var account = new Account
+        {
+            Id = accountId,
+            Email = "victim@example.com",
+            SessionKey = "sk-ant-PLANSAMPLEKEY",
+            OrganizationId = "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+            OrganizationName = "victim@example.com's Organization",
+            RateLimitTier = "default_claude_max_5x",
+            Capabilities = new[] { "claude_max", "chat" },
+            BillingType = "stripe_subscription",
+        };
+
+        var reading = new UsageReading(
+            new UsageSnapshot
+            {
+                SessionRemaining = 40,
+                SessionResetDate = new DateTimeOffset(2026, 7, 29, 12, 34, 56, TimeSpan.Zero),
+                WeeklyRemaining = 80,
+                WeeklyResetDate = new DateTimeOffset(2026, 8, 2, 3, 4, 5, TimeSpan.Zero),
+            },
+            PlanRatio.Max5x);
+
+        var measurement = new RatioMeasurement { SessionPointsConsumed = 400, WeeklyPointsConsumed = 42 };
+
+        Logger().EmitMilestone(
+            UsageService.PlanSampleKind,
+            () => UsageService.PlanSamplePayload(account, reading, measurement));
+
+        var (combined, _) = ExportAndDecode();
+
+        // The signal survives, non-destructively.
+        Assert.Contains("plan-sample", combined, StringComparison.Ordinal);
+        Assert.DoesNotContain("serialize-failed", combined, StringComparison.Ordinal);
+        Assert.Contains("default_claude_max_5x", combined, StringComparison.Ordinal);
+        Assert.Contains("claude_max", combined, StringComparison.Ordinal);
+        Assert.Contains("chat", combined, StringComparison.Ordinal);
+        Assert.Contains("stripe_subscription", combined, StringComparison.Ordinal);
+        Assert.Contains("2026-07-29T12:34:56Z", combined, StringComparison.Ordinal);
+        Assert.Contains("2026-08-02T03:04:05Z", combined, StringComparison.Ordinal);
+        Assert.Contains("applied_ratio", combined, StringComparison.Ordinal);
+        Assert.Contains("measured_ratio", combined, StringComparison.Ordinal);
+        Assert.Contains(SecretRedactor.Sha256Prefix(accountId.ToString()), combined, StringComparison.Ordinal);
+
+        // Nothing that identifies the account outside the install that produced it.
+        Assert.DoesNotContain(accountId.ToString(), combined, StringComparison.Ordinal);
+        Assert.DoesNotContain("victim@example.com", combined, StringComparison.Ordinal);
+        Assert.False(AnyEmail.IsMatch(combined));
+        foreach (var key in new[] { "org_name", "organization_name", "organization_id", "email", "uuid" })
+        {
+            Assert.DoesNotContain($"\"{key}\"", combined, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void PlanSamplePayload_WritesAbsenceAsAnExplicitNull()
+    {
+        // A reader has to be able to tell "never measured yet" from "this build does not emit it".
+        var account = new Account
+        {
+            Email = "Account 1",
+            SessionKey = "sk",
+            OrganizationId = "org-1",
+        };
+        var reading = new UsageReading(
+            new UsageSnapshot { SessionRemaining = 40, WeeklyRemaining = 80 }, null);
+
+        var payload = UsageService.PlanSamplePayload(account, reading, new RatioMeasurement());
+
+        foreach (var key in new[]
+                 {
+                     "rate_limit_tier", "capabilities", "billing_type",
+                     "session_resets_at", "weekly_resets_at", "measured_ratio", "applied_ratio"
+                 })
+        {
+            Assert.True(payload.ContainsKey(key), $"{key} is missing entirely");
+            Assert.Null(payload[key]);
+        }
+
+        Assert.Equal(40.0, payload["session_remaining"]);
+        Assert.Equal(80.0, payload["weekly_remaining"]);
     }
 
     [Fact]

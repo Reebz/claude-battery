@@ -27,4 +27,14 @@ public sealed record UsageSnapshot
 
     /// Credits/spend line. Null when neither a spend object nor a positive prepaid balance exists.
     public UsageCredits? Credits { get; init; }
+
+    /// <summary>
+    /// Whether the session percentage was actually present in the response, rather than defaulted to
+    /// "nothing used yet". The ratio measurement needs to know, because an interval built from a
+    /// fabricated reading is not a measurement of anything.
+    /// </summary>
+    public bool SessionPercentWasRead { get; init; }
+
+    /// <inheritdoc cref="SessionPercentWasRead"/>
+    public bool WeeklyPercentWasRead { get; init; }
 }

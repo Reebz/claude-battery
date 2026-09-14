@@ -151,7 +151,7 @@ public class FlyoutStateTests
         var vm = new FlyoutViewModel(() => Now)
         {
             IsAuthenticated = true,
-            LatestUsage = UsageWithModels(),
+            LatestReading = new UsageReading(UsageWithModels(), null),
         };
         Assert.Equal(FlyoutContentState.Authenticated, vm.State);
 
@@ -167,7 +167,7 @@ public class FlyoutStateTests
         var vm = new FlyoutViewModel(() => Now)
         {
             IsAuthenticated = true,
-            LatestUsage = UsageWithModels(), // no model usages
+            LatestReading = new UsageReading(UsageWithModels(), null), // no model usages
         };
 
         Assert.False(vm.HasModelBars);
@@ -180,9 +180,9 @@ public class FlyoutStateTests
         var vm = new FlyoutViewModel(() => Now)
         {
             IsAuthenticated = true,
-            LatestUsage = UsageWithModels(
+            LatestReading = new UsageReading(UsageWithModels(
                 new ModelUsage { DisplayName = "Opus", RemainingPercent = 30, ModelId = "claude-opus" },
-                new ModelUsage { DisplayName = "Sonnet", RemainingPercent = 80, ModelId = "claude-sonnet" }),
+                new ModelUsage { DisplayName = "Sonnet", RemainingPercent = 80, ModelId = "claude-sonnet" }), null),
         };
 
         Assert.True(vm.HasModelBars);
@@ -485,7 +485,7 @@ public class FlyoutStateTests
         var vm = new FlyoutViewModel(() => Now)
         {
             IsAuthenticated = true,
-            LatestUsage = UsageWithModels(),
+            LatestReading = new UsageReading(UsageWithModels(), null),
             Accounts = new[] { account },
             ActiveAccountId = account.Id,
             CanAddAccount = true,
@@ -503,7 +503,7 @@ public class FlyoutStateTests
         var vm = new FlyoutViewModel(() => Now)
         {
             IsAuthenticated = true,
-            LatestUsage = UsageWithModels(),
+            LatestReading = new UsageReading(UsageWithModels(), null),
             Accounts = new[] { a, b },
             ActiveAccountId = b.Id,
         };
@@ -522,7 +522,7 @@ public class FlyoutStateTests
         var vm = new FlyoutViewModel(() => Now)
         {
             IsAuthenticated = true,
-            LatestUsage = UsageWithModels(),
+            LatestReading = new UsageReading(UsageWithModels(), null),
             LastSuccessfulFetch = Now.AddSeconds(-30),
         };
         Assert.False(vm.HasUpdate);
@@ -535,7 +535,7 @@ public class FlyoutStateTests
         var vm = new FlyoutViewModel(() => Now)
         {
             IsAuthenticated = true,
-            LatestUsage = UsageWithModels(),
+            LatestReading = new UsageReading(UsageWithModels(), null),
             AvailableUpdateVersion = "1.51",
         };
         Assert.True(vm.HasUpdate);

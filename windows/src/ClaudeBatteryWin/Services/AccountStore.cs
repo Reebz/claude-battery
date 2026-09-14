@@ -420,6 +420,25 @@ public sealed class AccountStore
         RatioMeasurement = onto.RatioMeasurement ?? from.RatioMeasurement,
     };
 
+    /// <summary>
+    /// Store what an account has measured about its own weekly-to-session conversion (R13).
+    ///
+    /// Skips entirely when the value has not moved. The poll folds a reading in every couple of
+    /// minutes and an idle interval produces an identical measurement; writing it anyway would
+    /// rewrite the whole account file and re-fire every binding for nothing.
+    /// </summary>
+    public void UpdateRatioMeasurement(Guid id, RatioMeasurement measurement)
+    {
+        var index = _accounts.FindIndex(a => a.Id == id);
+        if (index < 0 || _accounts[index].RatioMeasurement == measurement)
+        {
+            return;
+        }
+
+        _accounts[index] = _accounts[index] with { RatioMeasurement = measurement };
+        PersistMetadata();
+    }
+
     public void UpdateDidNotify(Guid id, bool value)
     {
         var index = _accounts.FindIndex(a => a.Id == id);

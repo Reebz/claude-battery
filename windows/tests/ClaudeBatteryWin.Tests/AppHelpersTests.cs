@@ -15,6 +15,10 @@ public class AppHelpersTests
     private static UsageSnapshot Snapshot(double session, double weekly) =>
         new() { SessionRemaining = session, WeeklyRemaining = weekly };
 
+    /// A reading with no plan conversion: the tooltip's raw-value cases.
+    private static UsageReading Reading(double session, double weekly) =>
+        new(Snapshot(session, weekly), null);
+
     [Fact]
     public void BuildTooltip_NoUsage_IsAppNameOnly()
     {
@@ -26,7 +30,7 @@ public class AppHelpersTests
     {
         Assert.Equal(
             "Claude Battery - Session 75% - Weekly 44%",
-            App.BuildTooltip(Snapshot(75.4, 43.6), ""));
+            App.BuildTooltip(Reading(75.4, 43.6), ""));
     }
 
     [Fact]
@@ -34,7 +38,7 @@ public class AppHelpersTests
     {
         Assert.Equal(
             "Claude Battery - Session 75% - Weekly 44% - resets in 3h+",
-            App.BuildTooltip(Snapshot(75.4, 43.6), "3h+"));
+            App.BuildTooltip(Reading(75.4, 43.6), "3h+"));
     }
 
     [Fact]
@@ -52,7 +56,7 @@ public class AppHelpersTests
     [InlineData(75.4, 43.6, "3h+")]
     public void BuildTooltip_StaysUnderTheShellLimit(double session, double weekly, string countdown)
     {
-        var text = App.BuildTooltip(Snapshot(session, weekly), countdown);
+        var text = App.BuildTooltip(Reading(session, weekly), countdown);
         Assert.True(text.Length < ShellTooltipLimit, $"{text.Length} chars: {text}");
         Assert.True(App.BuildTooltip(null, countdown).Length < ShellTooltipLimit);
     }

@@ -107,6 +107,19 @@ public sealed class UsageService : IDisposable
     /// polling starts; a null id means "no active account", and a poll is skipped.
     private string? _organizationId;
 
+    /// Reads the account currently being polled, for its stored plan. Null in tests that do not
+    /// wire it, which leaves every reading unconverted.
+    private readonly Func<Account?>? _activeAccount;
+
+    /// Stores an account's updated ratio measurement. Null in tests that do not wire it, which
+    /// leaves the measurement in memory for that poll only.
+    private readonly Action<Guid, RatioMeasurement>? _persistMeasurement;
+
+    /// The diagnostics sink for the per-poll plan sample. Null means the app-wide logger, resolved
+    /// at emit time rather than at construction: the composition root builds the poller before the
+    /// logger exists, so capturing it here would pin the inert placeholder.
+    private readonly IDiagnosticsLogger? _diagnostics;
+
     /// <param name="currentGeneration">
     /// Reads the AccountStore's current request-generation token. The integration root wires
     /// <c>() =&gt; accountStore.CurrentGeneration</c>; tests omit it (the guard is then inert).
@@ -116,21 +129,43 @@ public sealed class UsageService : IDisposable
     /// <see cref="CfBlockEscalationThreshold"/>). The integration root wires a live flag it updates
     /// on every transport re-seed; tests omit it (the CF-block escalation is then inert).
     /// </param>
+    /// <param name="activeAccount">
+    /// Reads the account being polled, so a reading can be paired with that account's plan. The
+    /// integration root wires <c>() =&gt; accountStore.ActiveAccount</c>; tests omit it, and the
+    /// reading then carries no conversion.
+    /// </param>
+    /// <param name="persistMeasurement">
+    /// Stores an account's updated ratio measurement. The integration root wires
+    /// <c>accountStore.UpdateRatioMeasurement</c>.
+    /// </param>
+    /// <param name="diagnostics">The diagnostics sink; defaults to the app-wide logger.</param>
     public UsageService(IClaudeApi api, INetworkAvailability network, ISchedulerClock clock,
-        Func<int>? currentGeneration = null, Func<bool>? transportUaIsFallback = null)
+        Func<int>? currentGeneration = null, Func<bool>? transportUaIsFallback = null,
+        Func<Account?>? activeAccount = null, Action<Guid, RatioMeasurement>? persistMeasurement = null,
+        IDiagnosticsLogger? diagnostics = null)
     {
         _api = api ?? throw new ArgumentNullException(nameof(api));
         _network = network ?? throw new ArgumentNullException(nameof(network));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _currentGeneration = currentGeneration;
         _transportUaIsFallback = transportUaIsFallback;
+        _activeAccount = activeAccount;
+        _persistMeasurement = persistMeasurement;
+        _diagnostics = diagnostics;
         _network.AvailabilityChanged += OnNetworkAvailabilityChanged;
     }
 
     // MARK: - Observable state (mirrors the Mac @Published properties)
 
+    /// <summary>
+    /// The latest reading: the resolved snapshot paired with the conversion factor that applies to
+    /// it. Null when none is usable (no poll yet, or auth failed). Every surface that shows a session
+    /// number reads it from here, so they cannot disagree (KTD9).
+    /// </summary>
+    public UsageReading? LatestReading { get; private set; }
+
     /// The latest resolved snapshot, or null when none is usable (no poll yet, or auth failed).
-    public UsageSnapshot? LatestUsage { get; private set; }
+    public UsageSnapshot? LatestUsage => LatestReading?.Snapshot;
 
     /// Timestamp of the last successful fetch, or null if there has never been one.
     public DateTimeOffset? LastSuccessfulFetch { get; private set; }
@@ -216,9 +251,9 @@ public sealed class UsageService : IDisposable
         lock (_gate)
         {
             _organizationId = organizationId;
-            changed = LatestUsage is not null || LastSuccessfulFetch is not null
+            changed = LatestReading is not null || LastSuccessfulFetch is not null
                       || ConsecutiveFailures != 0 || AuthFailed;
-            LatestUsage = null;
+            LatestReading = null;
             LastSuccessfulFetch = null;
             ConsecutiveFailures = 0;
             AuthFailed = false;
@@ -331,6 +366,9 @@ public sealed class UsageService : IDisposable
         {
             string? org;
             int dispatchGeneration;
+            // Read once, here, so the ratio applied below belongs to the same account that produced
+            // this response even if the user switches accounts while the request is in flight.
+            var account = _activeAccount?.Invoke();
             lock (_gate)
             {
                 org = _organizationId;
@@ -459,18 +497,49 @@ public sealed class UsageService : IDisposable
             // Success: publish, reset failure count and authFailed. Mirror the Mac success arm.
             // The generation re-check is INSIDE the lock so it is atomic with the write: a poll
             // superseded by an account switch never lands its snapshot on the new account (U2).
+            // Fold this reading into what the account has measured about its own conversion. A
+            // percentage the response did not actually carry has its reset time dropped first, so a
+            // fabricated "nothing used yet" can never look like a real interval.
+            var measurement = RatioMeasurement.Updated(
+                account?.RatioMeasurement,
+                snapshot.SessionRemaining,
+                snapshot.SessionPercentWasRead ? snapshot.SessionResetDate : null,
+                snapshot.WeeklyRemaining,
+                snapshot.WeeklyPercentWasRead ? snapshot.WeeklyResetDate : null);
+
+            if (account is not null && measurement != account.RatioMeasurement)
+            {
+                _persistMeasurement?.Invoke(account.Id, measurement);
+            }
+
+            var appliedRatio = PlanRatio.Resolve(measured: measurement.Ratio, tier: account?.RateLimitTier);
+            var reading = new UsageReading(snapshot, appliedRatio);
+
             lock (_gate)
             {
                 if (cancellationToken.IsCancellationRequested || IsSupersededGeneration(dispatchGeneration))
                 {
                     return;
                 }
-                LatestUsage = snapshot;
+                LatestReading = reading;
                 LastSuccessfulFetch = _clock.Now;
                 ConsecutiveFailures = 0;
                 AuthFailed = false;
                 _consecutiveCfBlocks = 0; // any success breaks the CF-block streak
             }
+
+            // Record what this plan reports, so plans nobody here can see can still be validated
+            // (R7). Emitted from the poll rather than from sign-in, because the poll is the only
+            // thing guaranteed to run while a reporter has logging on, and after the ratio is
+            // applied so the sample carries the number the dial actually used. Nothing is built at
+            // all when logging is off.
+            if (account is not null)
+            {
+                (_diagnostics ?? DiagnosticsLogger.Shared).EmitMilestone(
+                    PlanSampleKind,
+                    () => PlanSamplePayload(account, reading, measurement));
+            }
+
             RaiseStateChanged(); // snapshot itself changed; always notify
         }
         finally
@@ -478,6 +547,47 @@ public sealed class UsageService : IDisposable
             lock (_gate) { _isPolling = false; }
         }
     }
+
+    /// <summary>The diagnostics milestone kind for one poll's plan reading.</summary>
+    public const string PlanSampleKind = "plan-sample";
+
+    /// <summary>
+    /// What one poll's plan reading looks like in the diagnostics file (R7).
+    ///
+    /// Three plans publish a capacity anyone can divide out; the rest do not, and a reporter on one
+    /// of those is the whole reason this record exists. It carries the tier, both remainders, both
+    /// reset times, the running totals, and both ratios - the measured one and the one the dial
+    /// actually used - so a reading can be checked without anyone having that account.
+    ///
+    /// What it deliberately does not carry: the organization name, the organization id, and the
+    /// email. Organization names are commonly shaped like "someone@gmail.com's Organization", so not
+    /// emitting one at all is the guarantee; the redactor is only the net behind it. The account is
+    /// identified by a one-way tag instead, which is enough to tell one account's readings from
+    /// another's inside one export and useless outside it.
+    ///
+    /// Every absent value is written as an explicit null rather than left out, because a reader has
+    /// to be able to tell "no value yet" from "this build does not emit that field".
+    /// </summary>
+    internal static IDictionary<string, object?> PlanSamplePayload(
+        Account account, UsageReading reading, RatioMeasurement measurement) => new Dictionary<string, object?>
+        {
+            ["account"] = SecretRedactor.Sha256Prefix(account.Id.ToString()),
+            ["rate_limit_tier"] = account.RateLimitTier,
+            ["capabilities"] = account.Capabilities,
+            ["billing_type"] = account.BillingType,
+            ["session_remaining"] = reading.Snapshot.SessionRemaining,
+            ["session_resets_at"] = InternetDateTime(reading.Snapshot.SessionResetDate),
+            ["weekly_remaining"] = reading.Snapshot.WeeklyRemaining,
+            ["weekly_resets_at"] = InternetDateTime(reading.Snapshot.WeeklyResetDate),
+            ["session_points_consumed"] = measurement.SessionPointsConsumed,
+            ["weekly_points_consumed"] = measurement.WeeklyPointsConsumed,
+            ["measured_ratio"] = measurement.Ratio,
+            ["applied_ratio"] = reading.PlanRatio,
+        };
+
+    /// <summary>ISO-8601 without fractional seconds, matching the Mac's reset-time format.</summary>
+    private static string? InternetDateTime(DateTimeOffset? value) =>
+        value?.ToString("yyyy-MM-dd'T'HH:mm:ssK", System.Globalization.CultureInfo.InvariantCulture);
 
     private void MarkAuthFailed(int dispatchGeneration, CancellationToken cancellationToken)
     {
@@ -490,7 +600,7 @@ public sealed class UsageService : IDisposable
             }
             ConsecutiveFailures++;
             AuthFailed = true;
-            LatestUsage = null;
+            LatestReading = null;
         }
         StopPolling();
         RaiseStateChanged();
@@ -928,6 +1038,7 @@ public static class UsageSnapshotResolver
         double sessionRemaining;
         DateTimeOffset? sessionResetDate;
         var sessionLimit = FirstWithPercent(limits, "session");
+        var sessionWasRead = sessionLimit is not null || response.FiveHour?.Utilization is not null;
         if (sessionLimit is not null)
         {
             sessionRemaining = Clamp(100 - sessionLimit.Percent!.Value);
@@ -942,6 +1053,7 @@ public static class UsageSnapshotResolver
         double weeklyRemaining;
         DateTimeOffset? weeklyResetDate;
         var weeklyLimit = FirstWithPercent(limits, "weekly_all");
+        var weeklyWasRead = weeklyLimit is not null || response.SevenDay?.Utilization is not null;
         if (weeklyLimit is not null)
         {
             weeklyRemaining = Clamp(100 - weeklyLimit.Percent!.Value);
@@ -984,6 +1096,8 @@ public static class UsageSnapshotResolver
             WeeklyResetDate = weeklyResetDate,
             ModelUsages = modelUsages,
             Credits = DeriveCredits(response.Spend, credits),
+            SessionPercentWasRead = sessionWasRead,
+            WeeklyPercentWasRead = weeklyWasRead,
         };
     }
 

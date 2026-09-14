@@ -90,7 +90,14 @@ public abstract record TrayRenderState
     public sealed record AuthFailed : TrayRenderState;
 
     /// <summary>Usage present: the dual-horizontal battery.</summary>
-    public sealed record Battery(UsageSnapshot Usage) : TrayRenderState;
+    public sealed record Battery(UsageReading Reading) : TrayRenderState
+    {
+        /// <summary>A reading with no plan conversion, for the cases that have none to apply.</summary>
+        public Battery(UsageSnapshot usage) : this(new UsageReading(usage, null)) { }
+
+        /// <summary>What the server returned. The pace and forecast surfaces read this.</summary>
+        public UsageSnapshot Usage => Reading.Snapshot;
+    }
 
     /// <summary>Repeated failures with no usable snapshot: faded "!".</summary>
     public sealed record StatusError : TrayRenderState;
@@ -121,7 +128,7 @@ public abstract record TrayRenderState
         bool isAuthenticated,
         bool serviceReady,
         bool authFailed,
-        UsageSnapshot? latestUsage,
+        UsageReading? latestUsage,
         int consecutiveFailures,
         bool isStale)
     {
@@ -130,7 +137,7 @@ public abstract record TrayRenderState
         if (authFailed) return new AuthFailed();
 
         // A known reading always wins, stale or not (matches the flyout and the Mac).
-        if (latestUsage is { } usage) return new Battery(usage);
+        if (latestUsage is { } reading) return new Battery(reading);
 
         // No snapshot from here down.
         if (consecutiveFailures >= ErrorFailureThreshold) return new StatusError();
@@ -277,7 +284,7 @@ public sealed class DualHorizontalRenderer : IDisposable
                 TrayRenderState.StatusLoading => new RenderSignature(4, 0, 0, theme, size),
                 TrayRenderState.Battery battery => new RenderSignature(
                     5,
-                    (int)battery.Usage.SessionRemaining,
+                    (int)battery.Reading.SessionDisplayRemaining,
                     (int)battery.Usage.WeeklyRemaining,
                     theme,
                     size),
@@ -375,7 +382,7 @@ public sealed class DualHorizontalRenderer : IDisposable
         Bitmap bitmap = state switch
         {
             TrayRenderState.Battery battery =>
-                MakeBatteryBitmap(battery.Usage, baseColor, size),
+                MakeBatteryBitmap(battery.Reading, baseColor, size),
             TrayRenderState.Unauthenticated =>
                 MakeUnauthenticatedBitmap(baseColor, size),
             TrayRenderState.AuthFailed =>
@@ -406,10 +413,12 @@ public sealed class DualHorizontalRenderer : IDisposable
     /// <summary>Outline stroke and nub width: 1 px up to 24 px cells, 2 px at 32.</summary>
     private static int OutlineWidth(int size) => Math.Max(1, size / 16);
 
-    private Bitmap MakeBatteryBitmap(UsageSnapshot usage, Color baseColor, int size)
+    private Bitmap MakeBatteryBitmap(UsageReading reading, Color baseColor, int size)
     {
-        int sessionPercent = (int)usage.SessionRemaining;
-        int weeklyPercent = (int)usage.WeeklyRemaining;
+        // The session side draws the display value, not the raw one: when the week is what is
+        // actually stopping the user, a near-full session bar is the reading that misleads (R11, R42).
+        int sessionPercent = (int)reading.SessionDisplayRemaining;
+        int weeklyPercent = (int)reading.Snapshot.WeeklyRemaining;
 
         var bitmap = NewCanvas(size, size);
         using var g = NewGraphics(bitmap);
