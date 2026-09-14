@@ -1,3 +1,4 @@
+using ClaudeBatteryWin.Services;
 using ClaudeBatteryWin.Models;
 using Xunit;
 
@@ -104,5 +105,42 @@ public class AppHelpersTests
 
         Assert.StartsWith("==== ", firstLine);
         Assert.EndsWith(" [unobserved-task] ====", firstLine);
+    }
+
+    // --- The first-run tray notice (U15, R44) ---------------------------------------------------
+
+    [Fact]
+    public void OnAFreshProfile_WithNotificationsWorking_TheNoticeIsAToast() =>
+        Assert.Equal(
+            ClaudeBatteryWin.App.TrayNotice.Toast,
+            ClaudeBatteryWin.App.DecideTrayNotice(alreadyShown: false, ToastPermission.Enabled));
+
+    [Theory]
+    [InlineData(ToastPermission.DisabledForApplication)]
+    [InlineData(ToastPermission.DisabledForUser)]
+    [InlineData(ToastPermission.DisabledByGroupPolicy)]
+    [InlineData(ToastPermission.DisabledByManifest)]
+    [InlineData(ToastPermission.Unknown)]
+    public void WithToastsBlockedOrUnreadable_TheNoticeIsADialog(ToastPermission permission) =>
+        Assert.Equal(
+            ClaudeBatteryWin.App.TrayNotice.Dialog,
+            ClaudeBatteryWin.App.DecideTrayNotice(alreadyShown: false, permission));
+
+    [Theory]
+    [InlineData(ToastPermission.Enabled)]
+    [InlineData(ToastPermission.DisabledForUser)]
+    [InlineData(ToastPermission.Unknown)]
+    public void OnceShown_TheNoticeNeverComesBack(ToastPermission permission) =>
+        Assert.Equal(
+            ClaudeBatteryWin.App.TrayNotice.None,
+            ClaudeBatteryWin.App.DecideTrayNotice(alreadyShown: true, permission));
+
+    [Fact]
+    public void TheNoticeNamesTheChevronAndTheDrag()
+    {
+        Assert.Contains("chevron", ClaudeBatteryWin.App.TrayNoticeBody, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("drag", ClaudeBatteryWin.App.TrayNoticeBody, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("taskbar", ClaudeBatteryWin.App.TrayNoticeBody, StringComparison.OrdinalIgnoreCase);
+        Assert.NotEqual(string.Empty, ClaudeBatteryWin.App.TrayNoticeTitle);
     }
 }

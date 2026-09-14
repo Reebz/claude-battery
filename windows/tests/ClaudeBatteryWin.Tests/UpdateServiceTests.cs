@@ -327,4 +327,195 @@ public class UpdateServiceTests
         Assert.Equal(0, updater.ApplyCount);
         Assert.True(teardown.MutexHeld);
     }
+
+    // --- U16: the version comparison rule (R47) --------------------------------------------------
+
+    [Theory]
+    [InlineData("2.0", "1.45", true)]      // a later major
+    [InlineData("1.46", "1.45", true)]     // a later minor
+    [InlineData("1.45.1", "1.45", true)]   // a later patch
+    [InlineData("1.45", "1.45", false)]    // the same version
+    [InlineData("1.45.0", "1.45", false)]  // the bug this rule exists for: a trailing zero is not newer
+    [InlineData("1.45", "1.45.0", false)]  // and neither is the same thing the other way round
+    [InlineData("1.44", "1.45", false)]    // an earlier version
+    [InlineData("2.0", "1.9", true)]       // numbers, not letters: "2.0" beats "1.9"
+    [InlineData("1.45.0", "1.45.0", false)]
+    [InlineData("v1.51", "1.50.4", true)]  // release names carry a leading v
+    [InlineData("1.50.4.0", "1.50.4", false)]
+    public void IsNewerVersion_ComparesOneNumberAtATime(string remote, string current, bool expected) =>
+        Assert.Equal(expected, UpdateService.IsNewerVersion(remote, current));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not-a-version")]
+    public void AnUnparseableRemoteVersion_IsNeverAnnounced(string? remote) =>
+        Assert.False(UpdateService.IsNewerVersion(remote, "1.50.4"));
+
+    [Fact]
+    public async Task AReleaseThatIsNotNewerThanTheRunningBuild_IsNotAnnounced()
+    {
+        var updater = new FakeUpdater
+        {
+            CheckResult = new VelopackUpdateInfo { Version = ClaudeBatteryWin.Services.AppVersionInfo.Version },
+        };
+        var service = new UpdateService(updater, new FakeTeardown(updater));
+
+        var result = await service.CheckForUpdatesAsync();
+
+        Assert.Null(result);
+        Assert.Null(service.AvailableUpdate);
+        Assert.True(service.HasChecked);
+        Assert.Equal("Up to date.", UpdateService.UpdateRowText(
+            isInstalled: true, service.AvailableUpdate?.Version, service.HasChecked, service.LastCheckFailed));
+    }
+
+    [Fact]
+    public async Task ACheckThatNeverAnswers_ResolvesTheRowInsteadOfSittingOnChecking()
+    {
+        // The updater hangs; only our own timeout ends it. The row has to say something.
+        var updater = new HangingUpdater();
+        var service = new UpdateService(updater, new FakeTeardown(new FakeUpdater()));
+
+        using var cts = new CancellationTokenSource();
+        var check = service.CheckForUpdatesAsync(cts.Token);
+        updater.Started.Wait(TimeSpan.FromSeconds(5));
+        updater.TimeRanOut(); // stand in for UpdateService.CheckTimeout elapsing
+
+        var result = await check;
+
+        Assert.Null(result);
+        Assert.True(service.LastCheckFailed);
+        Assert.False(service.HasChecked);
+        Assert.Equal("Couldn't check for updates.", UpdateService.UpdateRowText(
+            isInstalled: true, null, service.HasChecked, service.LastCheckFailed));
+    }
+
+    [Fact]
+    public void TheCheckIsBoundedAtAMinute() => Assert.Equal(TimeSpan.FromMinutes(1), UpdateService.CheckTimeout);
+
+    /// <summary>An updater whose check only ends when the linked token is cancelled.</summary>
+    private sealed class HangingUpdater : IVelopackUpdater
+    {
+        private readonly TaskCompletionSource<VelopackUpdateInfo?> _never = new();
+        private CancellationToken _token;
+
+        public readonly ManualResetEventSlim Started = new(false);
+
+        public bool IsInstalled => true;
+
+        public Task<VelopackUpdateInfo?> CheckForUpdatesAsync(CancellationToken cancellationToken)
+        {
+            _token = cancellationToken;
+            cancellationToken.Register(() => _never.TrySetCanceled(cancellationToken));
+            Started.Set();
+            return _never.Task;
+        }
+
+        /// <summary>Cancel the token the service linked to its timeout, as the timeout itself would.</summary>
+        public void TimeRanOut() => _never.TrySetCanceled(_token);
+
+        public Task DownloadUpdatesAsync(VelopackUpdateInfo update, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public void ApplyUpdatesAndRestart(VelopackUpdateInfo update)
+        {
+        }
+    }
+
+    // --- U16: the daily re-check and the wake hook (R47, KTD15) ----------------------------------
+
+    /// <summary>A one-shot timer the test fires by hand.</summary>
+    private sealed class FakeDelayedAction : IDelayedAction
+    {
+        public TimeSpan? ArmedFor;
+        public int Arms;
+        public int Cancels;
+        private Action? _due;
+
+        public void Arm(TimeSpan delay, Action action)
+        {
+            ArmedFor = delay;
+            _due = action;
+            Arms++;
+        }
+
+        public void Cancel()
+        {
+            _due = null;
+            Cancels++;
+        }
+
+        /// <summary>Let the armed delay elapse.</summary>
+        public void Fire()
+        {
+            var due = _due;
+            _due = null;
+            due?.Invoke();
+        }
+    }
+
+    [Fact]
+    public void TheScheduler_ChecksAtOnceAndThenEveryTwentyFourHours()
+    {
+        var checks = 0;
+        var timer = new FakeDelayedAction();
+        using var schedule = new UpdateRecheckScheduler(() => { checks++; return Task.CompletedTask; }, timer);
+
+        schedule.Start();
+        Assert.Equal(1, checks);                                  // not made to wait a day for the first one
+        Assert.Equal(TimeSpan.FromHours(24), timer.ArmedFor);
+
+        timer.Fire();
+        Assert.Equal(2, checks);
+        Assert.Equal(TimeSpan.FromHours(24), timer.ArmedFor);     // and re-armed for the next day
+
+        timer.Fire();
+        Assert.Equal(3, checks);
+    }
+
+    [Fact]
+    public void WakingUp_ChecksAndCountsTheNextDayFromTheWakeMoment()
+    {
+        var checks = 0;
+        var timer = new FakeDelayedAction();
+        using var schedule = new UpdateRecheckScheduler(() => { checks++; return Task.CompletedTask; }, timer);
+
+        schedule.Start();
+        var armsAfterStart = timer.Arms;
+
+        schedule.HandleResume();
+
+        Assert.Equal(2, checks);
+        Assert.Equal(armsAfterStart + 1, timer.Arms);   // re-armed
+        Assert.True(timer.Cancels >= 2);                // and the pending one dropped first
+        Assert.Equal(TimeSpan.FromHours(24), timer.ArmedFor);
+    }
+
+    [Fact]
+    public void AfterShutdown_NoFurtherCheckRuns()
+    {
+        var checks = 0;
+        var timer = new FakeDelayedAction();
+        var schedule = new UpdateRecheckScheduler(() => { checks++; return Task.CompletedTask; }, timer);
+
+        schedule.Start();
+        schedule.Dispose();
+        schedule.HandleResume();
+
+        Assert.Equal(1, checks);
+    }
+
+    [Fact]
+    public void ACheckThatThrowsSynchronously_DoesNotStopTheSchedule()
+    {
+        var timer = new FakeDelayedAction();
+        using var schedule = new UpdateRecheckScheduler(
+            () => Task.FromException(new HttpRequestException("offline")), timer);
+
+        var ex = Record.Exception(() => schedule.Start());
+
+        Assert.Null(ex);
+        Assert.Equal(TimeSpan.FromHours(24), timer.ArmedFor);
+    }
 }

@@ -199,7 +199,7 @@ public abstract record TrayRenderState
 /// nub / glyph) color is white on a dark TASKBAR, black on a light one; the caller must pass the
 /// taskbar bucket (<c>ThemeWatcher.CurrentTrayBucket</c>), not the app-window bucket.
 /// </summary>
-public sealed class DualHorizontalRenderer : IDisposable
+public sealed class StackedBarsRenderer : ITrayIconRenderer
 {
     // --- Square tray layout ratios (all of a size x size canvas) ---
     private const float BarHeightRatio = 0.36f;     // each battery bar's height
@@ -208,52 +208,12 @@ public sealed class DualHorizontalRenderer : IDisposable
     private const float HollowBarHeightRatio = 0.5f; // the single outline bar for unauth/status
     private const float StatusGlyphRatio = 0.55f;   // "!" / "..." font size, in px
 
-    // --- Battery geometry (verbatim from Mac DualHorizontalRenderer) ---
-    // unused since the square tray icon; flagged for removal (the whole group below)
-    private const float BatteryWidth = 30f;
-    private const float BatteryHeight = 14f;
-    private const float NubWidth = 2f;
-    private const float NubHeight = 6f;
-    private const float CornerRadius = 3f;
-    private const float FillInset = 1.5f;
-    private const float IconHeight = 18f;
-    private const float Gap = 4f;
-
-    // --- Countdown tag cell (verbatim from MenuBarController.imageWithCountdownCell) ---
-    // unused since the square tray icon; flagged for removal (the whole group below)
-    private const float CellHeight = 14f;
-    private const float CellCornerRadius = 3f;
-    private const float CellGap = 4f;
-    private const float CellHPadding = 4f;
-
-    // --- Status / unauthenticated glyph (verbatim from Mac makeStatusIcon) ---
-    // unused since the square tray icon; flagged for removal (the whole group below)
-    private const float StatusOutlineWidth = 30f;
-    private const float StatusOutlineHeight = 12f;
-    private const float StatusOutlineY = 3f;
-    private const float StatusNubX = 30f;
-    private const float StatusNubY = 5.5f;
-    private const float StatusNubW = 2f;
-    private const float StatusNubH = 5f;
-
     // Mac font sizes/weights. GDI+ has no "heavy" weight, so Bold is the nearest analog; the
     // monospaced-digit family maps to a monospace font so the two battery numbers stay column-
     // aligned. Sizes are the Mac point sizes.
-    // unused since the square tray icon; flagged for removal
-    private const float NumberFontSize = 10f;
-    // unused since the square tray icon; flagged for removal
-    private const float SmallNumberFontSize = 8.5f;
-    // unused since the square tray icon; flagged for removal
-    private const float CellFontSize = 9f;
     private const float StatusFontSize = 9f;
     private const string MonospaceFamily = "Consolas";
 
-    // unused since the square tray icon; flagged for removal
-    private readonly Font _numberFont = new(MonospaceFamily, NumberFontSize, FontStyle.Bold, GraphicsUnit.Pixel);
-    // unused since the square tray icon; flagged for removal
-    private readonly Font _smallNumberFont = new(MonospaceFamily, SmallNumberFontSize, FontStyle.Bold, GraphicsUnit.Pixel);
-    // unused since the square tray icon; flagged for removal
-    private readonly Font _cellFont = new(MonospaceFamily, CellFontSize, FontStyle.Regular, GraphicsUnit.Pixel);
     // Only the family is used now: the status glyph font is created per render, sized to the cell.
     private readonly Font _statusFont = new(MonospaceFamily, StatusFontSize, FontStyle.Regular, GraphicsUnit.Pixel);
 
@@ -267,73 +227,10 @@ public sealed class DualHorizontalRenderer : IDisposable
     // a never-disposed static (R8). Symmetric with the per-instance fonts above.
     private readonly StringFormat _tightFormat = CreateTightFormat();
 
-    public DualHorizontalRenderer()
+    public StackedBarsRenderer()
     {
         _measureBitmap = NewCanvas(1, 1);
         _measureGraphics = NewGraphics(_measureBitmap);
-    }
-
-    /// <summary>
-    /// Cache key for the last successful render. When two signatures compare equal the produced
-    /// bitmap would be identical, so a re-render is wasted work. Private struct: equality covers
-    /// only the inputs that determine the visible output (the branch, the theme bucket, the
-    /// square cell size). The <see cref="Battery"/> branch's usage participates through the
-    /// rounded session/weekly percents, not the whole snapshot, so failure-count churn or a
-    /// sub-percent drift that does not move the fill by a whole percent cannot force a re-render.
-    /// The countdown string is NOT a key: the square icon draws no countdown cell, so a per-minute
-    /// tick on any branch (battery included) must be suppressed.
-    /// </summary>
-    private readonly struct RenderSignature : IEquatable<RenderSignature>
-    {
-        // 0 unauth, 1 authFailed, 2 statusError, 3 statusStale, 4 statusLoading, 5 battery.
-        private readonly int _branch;
-        private readonly int _sessionPercent;
-        private readonly int _weeklyPercent;
-        private readonly ThemeBucket _theme;
-        private readonly int _size;
-
-        private RenderSignature(int branch, int sessionPercent, int weeklyPercent, ThemeBucket theme, int size)
-        {
-            _branch = branch;
-            _sessionPercent = sessionPercent;
-            _weeklyPercent = weeklyPercent;
-            _theme = theme;
-            _size = size;
-        }
-
-        public static RenderSignature For(TrayRenderState state, ThemeBucket theme, int size)
-        {
-            return state switch
-            {
-                TrayRenderState.Unauthenticated => new RenderSignature(0, 0, 0, theme, size),
-                TrayRenderState.AuthFailed => new RenderSignature(1, 0, 0, theme, size),
-                TrayRenderState.StatusError => new RenderSignature(2, 0, 0, theme, size),
-                TrayRenderState.StatusStale => new RenderSignature(3, 0, 0, theme, size),
-                TrayRenderState.StatusLoading => new RenderSignature(4, 0, 0, theme, size),
-                TrayRenderState.Battery battery => new RenderSignature(
-                    5,
-                    (int)battery.Reading.SessionDisplayRemaining,
-                    (int)battery.Usage.WeeklyRemaining,
-                    theme,
-                    size),
-                _ => throw new ArgumentOutOfRangeException(nameof(state))
-            };
-        }
-
-        public bool Equals(RenderSignature other) =>
-            _branch == other._branch
-            && _sessionPercent == other._sessionPercent
-            && _weeklyPercent == other._weeklyPercent
-            && _theme == other._theme
-            && _size == other._size;
-
-        public override bool Equals(object? obj) => obj is RenderSignature other && Equals(other);
-
-        public override int GetHashCode() =>
-            HashCode.Combine(_branch, _sessionPercent, _weeklyPercent, _theme, _size);
-
-        public static bool operator ==(RenderSignature a, RenderSignature b) => a.Equals(b);
-        public static bool operator !=(RenderSignature a, RenderSignature b) => !a.Equals(b);
     }
 
     private RenderSignature? _lastSignature;
@@ -345,24 +242,6 @@ public sealed class DualHorizontalRenderer : IDisposable
     /// </summary>
     public long SuppressedCount { get; private set; }
 
-    /// <summary>
-    /// Pure mapping from remaining percent to fill color, ported verbatim from the Mac
-    /// <c>batteryColor(remainingPercent:)</c>: clamp 0-100, then <c>&lt;20</c> red, <c>&lt;45</c>
-    /// orange, else green. Exposed for the boundary tests.
-    /// </summary>
-    public static Color BatteryColor(double remainingPercent)
-    {
-        double clamped = Math.Max(0, Math.Min(100, remainingPercent));
-        if (clamped < 20)
-        {
-            return Color.Red;
-        }
-        if (clamped < 45)
-        {
-            return Color.Orange;
-        }
-        return Color.Green;
-    }
 
     /// <summary>
     /// The compact countdown string, or "" when the toggle is off or there is no positive
@@ -405,7 +284,7 @@ public sealed class DualHorizontalRenderer : IDisposable
             return null;
         }
 
-        Color baseColor = theme == ThemeBucket.Dark ? Color.White : Color.Black;
+        Color baseColor = TrayPalette.BaseTint(theme);
 
         Bitmap bitmap = state switch
         {
@@ -488,7 +367,7 @@ public sealed class DualHorizontalRenderer : IDisposable
             g.FillRectangle(nubBrush, bodyWidth, y + (height - nubHeight) / 2f, nubWidth, nubHeight);
         }
 
-        // 3. Fill level, the full three-tier batteryColor scale (<20 red, <45 orange, else green).
+        // 3. Fill level, in the tray's own colour rule: the base tint, or red when nearly empty.
         if (percent is { } p && p > 0)
         {
             float interiorX = stroke;
@@ -497,35 +376,13 @@ public sealed class DualHorizontalRenderer : IDisposable
             float interiorHeight = height - stroke * 2f;
             float fillWidth = interiorWidth * Math.Min(100, p) / 100f;
 
-            using var fillBrush = new SolidBrush(BatteryColor(p));
+            using var fillBrush = new SolidBrush(TrayPalette.Fill(p, color));
             using var interior = RoundedRect(interiorX, interiorY, interiorWidth, interiorHeight, Math.Max(0f, radius - stroke));
             var saved = g.Save();
             g.SetClip(interior);
             g.FillRectangle(fillBrush, interiorX, interiorY, fillWidth, interiorHeight);
             g.Restore(saved);
         }
-    }
-
-    // unused since the square tray icon; flagged for removal
-    /// <summary>
-    /// Draw the centered battery number clipped to a region, so the same glyph paints white over
-    /// the filled portion and the base color over the empty portion (the Mac contrast trick). The
-    /// number is centered across the whole battery body, not the clip region, so the two passes
-    /// align into one glyph.
-    /// </summary>
-    private void DrawClippedNumber(Graphics g, string numberStr, Font font, float bodyX, RectangleF clip, Color color)
-    {
-        SizeF numberSize = MeasureTight(g, numberStr, font);
-        float x = bodyX + (BatteryWidth - numberSize.Width) / 2f;
-        float y = (IconHeight - numberSize.Height) / 2f;
-
-        var saved = g.Save();
-        g.SetClip(clip);
-        using (var brush = new SolidBrush(color))
-        {
-            g.DrawString(numberStr, font, brush, x, y, _tightFormat);
-        }
-        g.Restore(saved);
     }
 
     /// <summary>One hollow outline bar (with nub) vertically centred in the cell: signed out.</summary>
@@ -569,52 +426,6 @@ public sealed class DualHorizontalRenderer : IDisposable
         float height = (float)Math.Round(size * HollowBarHeightRatio);
         float y = (float)Math.Round((size - height) / 2f);
         DrawBar(g, size, y, height, color, percent: null);
-    }
-
-    // unused since the square tray icon; flagged for removal
-    /// <summary>
-    /// Compose a leading rounded tag cell carrying the countdown onto the front of the battery
-    /// bitmap: <c>[ 3h+ ] [75] [43]</c>. Ported from <c>MenuBarController.imageWithCountdownCell</c>
-    /// -- 1.0pt cell outline, corner radius 3, height 14, vertically centered; the cell font is one
-    /// weight lighter and a touch smaller than the heavy battery digits so the timer reads as
-    /// secondary.
-    /// </summary>
-    private Bitmap Compose(Bitmap batteryBitmap, string countdown, Color color)
-    {
-        using (batteryBitmap)
-        {
-            float iconHeight = Math.Max(IconHeight, batteryBitmap.Height);
-
-            SizeF textSize = MeasureTight(_measureGraphics, countdown, _cellFont);
-            float cellWidth = (float)Math.Ceiling(textSize.Width) + CellHPadding * 2f;
-
-            float totalWidth = cellWidth + CellGap + batteryBitmap.Width;
-            var composed = NewCanvas((int)Math.Ceiling(totalWidth), (int)iconHeight);
-            using var g = NewGraphics(composed);
-
-            float cellY = (iconHeight - CellHeight) / 2f;
-            using (var pen = new Pen(color, 1.0f))
-            using (var outline = RoundedRect(0.5f, cellY, cellWidth - 1f, CellHeight, CellCornerRadius))
-            {
-                g.DrawPath(pen, outline);
-            }
-
-            using (var brush = new SolidBrush(color))
-            {
-                g.DrawString(countdown, _cellFont, brush,
-                    (cellWidth - textSize.Width) / 2f,
-                    (iconHeight - textSize.Height) / 2f,
-                    _tightFormat);
-            }
-
-            g.DrawImage(batteryBitmap,
-                new RectangleF(cellWidth + CellGap, (iconHeight - batteryBitmap.Height) / 2f,
-                    batteryBitmap.Width, batteryBitmap.Height),
-                new RectangleF(0, 0, batteryBitmap.Width, batteryBitmap.Height),
-                GraphicsUnit.Pixel);
-
-            return composed;
-        }
     }
 
     // MARK: - GDI+ helpers
@@ -682,9 +493,6 @@ public sealed class DualHorizontalRenderer : IDisposable
 
     public void Dispose()
     {
-        _numberFont.Dispose();
-        _smallNumberFont.Dispose();
-        _cellFont.Dispose();
         _statusFont.Dispose();
         _tightFormat.Dispose();
         _measureGraphics.Dispose();

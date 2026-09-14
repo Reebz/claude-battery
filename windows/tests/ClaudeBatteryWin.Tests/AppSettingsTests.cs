@@ -35,6 +35,34 @@ public sealed class AppSettingsTests
     }
 
     [Fact]
+    public void TheTrayNoticeFlagStartsFalseAndSurvivesARestart()
+    {
+        using var temp = new TempDir();
+        var path = Path.Combine(temp.Dir, "settings.json");
+
+        var settings = new AppSettings(path);
+        Assert.False(settings.HasShownTrayNotice); // a fresh Windows profile is owed the notice
+
+        settings.HasShownTrayNotice = true;
+
+        Assert.True(new AppSettings(path).HasShownTrayNotice); // and is never owed it again
+    }
+
+    [Fact]
+    public void ASettingsFileWrittenBeforeThisRelease_ReadsTheNewFlagsAsDefaults()
+    {
+        using var temp = new TempDir();
+        var path = Path.Combine(temp.Dir, "settings.json");
+        File.WriteAllText(path, "{\"NotificationsEnabled\":true}");
+
+        var settings = new AppSettings(path);
+
+        Assert.True(settings.NotificationsEnabled);
+        Assert.False(settings.HasShownTrayNotice);
+        Assert.Equal(ClaudeBatteryWin.Icons.TrayIconStyle.StackedBars, settings.IconStyle);
+    }
+
+    [Fact]
     public void Write_Failure_LeavesNoTempFileBehind()
     {
         using var temp = new TempDir();

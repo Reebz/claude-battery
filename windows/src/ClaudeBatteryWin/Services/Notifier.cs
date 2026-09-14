@@ -233,6 +233,54 @@ public interface IToastSink
     /// <param name="tag">An identity for the toast (the account id), so repeated alerts for the
     /// same account replace rather than stack.</param>
     bool TryShow(string title, string body, Guid tag);
+
+    /// <summary>
+    /// Whether Windows would deliver a toast right now, without sending one (R45, KTD12).
+    ///
+    /// Settings asks this so it can tell the user that their alerts are switched off somewhere in
+    /// Windows rather than leaving the toggle looking healthy while nothing arrives. The read is
+    /// allowed to fail: a platform that throws before the first toast reports
+    /// <see cref="ToastPermission.Unknown"/>, which Settings says nothing about.
+    /// </summary>
+    ToastPermission ReadPermission();
+}
+
+/// <summary>
+/// What Windows says about this app's toasts (R45). The three "off" values are separate because
+/// they are separate switches in Windows, and the one that matters to a user is which switch to go
+/// and find; the message and the link are the same for all three.
+/// </summary>
+public enum ToastPermission
+{
+    /// <summary>Windows would deliver the toast.</summary>
+    Enabled,
+
+    /// <summary>Notifications are off for this app.</summary>
+    DisabledForApplication,
+
+    /// <summary>Notifications are off for the whole Windows account.</summary>
+    DisabledForUser,
+
+    /// <summary>A workplace policy turns them off.</summary>
+    DisabledByGroupPolicy,
+
+    /// <summary>The app has no notification identity Windows recognises.</summary>
+    DisabledByManifest,
+
+    /// <summary>The read failed, or the platform cannot answer yet. Say nothing.</summary>
+    Unknown,
+}
+
+/// <summary>Reading a <see cref="ToastPermission"/>.</summary>
+public static class ToastPermissions
+{
+    /// <summary>True when Windows is blocking the app's toasts, so Settings shows the line and the
+    /// link. Unknown is not blocked: an unanswerable read must not accuse Windows of anything.</summary>
+    public static bool IsBlocked(ToastPermission permission) =>
+        permission is ToastPermission.DisabledForApplication
+            or ToastPermission.DisabledForUser
+            or ToastPermission.DisabledByGroupPolicy
+            or ToastPermission.DisabledByManifest;
 }
 
 /// <summary>
@@ -398,6 +446,32 @@ public sealed class WinRtToastSink : IToastSink
         {
             DebugLog($"Toast delivery threw, treating as not-delivered: {ex.GetType().Name}");
             return false;
+        }
+    }
+
+    public ToastPermission ReadPermission()
+    {
+        try
+        {
+            var setting = Windows.UI.Notifications.ToastNotificationManager.CreateToastNotifier(Aumid).Setting;
+            return setting switch
+            {
+                Windows.UI.Notifications.NotificationSetting.Enabled => ToastPermission.Enabled,
+                Windows.UI.Notifications.NotificationSetting.DisabledForApplication =>
+                    ToastPermission.DisabledForApplication,
+                Windows.UI.Notifications.NotificationSetting.DisabledForUser => ToastPermission.DisabledForUser,
+                Windows.UI.Notifications.NotificationSetting.DisabledByGroupPolicy =>
+                    ToastPermission.DisabledByGroupPolicy,
+                Windows.UI.Notifications.NotificationSetting.DisabledByManifest => ToastPermission.DisabledByManifest,
+                _ => ToastPermission.Unknown,
+            };
+        }
+        catch (Exception ex)
+        {
+            // The read itself can throw before the first toast on an unpackaged registration
+            // (KTD12). An unanswerable read is "unknown", never "blocked".
+            DebugLog($"Toast permission read threw: {ex.GetType().Name}");
+            return ToastPermission.Unknown;
         }
     }
 

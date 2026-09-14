@@ -50,8 +50,9 @@ public enum FlyoutContentState
 /// thresholds: clamp 0-100, then <c>&lt;20</c> red, <c>&lt;45</c> orange, else green. Returned as a
 /// bucket (not a WPF brush) so the gauge/bar/model color choice is unit-testable without pumping
 /// the UI; the XAML maps each bucket to a <c>DynamicResource</c> brush at the binding boundary.
-/// Shares its numeric cutoffs with <see cref="DualHorizontalRenderer.BatteryColor"/> so the tray
-/// icon and the flyout cannot drift apart.
+/// The tray no longer shares these cutoffs: it has one base tint and a red floor at twenty percent
+/// (<see cref="Icons.TrayPalette"/>, KD9), because at sixteen pixels a three-colour scale is a
+/// coloured dot rather than a reading. The two surfaces are meant to differ between 20 and 45.
 /// </summary>
 public enum UsageColor
 {
@@ -758,9 +759,9 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
 
     /// <summary>
     /// Remaining-percent color bucket. Ports the Mac <c>batteryColor</c> thresholds exactly (clamp
-    /// 0-100; <c>&lt;20</c> red, <c>&lt;45</c> orange, else green) and routes through the same
-    /// numeric cutoffs as <see cref="DualHorizontalRenderer.BatteryColor"/> via a shared assertion in
-    /// the renderer; kept as an enum so the bucket is testable without WPF brushes.
+    /// 0-100; <c>&lt;20</c> red, <c>&lt;45</c> orange, else green). Deliberately not the tray's rule
+    /// (<see cref="Icons.TrayPalette.Fill"/>), which has one tint and a red floor at the same twenty
+    /// percent; kept as an enum so the bucket is testable without WPF brushes.
     /// </summary>
     public static UsageColor RemainingColor(double remainingPercent)
     {

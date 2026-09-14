@@ -56,6 +56,9 @@ public sealed class UpdateService
     /// </summary>
     public bool IsUpdaterInstalled => _updater.IsInstalled;
 
+    /// <summary>How long a single check may take before it counts as failed (R47).</summary>
+    public static readonly TimeSpan CheckTimeout = TimeSpan.FromMinutes(1);
+
     public UpdateService(IVelopackUpdater updater, IUpdateTeardown teardown)
     {
         _updater = updater;
@@ -82,15 +85,35 @@ public sealed class UpdateService
             return null;
         }
 
+        // A check that never answers would leave the About row reading "Checking for updates..."
+        // for the life of the process (R47). Bound it, and treat running out of time as a failed
+        // check, which the row already has words for.
+        using var timeout = new CancellationTokenSource(CheckTimeout);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
+
         try
         {
-            var info = await _updater.CheckForUpdatesAsync(cancellationToken).ConfigureAwait(false);
+            var info = await _updater.CheckForUpdatesAsync(linked.Token).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
+
+            // Guard the announcement with our own component-wise comparison (R47): a release named
+            // "1.50.4.0" or "v1.50.4" is the version already running, and announcing it would leave
+            // the user with an update button that reinstalls what they have.
+            if (info is not null && !IsNewerVersion(info.Version, AppVersionInfo.Version))
+            {
+                info = null;
+            }
 
             AvailableUpdate = info;
             HasChecked = true;
             LastCheckFailed = false;
             return info;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Our own timeout, not the caller's: a slow check reads as a failed one.
+            LastCheckFailed = true;
+            return null;
         }
         catch (OperationCanceledException)
         {
@@ -104,6 +127,65 @@ public sealed class UpdateService
             LastCheckFailed = true;
             return null;
         }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="remote"/> is a later version than <paramref name="current"/>
+    /// (R47), ported from the Mac <c>isNewerVersion</c>.
+    ///
+    /// Numbers compared one component at a time, never as strings: "2.0" is later than "1.9", and
+    /// "1.45.0" is the same version as "1.45", not a later one. The missing components are zeroes,
+    /// which is the whole point of the rule: the Mac shipped a false "update available" because the
+    /// release was named with one more component than the running build. Anything that is not a
+    /// number is dropped, and a leading "v" is ignored, because release names carry both.
+    /// </summary>
+    public static bool IsNewerVersion(string? remote, string? current)
+    {
+        var left = Components(remote);
+        var right = Components(current);
+        if (left.Count == 0)
+        {
+            return false; // nothing parseable: never announce
+        }
+
+        var length = Math.Max(left.Count, right.Count);
+        for (var i = 0; i < length; i++)
+        {
+            var a = i < left.Count ? left[i] : 0;
+            var b = i < right.Count ? right[i] : 0;
+            if (a != b)
+            {
+                return a > b;
+            }
+        }
+
+        return false; // equal versions are never newer
+    }
+
+    private static List<int> Components(string? version)
+    {
+        var parts = new List<int>();
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            return parts;
+        }
+
+        var text = version.Trim();
+        if (text.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+        {
+            text = text[1..];
+        }
+
+        foreach (var piece in text.Split('.'))
+        {
+            if (int.TryParse(piece, System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture, out var value))
+            {
+                parts.Add(value);
+            }
+        }
+
+        return parts;
     }
 
     /// <summary>

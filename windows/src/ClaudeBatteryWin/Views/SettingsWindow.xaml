@@ -81,6 +81,18 @@
                        Margin="24,4,0,0"
                        Visibility="Collapsed" />
 
+            <!-- R45: Windows is blocking our toasts. Shown only when the platform actually says so,
+                 never on an unreadable answer, with a link straight to the Windows setting. -->
+            <TextBlock x:Name="NotificationsBlockedLine"
+                       Style="{StaticResource Caption}"
+                       Margin="24,6,0,0"
+                       TextWrapping="Wrap"
+                       Visibility="Collapsed">
+                <Run x:Name="NotificationsBlockedText" />
+                <Hyperlink Click="OnNotificationSettingsLinkClicked"
+                           AutomationProperties.Name="Open Windows notification settings">Open Windows notification settings</Hyperlink>
+            </TextBlock>
+
             <CheckBox x:Name="CountdownToggle"
                       Content="Show session countdown in the tray tooltip"
                       Margin="0,12,0,0"
@@ -90,6 +102,19 @@
             <TextBlock Style="{StaticResource Caption}"
                        Margin="24,2,0,0"
                        Text="Adds a compact session countdown (e.g. &quot;4h+&quot;, &quot;32m&quot;) to the tooltip shown when you hover the tray icon. Hidden when there is no active session." />
+
+            <!-- Tray icon style (U14): two square styles, same data, different picture. -->
+            <TextBlock Text="Tray icon style"
+                       Margin="0,12,0,0" />
+            <ComboBox x:Name="IconStylePicker"
+                      Margin="0,4,0,0"
+                      Width="200"
+                      HorizontalAlignment="Left"
+                      SelectionChanged="OnIconStyleChanged"
+                      AutomationProperties.Name="Tray icon style" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Margin="0,2,0,0"
+                       Text="Stacked Bars draws two thin bars, session above weekly. Dual Arc Gauge draws two rings, matching the dials in the panel." />
 
             <!-- Accounts -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="ACCOUNTS" />
@@ -227,6 +252,22 @@
                             AutomationProperties.Name="Update action" />
                 </Grid>
             </Border>
+
+            <!-- R48: the same support link the Mac carries. The Mac's decorative "Cookie" typeface is
+                 not bundled here, so the Windows button uses Segoe Script over the same yellow. -->
+            <Button x:Name="SupportButton"
+                    Margin="0,16,0,0"
+                    HorizontalAlignment="Center"
+                    Padding="18,8"
+                    Background="#FFDD00"
+                    Foreground="Black"
+                    BorderBrush="Black"
+                    BorderThickness="1"
+                    FontFamily="Segoe Script, Segoe UI"
+                    FontSize="18"
+                    Content="Buy me a coffee!"
+                    Click="OnSupportClicked"
+                    AutomationProperties.Name="Buy me a coffee" />
 
         </StackPanel>
     </ScrollViewer>

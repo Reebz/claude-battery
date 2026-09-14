@@ -46,6 +46,10 @@ public partial class SettingsWindow : Window
     /// it. Null on builds without a sink (author/non-Windows), which hides the button.
     private readonly Func<bool>? _sendTestToast;
 
+    /// Asks Windows whether it would deliver a toast, without sending one (R45). Null on builds
+    /// without a sink, where the blocked line simply never shows.
+    private readonly Func<ToastPermission>? _readToastPermission;
+
     /// The account currently awaiting a two-step remove confirm, or null. Mirrors the Mac
     /// confirmRemoveId.
     private Guid? _confirmRemoveId;
@@ -63,7 +67,8 @@ public partial class SettingsWindow : Window
         AutostartService autostart,
         IAppSettings settings,
         UpdateService updateService,
-        Func<bool>? sendTestToast = null)
+        Func<bool>? sendTestToast = null,
+        Func<ToastPermission>? readToastPermission = null)
     {
         _accountStore = accountStore ?? throw new ArgumentNullException(nameof(accountStore));
         _manualSignIn = manualSignIn ?? throw new ArgumentNullException(nameof(manualSignIn));
@@ -71,6 +76,7 @@ public partial class SettingsWindow : Window
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _updateService = updateService ?? throw new ArgumentNullException(nameof(updateService));
         _sendTestToast = sendTestToast;
+        _readToastPermission = readToastPermission;
 
         InitializeComponent();
 
@@ -92,7 +98,11 @@ public partial class SettingsWindow : Window
         NotificationsToggle.IsChecked = _settings.NotificationsEnabled;
         CountdownToggle.IsChecked = _settings.ShowSessionCountdown;
         DiagnosticsToggle.IsChecked = _settings.DiagnosticsEnabled;
+        IconStylePicker.ItemsSource = Icons.TrayIconStyles.AllNames;
+        IconStylePicker.SelectedItem = Icons.TrayIconStyles.NameOf(_settings.IconStyle);
         _suppressToggleEvents = false;
+
+        RefreshNotificationsBlockedLine();
 
         // The test-toast button only makes sense when the host wired a real sender.
         TestNotificationButton.Visibility = _sendTestToast is null ? Visibility.Collapsed : Visibility.Visible;
@@ -198,6 +208,16 @@ public partial class SettingsWindow : Window
         _settings.ShowSessionCountdown = CountdownToggle.IsChecked == true;
     }
 
+    private void OnIconStyleChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressToggleEvents)
+        {
+            return;
+        }
+
+        _settings.IconStyle = Icons.TrayIconStyles.Parse(IconStylePicker.SelectedItem as string);
+    }
+
     /// <summary>
     /// How to find the cookie header, for a user who has never opened developer tools. Ported from
     /// the Mac word for word, with the Windows shortcut in place of the Mac one. Internal so the
@@ -275,6 +295,76 @@ public partial class SettingsWindow : Window
             isError ? "SettingsErrorTextBrush" : "SettingsSuccessTextBrush");
         DiagnosticsStatus.Visibility = Visibility.Visible;
         DiagnosticsIssuesLink.Visibility = showLink ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// The sentence shown when Windows is blocking the app's notifications (R45).
+    ///
+    /// Pure and internal so the wording is pinned by a test. The three "off" switches in Windows get
+    /// one sentence between them, because the answer is the same for all three: go and look in the
+    /// Windows notification settings. A permission read that cannot answer says nothing at all,
+    /// rather than telling the user something is wrong when it may not be.
+    /// </summary>
+    internal static string? NotificationsBlockedMessage(ToastPermission permission) =>
+        ToastPermissions.IsBlocked(permission)
+            ? "Windows is currently blocking notifications from Claude Battery, so low usage alerts won't appear."
+            : null;
+
+    /// <summary>Where the blocked line's link goes: the Windows notification settings page.</summary>
+    internal const string NotificationSettingsUri = "ms-settings:notifications";
+
+    /// <summary>The support link the Mac's coffee button opens (R48), kept byte-identical.</summary>
+    internal const string SupportUrl = "https://www.buymeacoffee.com/reebz";
+
+    /// <summary>The support button's label, as on the Mac (R48).</summary>
+    internal const string SupportButtonText = "Buy me a coffee!";
+
+    private void RefreshNotificationsBlockedLine()
+    {
+        var permission = ReadPermissionSafely();
+        var message = NotificationsBlockedMessage(permission);
+        if (message is null)
+        {
+            NotificationsBlockedLine.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        NotificationsBlockedText.Text = message + " ";
+        NotificationsBlockedLine.Visibility = Visibility.Visible;
+    }
+
+    /// A permission read must never take the Settings window down with it (KTD12).
+    private ToastPermission ReadPermissionSafely()
+    {
+        if (_readToastPermission is null)
+        {
+            return ToastPermission.Unknown;
+        }
+
+        try
+        {
+            return _readToastPermission();
+        }
+        catch (Exception)
+        {
+            return ToastPermission.Unknown;
+        }
+    }
+
+    private void OnNotificationSettingsLinkClicked(object sender, RoutedEventArgs e) =>
+        OpenExternal(NotificationSettingsUri);
+
+    private void OnSupportClicked(object sender, RoutedEventArgs e) => OpenExternal(SupportUrl);
+
+    private static void OpenExternal(string target)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or System.IO.FileNotFoundException)
+        {
+        }
     }
 
     private void OnIssuesLinkClicked(object sender, RoutedEventArgs e)

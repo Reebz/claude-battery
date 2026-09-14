@@ -29,6 +29,16 @@ public interface IAppSettings
     /// nothing at all, not even a directory, until this is on.
     bool DiagnosticsEnabled { get; set; }
 
+    /// Whether the first-run "Windows may be hiding this icon" notice has been shown (R44, KTD13).
+    /// Per Windows profile, once, and never again on update: the settings file already lives in the
+    /// per-profile roaming folder, and re-nagging on every release is the failure to avoid.
+    bool HasShownTrayNotice { get; set; }
+
+    /// Which tray icon style to draw (R39). Stored as the display string so a settings file written
+    /// by an older build, or edited by hand, still reads back as something; anything unrecognised
+    /// falls back to Stacked Bars, the style the beta shipped.
+    Icons.TrayIconStyle IconStyle { get; set; }
+
     /// Raised whenever a flag changes, so the tray renderer / poller can react (e.g. the icon
     /// re-composes the countdown cell when <see cref="ShowSessionCountdown"/> flips).
     event EventHandler? Changed;
@@ -72,6 +82,18 @@ public sealed class AppSettings : IAppSettings
     {
         get { lock (_gate) { return _state.DiagnosticsEnabled; } }
         set => Update(s => s with { DiagnosticsEnabled = value });
+    }
+
+    public bool HasShownTrayNotice
+    {
+        get { lock (_gate) { return _state.HasShownTrayNotice; } }
+        set => Update(s => s with { HasShownTrayNotice = value });
+    }
+
+    public Icons.TrayIconStyle IconStyle
+    {
+        get { lock (_gate) { return Icons.TrayIconStyles.Parse(_state.IconStyle); } }
+        set => Update(s => s with { IconStyle = Icons.TrayIconStyles.NameOf(value) });
     }
 
     private void Update(Func<State, State> mutate)
@@ -150,5 +172,7 @@ public sealed class AppSettings : IAppSettings
         public bool NotificationsEnabled { get; init; }
         public bool ShowSessionCountdown { get; init; }
         public bool DiagnosticsEnabled { get; init; }
+        public string? IconStyle { get; init; }
+        public bool HasShownTrayNotice { get; init; }
     }
 }

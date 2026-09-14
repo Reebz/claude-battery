@@ -33,7 +33,7 @@ namespace ClaudeBatteryWin;
 ///   <item>The object graph: the shared <see cref="CookieContainer"/> -> <see cref="ClaudeApi"/>
 ///   (<see cref="IClaudeApi"/>) -> <see cref="UsageService"/>; <see cref="SecretStore"/> +
 ///   <see cref="AccountStore"/> (sharing the container); <see cref="ThemeWatcher"/>; the
-///   <see cref="DualHorizontalRenderer"/> feeding the tray icon; <see cref="Notifier"/>;
+///   <see cref="StackedBarsRenderer"/> feeding the tray icon; <see cref="Notifier"/>;
 ///   <see cref="UpdateService"/>; <see cref="WebView2Runtime"/> gating login.</item>
 ///   <item>System event subscriptions (<see cref="SystemEvents.PowerModeChanged"/> for wake-repoll
 ///   R6, <see cref="SystemEvents.UserPreferenceChanged"/> for theme R3).</item>
@@ -70,7 +70,7 @@ public partial class App : Application
     private SystemSchedulerClock? _clock;
     private UsageService? _usageService;
     private ThemeWatcher? _themeWatcher;
-    private DualHorizontalRenderer? _renderer;
+    private TrayIconRendererHost? _renderer;
     private AppSettings? _settings;
     private IToastSink? _toastSink;
     private Notifier? _notifier;
@@ -88,6 +88,7 @@ public partial class App : Application
 
     // Per-minute countdown re-render timer and the stale-check timer (mirror the Mac MenuBarController).
     private DispatcherTimer? _countdownTimer;
+    private UpdateRecheckScheduler? _updateSchedule;
 
     // The single reusable theme-debounce timer (U11) and the latest coalesced re-read action.
     private DispatcherTimer? _themeDebounceTimer;
@@ -187,6 +188,7 @@ public partial class App : Application
         {
             return; // Shutdown() already requested; OnExit runs the ordered teardown.
         }
+        ShowFirstRunTrayNoticeIfDue();
         SubscribeSystemEvents();
         StartTimers();
 
@@ -210,8 +212,11 @@ public partial class App : Application
         // by refreshing the flyout view-model.
         SyncViewModelFromServices();
 
-        // Fire the first update check in the background; the flyout/Settings rows read the result.
-        _ = CheckForUpdatesAsync();
+        // Check for updates now, then keep checking once a day for as long as the app runs (R47).
+        // A tray app is left running for weeks; a launch-only check never learns about a release.
+        _updateSchedule = new UpdateRecheckScheduler(
+            () => CheckForUpdatesAsync(), new DispatcherDelayedAction(Dispatcher));
+        _updateSchedule.Start();
     }
 
     // ============================================================================================
@@ -310,8 +315,6 @@ public partial class App : Application
         // (or stop) polling against the new org.
         _accountStore.ActiveAccountChanged += OnActiveAccountChanged;
 
-        _renderer = new DualHorizontalRenderer();
-
         // ThemeWatcher debounce: coalesce a burst of General broadcasts onto one re-read after a
         // short window on the UI thread. A real light/dark flip of EITHER bucket (taskbar or app
         // windows: the two are independent settings) re-renders the icon for the taskbar bucket and
@@ -321,7 +324,11 @@ public partial class App : Application
         _themeWatcher.BucketsChanged += OnThemeBucketsChanged;
 
         _settings = new AppSettings();
-        _settings.Changed += (_, _) => RefreshIcon(); // countdown toggle re-composes the tooltip
+
+        // The tray style is a stored setting, so the icon comes back in the style the user left it
+        // in. Built after the settings are read, and rebuilt whenever the setting changes (U14).
+        _renderer = new TrayIconRendererHost(_settings.IconStyle);
+        _settings.Changed += OnSettingsChanged;
 
         // Diagnostics: inert until the user turns logging on in Settings. Constructed here so every
         // producer shares one file per launch, and published as the app-wide instance for producers
@@ -505,6 +512,83 @@ public partial class App : Application
         return true;
     }
 
+    /// <summary>What to do about the first-run tray notice (R44, KTD13).</summary>
+    internal enum TrayNotice
+    {
+        /// <summary>Already shown once on this Windows profile: say nothing.</summary>
+        None,
+
+        /// <summary>Windows will deliver toasts: use one.</summary>
+        Toast,
+
+        /// <summary>Windows is blocking toasts, or cannot say: a small dialog instead.</summary>
+        Dialog,
+    }
+
+    /// <summary>
+    /// Which form the first-run notice takes, if any (R44, KTD13).
+    ///
+    /// Pure, so the once-only rule and the fall back to a dialog are tested without a tray, a toast
+    /// platform or a window. A toast is the quieter of the two, so it wins whenever Windows says it
+    /// would actually deliver one; anything else, including a permission read that cannot answer,
+    /// falls back to the dialog, because a notice nobody sees is the same as no notice.
+    /// </summary>
+    internal static TrayNotice DecideTrayNotice(bool alreadyShown, ToastPermission permission)
+    {
+        if (alreadyShown)
+        {
+            return TrayNotice.None;
+        }
+
+        return permission == ToastPermission.Enabled ? TrayNotice.Toast : TrayNotice.Dialog;
+    }
+
+    /// <summary>The title of the first-run notice, shared by both forms.</summary>
+    internal const string TrayNoticeTitle = "Claude Battery is running";
+
+    /// <summary>
+    /// The first-run notice body. Names the chevron and the drag, because "it did not start" is what
+    /// a user concludes when Windows files a new tray icon into the hidden overflow and nothing
+    /// appears on the taskbar.
+    /// </summary>
+    internal const string TrayNoticeBody =
+        "Windows hides new tray icons by default. Click the chevron (^) at the left of the "
+        + "notification area to find the Claude Battery icon, then drag it onto the taskbar to keep "
+        + "it visible.";
+
+    /// <summary>
+    /// Show the first-run notice once per Windows profile, immediately after the tray icon has
+    /// actually registered, and record that it was shown (R44).
+    ///
+    /// The flag is set whichever form was used, including a toast the platform accepted and then
+    /// dropped: the alternative is re-showing it at every launch for anyone whose notifications are
+    /// unreliable, which is the worse failure.
+    /// </summary>
+    private void ShowFirstRunTrayNoticeIfDue()
+    {
+        if (_settings is null || _toastSink is null)
+        {
+            return;
+        }
+
+        var decision = DecideTrayNotice(_settings.HasShownTrayNotice, _toastSink.ReadPermission());
+        switch (decision)
+        {
+            case TrayNotice.None:
+                return;
+
+            case TrayNotice.Toast:
+                _toastSink.TryShow(TrayNoticeTitle, TrayNoticeBody, Guid.Empty);
+                break;
+
+            case TrayNotice.Dialog:
+                MessageBox.Show(TrayNoticeBody, TrayNoticeTitle, MessageBoxButton.OK, MessageBoxImage.Information);
+                break;
+        }
+
+        _settings.HasShownTrayNotice = true;
+    }
+
     private System.Windows.Controls.ContextMenu BuildTrayContextMenu()
     {
         var menu = new System.Windows.Controls.ContextMenu();
@@ -548,6 +632,21 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// Any settings change the tray has to answer for: the countdown toggle re-composes the
+    /// tooltip, and the style picker swaps the renderer before the repaint so the new style is what
+    /// gets drawn (U14).
+    /// </summary>
+    private void OnSettingsChanged(object? sender, EventArgs e)
+    {
+        if (_settings is not null)
+        {
+            _renderer?.SetStyle(_settings.IconStyle);
+        }
+
+        RefreshIcon();
+    }
+
+    /// <summary>
     /// Repaint the tray icon for the current usage/auth/taskbar-theme state and refresh its tooltip.
     /// The renderer's signature cache short-circuits a redundant paint (issue #11 port), so calling
     /// this on every poll, theme flip, and per-minute tick is cheap. A null return means "no
@@ -567,7 +666,7 @@ public partial class App : Application
         var state = ResolveTrayState();
         var theme = _themeWatcher.CurrentTrayBucket;
         var reading = _usageService?.LatestReading;
-        var countdown = DualHorizontalRenderer.CountdownCellText(
+        var countdown = StackedBarsRenderer.CountdownCellText(
             reading?.Snapshot,
             _settings?.ShowSessionCountdown ?? false,
             DateTimeOffset.UtcNow);
@@ -920,8 +1019,13 @@ public partial class App : Application
             Func<bool>? sendTestToast = toastSink is null
                 ? null
                 : () => toastSink.TryShow("Claude Battery", "Notifications are working.", Guid.Empty);
+
+            // The same sink answers whether Windows would deliver a toast at all, so Settings can
+            // say so rather than leaving the toggle looking healthy (R45).
+            Func<ToastPermission>? readPermission = toastSink is null ? null : toastSink.ReadPermission;
             _settingsWindow = new SettingsWindow(
-                _accountStore, _manualSignIn, _autostart, _settings, _updateService, sendTestToast);
+                _accountStore, _manualSignIn, _autostart, _settings, _updateService, sendTestToast,
+                readPermission);
             _settingsWindow.AddAccountRequested += (_, _) => BeginLogin();
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         }
@@ -1167,6 +1271,10 @@ public partial class App : Application
                 _renderer?.ResetSignature();
                 _usageService?.HandleResume();
                 RefreshIcon();
+
+                // A machine that slept through the daily tick gets its check on waking, and the
+                // next twenty-four hours are counted from the wake moment (R47, KTD15).
+                _updateSchedule?.HandleResume();
             }));
         }
     }
@@ -1198,6 +1306,9 @@ public partial class App : Application
 
         _countdownTimer?.Stop();
         _countdownTimer = null;
+
+        _updateSchedule?.Dispose();
+        _updateSchedule = null;
 
         // Stop the single theme-debounce timer so no post-shutdown tick fires (U11).
         _themeDebounceTimer?.Stop();
@@ -1471,5 +1582,7 @@ internal sealed class LoginWebViewFactory : ILoginWebViewFactory
 internal sealed class NullToastSink : IToastSink
 {
     public bool TryShow(string title, string body, Guid tag) => false;
+
+    public ToastPermission ReadPermission() => ToastPermission.Unknown;
 }
 #endif

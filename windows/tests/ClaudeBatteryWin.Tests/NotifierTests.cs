@@ -41,6 +41,8 @@ public sealed class NotifierTests
         public int ShowAttempts;
         public int Delivered;
 
+        public ToastPermission Permission = ToastPermission.Enabled;
+
         public bool TryShow(string title, string body, Guid tag)
         {
             ShowAttempts++;
@@ -51,6 +53,8 @@ public sealed class NotifierTests
             }
             return false;
         }
+
+        public ToastPermission ReadPermission() => Permission;
     }
 
     private static Account NewAccount(double threshold = 20.0, bool didNotify = false) => new()
@@ -360,5 +364,51 @@ public sealed class NotifierTests
             {
             }
         }
+    }
+
+    // --- U16: what Settings says when Windows is blocking toasts (R45, KTD12) --------------------
+
+    [Theory]
+    [InlineData(ToastPermission.DisabledForApplication)]
+    [InlineData(ToastPermission.DisabledForUser)]
+    [InlineData(ToastPermission.DisabledByGroupPolicy)]
+    [InlineData(ToastPermission.DisabledByManifest)]
+    public void EveryWayWindowsTurnsToastsOff_CountsAsBlocked(ToastPermission permission)
+    {
+        Assert.True(ToastPermissions.IsBlocked(permission));
+        Assert.NotNull(ClaudeBatteryWin.Views.SettingsWindow.NotificationsBlockedMessage(permission));
+    }
+
+    [Theory]
+    [InlineData(ToastPermission.Enabled)]
+    [InlineData(ToastPermission.Unknown)]
+    public void WorkingOrUnreadableNotifications_SayNothing(ToastPermission permission)
+    {
+        Assert.False(ToastPermissions.IsBlocked(permission));
+        Assert.Null(ClaudeBatteryWin.Views.SettingsWindow.NotificationsBlockedMessage(permission));
+    }
+
+    [Fact]
+    public void TheBlockedLine_SaysWhatIsWrongWithoutBlamingTheToggle()
+    {
+        var message = ClaudeBatteryWin.Views.SettingsWindow.NotificationsBlockedMessage(
+            ToastPermission.DisabledForApplication);
+
+        Assert.Equal(
+            "Windows is currently blocking notifications from Claude Battery, so low usage alerts won't appear.",
+            message);
+    }
+
+    [Fact]
+    public void TheBlockedLinesLink_OpensTheWindowsNotificationSettings() =>
+        Assert.Equal("ms-settings:notifications", ClaudeBatteryWin.Views.SettingsWindow.NotificationSettingsUri);
+
+    // --- U16: the support button (R48) -----------------------------------------------------------
+
+    [Fact]
+    public void TheSupportButton_CarriesTheMacsLabelAndUrl()
+    {
+        Assert.Equal("Buy me a coffee!", ClaudeBatteryWin.Views.SettingsWindow.SupportButtonText);
+        Assert.Equal("https://www.buymeacoffee.com/reebz", ClaudeBatteryWin.Views.SettingsWindow.SupportUrl);
     }
 }

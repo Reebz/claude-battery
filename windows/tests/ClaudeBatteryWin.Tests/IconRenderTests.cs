@@ -18,7 +18,7 @@ namespace ClaudeBatteryWin.Tests;
 ///
 /// <see cref="RenderAllStates_WritesArtifactsWhenRequested"/> doubles as the developer's only way to
 /// SEE the icon without a Windows box: set <c>CLAUDE_BATTERY_ICON_ARTIFACTS</c> to a directory and
-/// CI writes one PNG per state x theme x size plus an 8x nearest-neighbour upscale of each.
+/// CI writes one PNG per style x state x theme x size plus an 8x nearest-neighbour upscale of each.
 /// </summary>
 public class IconRenderTests
 {
@@ -74,46 +74,53 @@ public class IconRenderTests
 
     // --- Color thresholds: <20 red, <45 orange, else green (clamped 0-100) ---
 
+    // --- The tray's colour rule: a base tint, and red when nearly empty (R38, KD9) ---
+
     [Theory]
-    [InlineData(0, "Red")]
-    [InlineData(19, "Red")]
-    [InlineData(19.999, "Red")]
-    [InlineData(20, "Orange")]   // boundary: 20 is NOT <20, so it is orange
-    [InlineData(44, "Orange")]
-    [InlineData(44.999, "Orange")]
-    [InlineData(45, "Green")]    // boundary: 45 is NOT <45, so it is green
-    [InlineData(100, "Green")]
-    public void BatteryColor_MapsRemainingToColorAtBoundaries(double remaining, string expectedName)
+    [InlineData(0)]
+    [InlineData(19)]
+    [InlineData(19.999)]
+    [InlineData(-5)]      // clamps up to 0
+    public void NearlyEmpty_IsRedOnEitherTaskbarTheme(double remaining)
     {
-        Color color = DualHorizontalRenderer.BatteryColor(remaining);
-        Assert.Equal(expectedName, color.Name);
+        Assert.Equal(Color.Red.ToArgb(), TrayPalette.Fill(remaining, Color.White).ToArgb());
+        Assert.Equal(Color.Red.ToArgb(), TrayPalette.Fill(remaining, Color.Black).ToArgb());
     }
 
     [Theory]
-    [InlineData(-5, "Red")]      // clamps up to 0 -> red
-    [InlineData(150, "Green")]   // clamps down to 100 -> green
-    public void BatteryColor_ClampsOutOfRangeBeforeBucketing(double remaining, string expectedName)
+    [InlineData(20)]      // exactly at the threshold is not below it
+    [InlineData(44)]
+    [InlineData(45)]
+    [InlineData(100)]
+    [InlineData(150)]     // clamps down to 100
+    public void AnythingElse_IsTheBaseTint(double remaining)
     {
-        Assert.Equal(expectedName, DualHorizontalRenderer.BatteryColor(remaining).Name);
+        // No orange, no green: at sixteen pixels a three-colour scale is a coloured dot, not a
+        // reading. The panel keeps its scale; the tray does not.
+        Assert.Equal(Color.White.ToArgb(), TrayPalette.Fill(remaining, Color.White).ToArgb());
+        Assert.Equal(Color.Black.ToArgb(), TrayPalette.Fill(remaining, Color.Black).ToArgb());
     }
 
     [Fact]
-    public void BatteryColor_BoundariesHoldForBothSessionAndWeekly()
+    public void TheTwoSidesAreColouredIndependently()
     {
-        // The renderer applies one scale to both batteries; locking the function locks both nubs.
-        foreach (double v in new[] { 19.0, 20.0, 44.0, 45.0 })
-        {
-            Color expected = v < 20 ? Color.Red : v < 45 ? Color.Orange : Color.Green;
-            Assert.Equal(expected.Name, DualHorizontalRenderer.BatteryColor(v).Name);
-        }
+        // A spent week reads red while a fresh session stays the base tint.
+        Assert.Equal(Color.Red.ToArgb(), TrayPalette.Fill(5, Color.White).ToArgb());
+        Assert.Equal(Color.White.ToArgb(), TrayPalette.Fill(90, Color.White).ToArgb());
     }
+
+    [Theory]
+    [InlineData(ThemeBucket.Dark, 255, 255, 255)]
+    [InlineData(ThemeBucket.Light, 0, 0, 0)]
+    public void TheBaseTint_IsWhiteOnADarkTaskbarAndBlackOnALightOne(ThemeBucket theme, int r, int g, int b) =>
+        Assert.Equal(Color.FromArgb(r, g, b).ToArgb(), TrayPalette.BaseTint(theme).ToArgb());
 
     // --- Signature short-circuit (issue #11 port) ---
 
     [Fact]
     public void Render_IdenticalStateThemeCountdown_DoesNotReRender_SuppressedCounterIncrements()
     {
-        using var renderer = new DualHorizontalRenderer();
+        using var renderer = new StackedBarsRenderer();
         var state = new TrayRenderState.Battery(Snapshot(session: 75, weekly: 43));
 
         using Bitmap? first = renderer.Render(state, ThemeBucket.Dark, countdown: "");
@@ -135,7 +142,7 @@ public class IconRenderTests
     {
         // The square icon draws no countdown cell, so a per-minute tick that changes only the
         // countdown string must NOT re-rasterize the battery: every such call is suppressed.
-        using var renderer = new DualHorizontalRenderer();
+        using var renderer = new StackedBarsRenderer();
         var state = new TrayRenderState.Battery(Snapshot(session: 75, weekly: 43));
 
         using Bitmap? first = renderer.Render(state, ThemeBucket.Dark, countdown: "32m");
@@ -153,7 +160,7 @@ public class IconRenderTests
     [Fact]
     public void Render_ThemeFlip_ReRenders()
     {
-        using var renderer = new DualHorizontalRenderer();
+        using var renderer = new StackedBarsRenderer();
         var state = new TrayRenderState.Battery(Snapshot(session: 75, weekly: 43));
 
         using Bitmap? dark = renderer.Render(state, ThemeBucket.Dark, countdown: "");
@@ -169,7 +176,7 @@ public class IconRenderTests
     {
         // 75.2 and 75.8 both render the digit "75"; the signature keys on the rounded percent, so
         // a drift that does not change a drawn digit is suppressed (matches the Mac Int() cast).
-        using var renderer = new DualHorizontalRenderer();
+        using var renderer = new StackedBarsRenderer();
 
         using Bitmap? first = renderer.Render(
             new TrayRenderState.Battery(Snapshot(session: 75.2, weekly: 43.9)),
@@ -186,7 +193,7 @@ public class IconRenderTests
     [Fact]
     public void ResetSignature_ForcesNextRenderEvenWhenTupleUnchanged()
     {
-        using var renderer = new DualHorizontalRenderer();
+        using var renderer = new StackedBarsRenderer();
         var state = new TrayRenderState.Battery(Snapshot(session: 75, weekly: 43));
 
         using Bitmap? first = renderer.Render(state, ThemeBucket.Dark, countdown: "");
@@ -202,7 +209,7 @@ public class IconRenderTests
     [Fact]
     public void Render_StatusBranches_Rasterize()
     {
-        using var renderer = new DualHorizontalRenderer();
+        using var renderer = new StackedBarsRenderer();
         using Bitmap? unauth = renderer.Render(new TrayRenderState.Unauthenticated(), ThemeBucket.Dark, "");
         using Bitmap? authFailed = renderer.Render(new TrayRenderState.AuthFailed(), ThemeBucket.Dark, "");
         using Bitmap? error = renderer.Render(new TrayRenderState.StatusError(), ThemeBucket.Light, "");
@@ -235,7 +242,7 @@ public class IconRenderTests
 
         foreach (var state in states)
         {
-            using var renderer = new DualHorizontalRenderer();
+            using var renderer = new StackedBarsRenderer();
             using Bitmap? first = renderer.Render(state, ThemeBucket.Dark, "5h+");
             Assert.NotNull(first);
 
@@ -251,7 +258,7 @@ public class IconRenderTests
         // The cell size (SM_CXSMICON, a DPI-scaling change) IS part of the signature: the same
         // state/theme/countdown at a new size must repaint, while (above) a countdown-only change on
         // the same battery state must not.
-        using var renderer = new DualHorizontalRenderer();
+        using var renderer = new StackedBarsRenderer();
         var state = new TrayRenderState.Battery(Snapshot(session: 75, weekly: 43));
 
         using Bitmap? at16 = renderer.Render(state, ThemeBucket.Dark, "5h+", size: 16);
@@ -277,7 +284,7 @@ public class IconRenderTests
         // whatever it gets; a non-square bitmap is squashed, so every branch must be size x size.
         foreach (ThemeBucket theme in new[] { ThemeBucket.Light, ThemeBucket.Dark })
         {
-            using var renderer = new DualHorizontalRenderer();
+            using var renderer = new StackedBarsRenderer();
             using Bitmap? bitmap = renderer.Render(StateNamed(stateName), theme, "", size);
             Assert.NotNull(bitmap);
             Assert.Equal(size, bitmap!.Width);
@@ -288,7 +295,7 @@ public class IconRenderTests
     [Fact]
     public void Render_DefaultSize_Is16()
     {
-        using var renderer = new DualHorizontalRenderer();
+        using var renderer = new StackedBarsRenderer();
         using Bitmap? bitmap = renderer.Render(new TrayRenderState.Battery(Snapshot(50, 50)), ThemeBucket.Dark, "");
         Assert.NotNull(bitmap);
         Assert.Equal(16, bitmap!.Width);
@@ -316,7 +323,7 @@ public class IconRenderTests
 
     private static int TopBarFillRun(UsageSnapshot usage, int size)
     {
-        using var renderer = new DualHorizontalRenderer(); // fresh: the signature cache must not suppress
+        using var renderer = new StackedBarsRenderer(); // fresh: the signature cache must not suppress
         using Bitmap? bitmap = renderer.Render(new TrayRenderState.Battery(usage), ThemeBucket.Dark, "", size);
         Assert.NotNull(bitmap);
 
@@ -351,31 +358,35 @@ public class IconRenderTests
             Directory.CreateDirectory(dir!);
         }
 
-        foreach (int size in CellSizes)
+        foreach (var style in new[] { TrayIconStyle.StackedBars, TrayIconStyle.DualArcGauge })
         {
-            foreach (ThemeBucket theme in new[] { ThemeBucket.Light, ThemeBucket.Dark })
+            string styleName = style == TrayIconStyle.DualArcGauge ? "arcs" : "bars";
+            foreach (int size in CellSizes)
             {
-                foreach (var (name, state) in AllStates())
+                foreach (ThemeBucket theme in new[] { ThemeBucket.Light, ThemeBucket.Dark })
                 {
-                    using var renderer = new DualHorizontalRenderer(); // fresh per state: no cache suppression
-                    using Bitmap? bitmap = renderer.Render(state, theme, "", size);
-                    Assert.NotNull(bitmap);
-                    Assert.Equal(size, bitmap!.Width);
-                    Assert.Equal(size, bitmap.Height);
-
-                    if (!write)
+                    foreach (var (name, state) in AllStates())
                     {
-                        continue;
+                        using var renderer = TrayIconStyles.Create(style); // fresh per state: no cache suppression
+                        using Bitmap? bitmap = renderer.Render(state, theme, "", size);
+                        Assert.NotNull(bitmap);
+                        Assert.Equal(size, bitmap!.Width);
+                        Assert.Equal(size, bitmap.Height);
+
+                        if (!write)
+                        {
+                            continue;
+                        }
+
+                        string themeName = theme.ToString().ToLowerInvariant();
+                        string stem = $"icon-{styleName}-{name}-{themeName}-{size}";
+                        bitmap.Save(Path.Combine(dir!, stem + ".png"), ImageFormat.Png);
+
+                        // The upscale sits on the taskbar colour the theme bucket targets, because a
+                        // light outline on a transparent PNG is invisible in an image viewer.
+                        using Bitmap upscaled = UpscaleNearest(bitmap, factor: 8, TaskbarColorFor(theme));
+                        upscaled.Save(Path.Combine(dir!, stem + "-x8.png"), ImageFormat.Png);
                     }
-
-                    string themeName = theme.ToString().ToLowerInvariant();
-                    string stem = $"icon-{name}-{themeName}-{size}";
-                    bitmap.Save(Path.Combine(dir!, stem + ".png"), ImageFormat.Png);
-
-                    // The upscale sits on the taskbar colour the theme bucket targets, because a
-                    // light outline on a transparent PNG is invisible in an image viewer.
-                    using Bitmap upscaled = UpscaleNearest(bitmap, factor: 8, TaskbarColorFor(theme));
-                    upscaled.Save(Path.Combine(dir!, stem + "-x8.png"), ImageFormat.Png);
                 }
             }
         }
@@ -456,21 +467,21 @@ public class IconRenderTests
     public void CountdownCellText_OffOrNoResetDate_IsEmpty()
     {
         // Toggle off -> "" even with a reset date.
-        Assert.Equal("", DualHorizontalRenderer.CountdownCellText(
+        Assert.Equal("", StackedBarsRenderer.CountdownCellText(
             Snapshot(50, 50, Now.AddMinutes(30)), enabled: false, Now));
         // No reset date -> "".
-        Assert.Equal("", DualHorizontalRenderer.CountdownCellText(
+        Assert.Equal("", StackedBarsRenderer.CountdownCellText(
             Snapshot(50, 50, sessionReset: null), enabled: true, Now));
         // Null usage -> "".
-        Assert.Equal("", DualHorizontalRenderer.CountdownCellText(usage: null, enabled: true, Now));
+        Assert.Equal("", StackedBarsRenderer.CountdownCellText(usage: null, enabled: true, Now));
     }
 
     [Fact]
     public void CountdownCellText_EnabledWithFutureReset_IsCompactString()
     {
-        Assert.Equal("30m", DualHorizontalRenderer.CountdownCellText(
+        Assert.Equal("30m", StackedBarsRenderer.CountdownCellText(
             Snapshot(50, 50, Now.AddMinutes(30)), enabled: true, Now));
-        Assert.Equal("9h+", DualHorizontalRenderer.CountdownCellText(
+        Assert.Equal("9h+", StackedBarsRenderer.CountdownCellText(
             Snapshot(50, 50, Now.AddHours(12)), enabled: true, Now));
     }
 
@@ -478,7 +489,189 @@ public class IconRenderTests
     public void CountdownCellText_EnabledButPastReset_IsEmpty()
     {
         // A past reset date yields no countdown -> "" (so the cell disappears), not a crash.
-        Assert.Equal("", DualHorizontalRenderer.CountdownCellText(
+        Assert.Equal("", StackedBarsRenderer.CountdownCellText(
             Snapshot(50, 50, Now.AddMinutes(-5)), enabled: true, Now));
+    }
+
+    // --- The second style: two concentric arcs (R39, KD11) ---
+
+    public static IEnumerable<object[]> BothStyles() =>
+        new[] { new object[] { TrayIconStyle.StackedBars }, new object[] { TrayIconStyle.DualArcGauge } };
+
+    public static IEnumerable<object[]> BothStylesBySize()
+    {
+        foreach (int size in CellSizes)
+        {
+            yield return new object[] { TrayIconStyle.StackedBars, size };
+            yield return new object[] { TrayIconStyle.DualArcGauge, size };
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(BothStylesBySize))]
+    public void EveryStyle_IsSquareAtTheRequestedCellSize(TrayIconStyle style, int size)
+    {
+        foreach (ThemeBucket theme in new[] { ThemeBucket.Light, ThemeBucket.Dark })
+        {
+            foreach (var (_, state) in AllStates())
+            {
+                using var renderer = TrayIconStyles.Create(style);
+                using Bitmap? bitmap = renderer.Render(state, theme, "", size);
+                Assert.NotNull(bitmap);
+                Assert.Equal(size, bitmap!.Width);
+                Assert.Equal(size, bitmap.Height);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(16)]
+    [InlineData(24)]
+    [InlineData(32)]
+    public void DualArcGauge_DrawsTheWeekOutsideTheSessionAndLeavesAGapAtTheBottom(int size)
+    {
+        // A full week and an empty session: the outer ring is painted, the inner one is only its
+        // faint track, and the bottom of both is bare so a full ring is not an empty one.
+        using var renderer = new DualArcGaugeRenderer();
+        using Bitmap? bitmap = renderer.Render(
+            new TrayRenderState.Battery(Snapshot(session: 0, weekly: 100)), ThemeBucket.Dark, "", size);
+        Assert.NotNull(bitmap);
+
+        int centre = size / 2;
+        int outer = (int)Math.Round(size * (8f / 20f));
+        int inner = (int)Math.Round(size * (5f / 20f));
+
+        // Straight up from the centre crosses the outer ring, then the inner one.
+        Color onOuter = bitmap!.GetPixel(centre, centre - outer);
+        Color onInner = bitmap.GetPixel(centre, centre - inner);
+        Assert.True(onOuter.A > 127, $"outer ring not painted at {size}px (alpha {onOuter.A})");
+        Assert.True(onOuter.A > onInner.A, "the filled week should be more solid than the empty session");
+
+        // Straight down is the gap: nothing on either radius.
+        Assert.True(bitmap.GetPixel(centre, centre + outer).A < 40, "the gap at the bottom is painted");
+        Assert.True(bitmap.GetPixel(centre, centre + inner).A < 40, "the gap at the bottom is painted");
+    }
+
+    [Theory]
+    [MemberData(nameof(BothStyles))]
+    public void EveryStyle_SuppressesAnIdenticalRenderAndRedrawsAfterAResetSignature(TrayIconStyle style)
+    {
+        using var renderer = TrayIconStyles.Create(style);
+        var state = new TrayRenderState.Battery(Snapshot(session: 75, weekly: 43));
+
+        using Bitmap? first = renderer.Render(state, ThemeBucket.Dark, "");
+        Assert.NotNull(first);
+
+        Assert.Null(renderer.Render(state, ThemeBucket.Dark, ""));
+        Assert.Equal(1, renderer.SuppressedCount);
+
+        renderer.ResetSignature();
+        using Bitmap? forced = renderer.Render(state, ThemeBucket.Dark, "");
+        Assert.NotNull(forced);
+        Assert.Equal(1, renderer.SuppressedCount);
+    }
+
+    [Fact]
+    public void NeitherStyleDrawsTheCountdown_SoACountdownTickRepaintsNothing()
+    {
+        // Both square styles leave the numbers to the tooltip, so the per-minute tick that changes
+        // only the countdown string must not rasterize anything.
+        foreach (var style in new[] { TrayIconStyle.StackedBars, TrayIconStyle.DualArcGauge })
+        {
+            using var renderer = TrayIconStyles.Create(style);
+            var state = new TrayRenderState.Battery(Snapshot(session: 75, weekly: 43));
+
+            using Bitmap? first = renderer.Render(state, ThemeBucket.Dark, "32m");
+            Assert.NotNull(first);
+
+            Assert.Null(renderer.Render(state, ThemeBucket.Dark, "31m"));
+            Assert.Equal(1, renderer.SuppressedCount);
+        }
+    }
+
+    // --- Choosing a style (R39) ---
+
+    [Fact]
+    public void AStoredStyleName_RoundTripsAndAnUnknownOneFallsBackToTheBars()
+    {
+        Assert.Equal(TrayIconStyle.StackedBars, TrayIconStyles.Parse(TrayIconStyles.StackedBarsName));
+        Assert.Equal(TrayIconStyle.DualArcGauge, TrayIconStyles.Parse(TrayIconStyles.DualArcGaugeName));
+        Assert.Equal(TrayIconStyle.StackedBars, TrayIconStyles.Parse("Something Else"));
+        Assert.Equal(TrayIconStyle.StackedBars, TrayIconStyles.Parse(null));
+        Assert.Equal(new[] { "Stacked Bars", "Dual Arc Gauge" }, TrayIconStyles.AllNames);
+    }
+
+    [Fact]
+    public void SwitchingStyle_ChangesWhatIsDrawnAndTheFirstPaintAfterTheSwitchIsNotSuppressed()
+    {
+        using var host = new TrayIconRendererHost(TrayIconStyle.StackedBars);
+        var state = new TrayRenderState.Battery(Snapshot(session: 75, weekly: 43));
+
+        using Bitmap? bars = host.Render(state, ThemeBucket.Dark, "");
+        Assert.NotNull(bars);
+        Assert.Null(host.Render(state, ThemeBucket.Dark, "")); // settled on the old style
+
+        Assert.True(host.SetStyle(TrayIconStyle.DualArcGauge));
+        Assert.Equal(TrayIconStyle.DualArcGauge, host.Style);
+
+        using Bitmap? arcs = host.Render(state, ThemeBucket.Dark, "");
+        Assert.NotNull(arcs); // the identical state must still repaint, in the new style
+        Assert.Equal(0, host.SuppressedCount); // a fresh renderer, so nothing carried over
+
+        // The two styles really do draw different pictures.
+        Assert.NotEqual(PixelHash(bars!), PixelHash(arcs!));
+    }
+
+    [Fact]
+    public void SettingTheSameStyleAgain_ChangesNothing()
+    {
+        using var host = new TrayIconRendererHost(TrayIconStyle.DualArcGauge);
+        var before = host.Current;
+
+        Assert.False(host.SetStyle(TrayIconStyle.DualArcGauge));
+        Assert.Same(before, host.Current);
+    }
+
+    [Fact]
+    public void TheStoredStyleSurvivesARestart()
+    {
+        string path = Path.Combine(Path.GetTempPath(), "cbw-iconstyle", Guid.NewGuid().ToString("N"), "settings.json");
+        try
+        {
+            var settings = new ClaudeBatteryWin.Services.AppSettings(path);
+            Assert.Equal(TrayIconStyle.StackedBars, settings.IconStyle); // the beta's style is the default
+
+            var changes = 0;
+            settings.Changed += (_, _) => changes++;
+            settings.IconStyle = TrayIconStyle.DualArcGauge;
+            Assert.Equal(1, changes);
+
+            Assert.Equal(TrayIconStyle.DualArcGauge, new ClaudeBatteryWin.Services.AppSettings(path).IconStyle);
+        }
+        finally
+        {
+            string? dir = Path.GetDirectoryName(path);
+            if (dir is not null && Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+        }
+    }
+
+    private static string PixelHash(Bitmap bitmap)
+    {
+        var bytes = new List<byte>(bitmap.Width * bitmap.Height * 4);
+        for (int y = 0; y < bitmap.Height; y++)
+        {
+            for (int x = 0; x < bitmap.Width; x++)
+            {
+                Color px = bitmap.GetPixel(x, y);
+                bytes.Add(px.A);
+                bytes.Add(px.R);
+                bytes.Add(px.G);
+                bytes.Add(px.B);
+            }
+        }
+        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes.ToArray()));
     }
 }
