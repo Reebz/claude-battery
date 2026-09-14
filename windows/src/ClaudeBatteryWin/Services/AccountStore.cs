@@ -40,7 +40,7 @@ namespace ClaudeBatteryWin.Services;
 /// </summary>
 public sealed class AccountStore
 {
-    public const int MaxAccounts = 5;
+    public const int MaxAccounts = 10;
 
     /// <summary>
     /// Per-domain cookie cap applied to the shared jar. <see cref="InjectCookies"/> files EVERY
@@ -170,7 +170,7 @@ public sealed class AccountStore
     /// </summary>
     /// <returns>
     /// <c>true</c> when the account was added or an existing org was updated; <c>false</c> when a
-    /// new account was rejected for hitting the 5-account limit.
+    /// new account was rejected for hitting the account limit.
     /// </returns>
     /// <exception cref="AccountPersistenceException">
     /// The secret blob could not be written. The secret is saved BEFORE the in-memory list is
@@ -190,7 +190,15 @@ public sealed class AccountStore
             {
                 Email = account.Email,
                 SessionKey = account.SessionKey,
-                AllCookieHeader = account.AllCookieHeader,
+                // A paste that carried only a session key must not wipe the stored header: the
+                // header holds the Cloudflare and CSRF cookies the poll needs, and losing them
+                // shows up as the account dying on the next restart (R18). Swap the key into the
+                // stored header instead.
+                AllCookieHeader = account.AllCookieHeader is { Length: > 0 } fresh
+                    ? fresh
+                    : existing.AllCookieHeader is { Length: > 0 } stored
+                        ? HeaderReplacingSessionKey(stored, account.SessionKey)
+                        : account.AllCookieHeader,
                 // Refresh the captured UA in place too: re-auth captures a fresh session UA, and
                 // omitting it here would leave the re-authed account carrying the STALE UA - the
                 // exact wrong-UA-then-403 failure this fix targets (U1). Coalesce to the existing UA
@@ -315,9 +323,16 @@ public sealed class AccountStore
     }
 
     /// <summary>
-    /// Update the credentials of an existing account in place (used on a silent re-prime that is not
-    /// a full org re-auth). Re-primes the jar and bumps the generation when the updated account is
-    /// active. No-op when the id is unknown.
+    /// Refresh one stored account's credentials in place, without making it active (R16).
+    ///
+    /// This is the repair write: one sign-in can revive every organization stored under the same
+    /// login, and each of the others is written through here. Only the active account's write
+    /// re-primes the live cookie jar; a sibling being repaired in the background must not disturb
+    /// the session that is currently polling.
+    ///
+    /// A refresh that carries only a session key swaps it into the stored header rather than
+    /// replacing the header, for the reason in <see cref="HeaderReplacingSessionKey"/>.
+    /// No-op when the id is unknown.
     /// </summary>
     public void UpdateSession(Guid id, string sessionKey, string? cookieHeader = null)
     {
@@ -327,10 +342,15 @@ public sealed class AccountStore
             return;
         }
 
-        var updated = _accounts[index] with
+        var existing = _accounts[index];
+        var updated = existing with
         {
             SessionKey = sessionKey,
-            AllCookieHeader = cookieHeader ?? _accounts[index].AllCookieHeader,
+            AllCookieHeader = cookieHeader is { Length: > 0 } fresh
+                ? fresh
+                : existing.AllCookieHeader is { Length: > 0 } stored
+                    ? HeaderReplacingSessionKey(stored, sessionKey)
+                    : existing.AllCookieHeader,
         };
         // Same write-then-commit order as UpsertAccount: a failed save changes nothing in memory.
         SaveSecret(updated);
@@ -342,6 +362,49 @@ public sealed class AccountStore
             ActivateCookies(updated);
             BumpGenerationAndNotify();
         }
+    }
+
+    /// <summary>
+    /// Swaps a fresh session key into a stored cookie header, keeping every other cookie exactly as
+    /// it was (R18).
+    ///
+    /// This is what makes a bare-key paste survive a restart. The stored header carries the
+    /// Cloudflare and CSRF cookies as well as the key, and the poll prefers the header over the bare
+    /// key; replacing the whole header with a lone key means the next launch polls without the
+    /// Cloudflare cookie and gets a 403, which reads to the user as the account silently dying.
+    ///
+    /// Pairs are split on a bare semicolon, since a semicolon with no trailing space is valid and
+    /// must not swallow the pair after it, and a value containing "=" is never re-split. A header
+    /// with no session key at all gets one appended.
+    /// </summary>
+    internal static string HeaderReplacingSessionKey(string header, string sessionKey)
+    {
+        const string prefix = "sessionKey=";
+
+        var pairs = header
+            .Split(';')
+            .Select(p => p.Trim())
+            .Where(p => p.Length > 0)
+            .ToList();
+
+        var replaced = false;
+        for (var i = 0; i < pairs.Count; i++)
+        {
+            // The equals sign is part of the match, so a cookie merely named like the session key
+            // (sessionKeyBackup, say) is left alone.
+            if (pairs[i].StartsWith(prefix, StringComparison.Ordinal))
+            {
+                pairs[i] = prefix + sessionKey;
+                replaced = true;
+            }
+        }
+
+        if (!replaced)
+        {
+            pairs.Add(prefix + sessionKey);
+        }
+
+        return string.Join("; ", pairs);
     }
 
     /// <summary>Update a nickname (trimmed, capped at 30 chars; empty becomes null). Mac parity.</summary>

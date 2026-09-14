@@ -101,6 +101,8 @@ public partial class SettingsWindow : Window
         // PublishSingleFile (the shipped raw exe). ToString(3) drops the trailing revision.
         VersionLabel.Text = $"Claude Battery v{typeof(App).Assembly.GetName().Version?.ToString(3)}";
 
+        CookieHeaderHelp.Text = CookieHeaderHelpText;
+
         RebuildAccountList();
         RefreshUpdateRow();
 
@@ -137,6 +139,10 @@ public partial class SettingsWindow : Window
 
     // Guards the initial IsChecked assignment in OnLoaded so it does not re-enter the registry/disk.
     private bool _suppressToggleEvents;
+
+    /// The organizations offered by the last paste that needed a choice, in the order the picker
+    /// shows them. The picker itself holds labels, so the choice is resolved back by position.
+    private IReadOnlyList<Organization>? _orgChoices;
 
     // MARK: - Toggles
 
@@ -191,6 +197,18 @@ public partial class SettingsWindow : Window
 
         _settings.ShowSessionCountdown = CountdownToggle.IsChecked == true;
     }
+
+    /// <summary>
+    /// How to find the cookie header, for a user who has never opened developer tools. Ported from
+    /// the Mac word for word, with the Windows shortcut in place of the Mac one. Internal so the
+    /// exact wording is pinned by a test rather than only by reading the XAML.
+    /// </summary>
+    internal const string CookieHeaderHelpText =
+        "1. Sign in to claude.ai in your browser.\n" +
+        "2. Open Developer Tools (F12) and select the Network tab.\n" +
+        "3. Refresh the page, then click any request to claude.ai.\n" +
+        "4. Under Request Headers, copy the entire value of the \"Cookie\" header.\n" +
+        "5. Paste it above. Paste it only here, never into a web page.";
 
     private void OnDiagnosticsToggled(object sender, RoutedEventArgs e)
     {
@@ -628,11 +646,13 @@ public partial class SettingsWindow : Window
 
     private void OnUseOrgClicked(object sender, RoutedEventArgs e)
     {
-        if (OrgPicker.SelectedItem is not Organization org)
+        var index = OrgPicker.SelectedIndex;
+        if (_orgChoices is null || index < 0 || index >= _orgChoices.Count)
         {
             return;
         }
 
+        var org = _orgChoices[index];
         OrgPickerPanel.Visibility = Visibility.Collapsed;
         ApplyManualResult(_manualSignIn.CompleteWithChosenOrg(org));
     }
@@ -648,7 +668,21 @@ public partial class SettingsWindow : Window
         switch (result.Kind)
         {
             case ManualSignInResult.ResultKind.Success:
-                ShowManualStatus($"Signed in as {result.DisplayName}.", isError: false);
+                ShowManualStatus(
+                    AuthManager.SignInConfirmation(result.DisplayName ?? string.Empty, result.RefreshedCount),
+                    isError: false);
+                CookieHeaderBox.Clear();
+                OrgPickerPanel.Visibility = Visibility.Collapsed;
+                RebuildAccountList();
+                break;
+
+            case ManualSignInResult.ResultKind.AlreadySignedInAllOrgs:
+                // Everything this paste could reach was already stored, so it repaired them instead
+                // of adding anything - and deliberately did not move the user off what they were
+                // viewing (R24).
+                ShowManualStatus(
+                    AuthManager.RepairConfirmation(result.RefreshedCount, result.ActiveAccountRefreshed),
+                    isError: false);
                 CookieHeaderBox.Clear();
                 OrgPickerPanel.Visibility = Visibility.Collapsed;
                 RebuildAccountList();
@@ -656,7 +690,10 @@ public partial class SettingsWindow : Window
 
             case ManualSignInResult.ResultKind.NeedsOrgChoice:
                 ShowManualStatus("Multiple organizations found. Choose one to finish.", isError: false);
-                OrgPicker.ItemsSource = result.Orgs;
+                _orgChoices = result.Orgs;
+                OrgPicker.ItemsSource = OrgPickerView.BuildDisambiguatedLabels(
+                    result.Orgs ?? Array.Empty<Organization>(),
+                    _accountStore.Accounts.Select(a => a.OrganizationId).ToList());
                 if (result.Orgs is { Count: > 0 })
                 {
                     OrgPicker.SelectedIndex = 0;

@@ -109,6 +109,9 @@ public sealed class SecretStore
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CryptographicException)
         {
             DebugLog("Failed to save secret blob");
+            // A failed move leaves a decryptable copy of the credentials sitting next to the real
+            // blob. Nothing reads it, so it would just sit there until the profile is deleted.
+            RemoveOrphanedTemp(accountId);
             throw new AccountPersistenceException("Could not save the account's sign-in data.", ex);
         }
     }
@@ -228,6 +231,26 @@ public sealed class SecretStore
         {
             // Best-effort; a locked/already-removed file must not crash the app.
             DebugLog("Failed to delete secret blob (ignored)");
+        }
+
+        // Removing an account has to take any leftover temp copy of its credentials with it.
+        RemoveOrphanedTemp(accountId);
+    }
+
+    /// <summary>Removes a leftover <c>.tmp</c> blob for one account. Best effort.</summary>
+    private void RemoveOrphanedTemp(Guid accountId)
+    {
+        var temp = BlobPath(accountId) + ".tmp";
+        try
+        {
+            if (File.Exists(temp))
+            {
+                File.Delete(temp);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            DebugLog("Failed to remove an orphaned temp blob (ignored)");
         }
     }
 

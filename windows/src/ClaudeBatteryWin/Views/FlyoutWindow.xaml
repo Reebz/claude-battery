@@ -338,6 +338,15 @@
             <StackPanel Margin="12"
                         Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=Authenticated}">
 
+                <!-- What the last sign-in repaired, when it repaired more than the account it
+                     signed in to (R16). Hidden the rest of the time. -->
+                <TextBlock Text="{Binding SignInConfirmation}"
+                           Margin="0,0,0,8"
+                           FontSize="11"
+                           TextWrapping="Wrap"
+                           Foreground="{DynamicResource MutedBrush}"
+                           Visibility="{Binding HasSignInConfirmation, Converter={StaticResource BoolToVisibility}}" />
+
                 <!-- Session + Weekly gauge cards side by side -->
                 <Grid>
                     <Grid.ColumnDefinitions>

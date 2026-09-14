@@ -7,7 +7,7 @@ using Xunit;
 namespace ClaudeBatteryWin.Tests;
 
 /// <summary>
-/// U5 account-store tests: the 5-account cap, org-uniqueness vs in-place re-auth update, switch
+/// U5 account-store tests: the account cap, org-uniqueness vs in-place re-auth update, switch
 /// concurrency (the load-bearing correctness model - a late prior-generation response can never
 /// flag the new account), corrupt-blob drop-and-reauth, and the last-account-removed cookie clear.
 ///
@@ -60,22 +60,25 @@ public sealed class AccountStoreTests : IDisposable
 
     private static int CountClaudeCookies(CookieContainer jar) => jar.GetCookies(ClaudeUri).Count;
 
-    // ---- 5-account cap ----
+    // ---- the account cap ----
 
     [Fact]
-    public void SixthAccount_IsRejected()
+    public void EleventhAccount_IsRejected_AndTheLimitIsTen()
     {
+        // The literal ten is asserted, not derived: the Settings message names this number (R23).
+        Assert.Equal(10, AccountStore.MaxAccounts);
+
         var store = NewStore(new CookieContainer());
 
-        for (var i = 1; i <= 5; i++)
+        for (var i = 1; i <= 10; i++)
         {
             Assert.True(store.UpsertAccount(NewAccount($"org-{i}")));
         }
 
         Assert.False(store.CanAddAccount);
-        Assert.False(store.UpsertAccount(NewAccount("org-6")));
-        Assert.Equal(5, store.Accounts.Count);
-        Assert.DoesNotContain(store.Accounts, a => a.OrganizationId == "org-6");
+        Assert.False(store.UpsertAccount(NewAccount("org-11")));
+        Assert.Equal(10, store.Accounts.Count);
+        Assert.DoesNotContain(store.Accounts, a => a.OrganizationId == "org-11");
     }
 
     // ---- duplicate org updates in place (the corrected Mac lockout) ----
@@ -100,16 +103,74 @@ public sealed class AccountStoreTests : IDisposable
     [Fact]
     public void DuplicateOrg_UpdateInPlace_DoesNotConsumeASlot()
     {
+        // Covers AE15 / R58: repairing an account never counts against the limit, because the
+        // existing-organization branch is taken before the cap is ever consulted.
         var store = NewStore(new CookieContainer());
-        for (var i = 1; i <= 5; i++)
+        for (var i = 1; i <= 10; i++)
         {
             Assert.True(store.UpsertAccount(NewAccount($"org-{i}")));
         }
 
+        Assert.False(store.CanAddAccount);
         // Re-auth to an existing org while full must still succeed (no slot consumed).
         Assert.True(store.UpsertAccount(NewAccount("org-3", sessionKey: "sk-refreshed")));
-        Assert.Equal(5, store.Accounts.Count);
+        Assert.Equal(10, store.Accounts.Count);
         Assert.Equal("sk-refreshed", store.Accounts.First(a => a.OrganizationId == "org-3").SessionKey);
+    }
+
+
+    // ---- a bare-key paste keeps the stored cookie header (R18) ----
+
+    [Theory]
+    [InlineData("sessionKey=old; __cf_bm=cf; anthropic-csrf-token=csrf", "new",
+                "sessionKey=new; __cf_bm=cf; anthropic-csrf-token=csrf")]
+    [InlineData("__cf_bm=cf", "new", "__cf_bm=cf; sessionKey=new")]
+    [InlineData("__cf_bm=cf;sessionKey=old", "new", "__cf_bm=cf; sessionKey=new")]
+    [InlineData("sessionKeyBackup=keepme; sessionKey=old", "new", "sessionKeyBackup=keepme; sessionKey=new")]
+    [InlineData("sessionKey=old==; __cf_bm=a=b", "new==", "sessionKey=new==; __cf_bm=a=b")]
+    public void HeaderReplacingSessionKey_SwapsTheKeyAndKeepsEverythingElse(string header, string key, string expected) =>
+        Assert.Equal(expected, AccountStore.HeaderReplacingSessionKey(header, key));
+
+    [Fact]
+    public void BareKeyPaste_KeepsTheStoredHeaderSoTheAccountSurvivesARestart()
+    {
+        // Covers AE6: the header carries the Cloudflare cookie the poll needs; replacing it with a
+        // lone key is what used to kill the account on the next launch.
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-old", cookieHeader: "sessionKey=sk-old; __cf_bm=cf-1"));
+
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-fresh", cookieHeader: null));
+
+        var account = Assert.Single(store.Accounts);
+        Assert.Equal("sk-fresh", account.SessionKey);
+        Assert.Equal("sessionKey=sk-fresh; __cf_bm=cf-1", account.AllCookieHeader);
+
+        // And the live jar carries both, so the very next poll is not a 403.
+        Assert.Equal("sk-fresh", jar.GetCookies(ClaudeUri)["sessionKey"]!.Value);
+        Assert.Equal("cf-1", jar.GetCookies(ClaudeUri)["__cf_bm"]!.Value);
+    }
+
+    [Fact]
+    public void BareKeyPaste_WithNoStoredHeader_LeavesTheHeaderAlone()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-old", cookieHeader: null));
+
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-fresh", cookieHeader: null));
+
+        Assert.Null(Assert.Single(store.Accounts).AllCookieHeader);
+    }
+
+    [Fact]
+    public void FullHeaderPaste_ReplacesTheStoredHeaderOutright()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-old", cookieHeader: "sessionKey=sk-old; __cf_bm=cf-1"));
+
+        store.UpsertAccount(NewAccount("org-A", sessionKey: "sk-new", cookieHeader: "sessionKey=sk-new; __cf_bm=cf-2"));
+
+        Assert.Equal("sessionKey=sk-new; __cf_bm=cf-2", Assert.Single(store.Accounts).AllCookieHeader);
     }
 
     [Fact]

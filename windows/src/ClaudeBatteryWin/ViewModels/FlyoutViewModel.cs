@@ -258,6 +258,7 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     private bool _isAuthenticated;
     private bool _securityDataUnreadable;
     private UsageReading? _latestReading;
+    private string _signInConfirmation = string.Empty;
     private bool _authFailed;
     private int _consecutiveFailures;
     private DateTimeOffset? _lastSuccessfulFetch;
@@ -424,6 +425,25 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
 
     /// The login-error message, non-empty only in <see cref="FlyoutContentState.LoginError"/>.
     public string LoginErrorMessage { get; private set; } = string.Empty;
+
+    /// <summary>
+    /// What the last sign-in repaired, when it repaired more than the account it signed in to (R16).
+    /// Empty the rest of the time, which hides the line.
+    /// </summary>
+    public string SignInConfirmation
+    {
+        get => _signInConfirmation;
+        set
+        {
+            if (_signInConfirmation != value)
+            {
+                _signInConfirmation = value;
+                MaybeRefresh();
+            }
+        }
+    }
+
+    public bool HasSignInConfirmation => _signInConfirmation.Length > 0;
 
     /// <summary>
     /// True while a login is in progress (signing-in / capturing / org-discovery), so the window

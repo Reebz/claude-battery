@@ -120,6 +120,12 @@
                     <TextBlock Style="{StaticResource Caption}"
                                Text="Stuck on the sign-in window? Paste your claude.ai cookie header to sign in manually. This works for every account, including Google and passkey." />
 
+                    <!-- The steps, so a user who has never opened developer tools can still do this.
+                         Ported from the Mac verbatim, with the Windows shortcut in place of the Mac one. -->
+                    <TextBlock x:Name="CookieHeaderHelp"
+                               Style="{StaticResource Caption}"
+                               Margin="0,8,0,0" />
+
                     <PasswordBox x:Name="CookieHeaderBox"
                                  Margin="0,10,0,0"
                                  AutomationProperties.Name="Cookie header" />

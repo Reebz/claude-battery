@@ -585,9 +585,13 @@ public sealed class UsageService : IDisposable
             ["applied_ratio"] = reading.PlanRatio,
         };
 
-    /// <summary>ISO-8601 without fractional seconds, matching the Mac's reset-time format.</summary>
+    /// <summary>
+    /// ISO-8601 in UTC with no fractional seconds, matching the Mac's reset-time format exactly so a
+    /// reader can compare an export from either platform. Note this is a different shape from the
+    /// logger's own timestamp, which does carry fractional seconds.
+    /// </summary>
     private static string? InternetDateTime(DateTimeOffset? value) =>
-        value?.ToString("yyyy-MM-dd'T'HH:mm:ssK", System.Globalization.CultureInfo.InvariantCulture);
+        value?.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture);
 
     private void MarkAuthFailed(int dispatchGeneration, CancellationToken cancellationToken)
     {

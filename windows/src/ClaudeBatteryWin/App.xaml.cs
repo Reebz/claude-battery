@@ -344,10 +344,22 @@ public partial class App : Application
         // attempt; the AuthManager state machine consumes it. The org picker hosts OrgPickerView
         // over the open login window.
         _loginWebViewFactory = new LoginWebViewFactory(WireLoginWindow);
-        var orgPicker = new OrgPicker(() => _loginWebViewFactory.CurrentWindow);
+        var orgPicker = new OrgPicker(
+            () => _loginWebViewFactory.CurrentWindow,
+            // Marks the organizations that already have an account, so the one being added stands
+            // out from the ones being repaired (R25).
+            () => _accountStore?.Accounts.Select(a => a.OrganizationId).ToList() ?? new List<string>());
         _authManager = new AuthManager(_api, _accountStore, _loginWebViewFactory, orgPicker);
         _authManager.OnAuthSuccess = OnAuthSuccess;
         _authManager.OnManualSignInRequested = OpenSettingsAtManualSignIn;
+        // A sign-in that revived other stored organizations says so in the panel (R16).
+        _authManager.OnSignInConfirmation = message =>
+        {
+            if (_flyoutViewModel is not null)
+            {
+                _flyoutViewModel.SignInConfirmation = message;
+            }
+        };
         _authManager.LoginStateChanged += OnLoginStateChanged;
 
         _velopackUpdater = new GitHubVelopackUpdater();

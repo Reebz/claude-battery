@@ -237,12 +237,14 @@ public sealed class ManualSignInTests : IDisposable
     }
 
     [Fact]
-    public void SelectOrg_MultiOrg_ExistingMatch_AutoMatches()
+    public void SelectOrg_MultiOrg_OneStoredOneNot_StillNeedsChoice()
     {
         var existing = new Account { Email = "u@e.com", SessionKey = "sk", OrganizationId = "o2" };
         var selection = AuthManager.SelectOrg(new[] { Org("o1"), Org("o2") }, new[] { existing });
-        Assert.Equal(OrgSelectionKind.AutoMatched, selection.Kind);
-        Assert.Equal("o2", selection.Org!.Uuid); // never blindly orgs[0]
+
+        // Never blindly orgs[0], and never a silent reuse of the one already stored (R17).
+        Assert.Equal(OrgSelectionKind.NeedsChoice, selection.Kind);
+        Assert.Equal(2, selection.Orgs!.Count);
     }
 
     // ---- async router ----

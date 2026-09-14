@@ -38,7 +38,7 @@ public sealed class ManualSignIn
     /// (the Mac <c>pendingManualSignIn</c>). Cleared on every fresh <see cref="SignInAsync"/> so a
     /// stale credential is never retained.
     /// </summary>
-    private (string SessionKey, string? CookieHeader, string Email)? _pending;
+    private (string SessionKey, string? CookieHeader, string Email, IReadOnlyList<Organization> Orgs)? _pending;
 
     public ManualSignIn(IClaudeApi api, AccountStore accountStore)
     {
@@ -198,19 +198,26 @@ public sealed class ManualSignIn
         // ONE org-selection rule, shared with the WebView path (AuthManager.SelectOrg); never blindly
         // orgs[0]. The manual path ignores the carried account id and resolves the account by org id.
         var selection = AuthManager.SelectOrg(orgs, _accountStore.Accounts);
+
+        if (selection.Kind == OrgSelectionKind.AllAlreadyAdded)
+        {
+            // Nothing new to add: this paste is a repair of everything it can reach (R16).
+            return RepairAllStoredOrganizations(selection.Orgs!, parsed.SessionKey, parsed.CookieHeader);
+        }
+
         if (selection.Kind == OrgSelectionKind.NeedsChoice)
         {
             // Stash the pasted credential for the pick and restore the active jar in the meantime, so
             // the active account's poll is undisturbed while the user chooses. CompleteWithChosenOrg
             // re-primes via UpsertAccount + SwitchTo once a choice is made.
-            _pending = (parsed.SessionKey, parsed.CookieHeader, email);
+            _pending = (parsed.SessionKey, parsed.CookieHeader, email, orgs);
             _accountStore.RestoreActiveCookies();
             return ManualSignInResult.NeedsOrgChoice(selection.Orgs!);
         }
 
-        // Single / AutoMatched: AddOrReactivate re-primes the jar to the chosen account on success,
+        // Single organization: AddOrReactivate re-primes the jar to the chosen account on success,
         // so there is nothing to restore here.
-        return AddOrReactivate(selection.Org!, parsed.SessionKey, parsed.CookieHeader, email);
+        return AddOrReactivate(selection.Org!, parsed.SessionKey, parsed.CookieHeader, email, orgs);
     }
 
     /// <summary>
@@ -226,14 +233,69 @@ public sealed class ManualSignIn
         }
 
         _pending = null;
-        return AddOrReactivate(org, ctx.SessionKey, ctx.CookieHeader, ctx.Email);
+        return AddOrReactivate(org, ctx.SessionKey, ctx.CookieHeader, ctx.Email, ctx.Orgs);
     }
 
-    private ManualSignInResult AddOrReactivate(Organization org, string sessionKey, string? cookieHeader, string email)
+    /// <summary>
+    /// Repairs every stored organization this paste can reach, when it offered nothing new to add.
+    ///
+    /// The active account is deliberately left where it is. A paste is a repair, not a request to
+    /// move: the user is looking at one account and must not find themselves on another because they
+    /// fixed a different one (R24).
+    ///
+    /// Which of two things happens next depends on whether the account being viewed was one of the
+    /// repaired ones. If it was, the shared jar already holds its fresh credentials from the last
+    /// write, and polling can restart. If it was not, its own cookies go back into the jar and
+    /// polling stays stopped, because restarting it with credentials that are not its own would just
+    /// fail differently.
+    /// </summary>
+    private ManualSignInResult RepairAllStoredOrganizations(
+        IReadOnlyList<Organization> orgs, string sessionKey, string? cookieHeader)
+    {
+        var toRefresh = AuthManager.MatchedAccounts(orgs, _accountStore.Accounts);
+        if (toRefresh.Count == 0)
+        {
+            _accountStore.RestoreActiveCookies();
+            return ManualSignInResult.AccountLimitReached;
+        }
+
+        var refreshedIds = new List<Guid>();
+        try
+        {
+            foreach (var account in toRefresh)
+            {
+                _accountStore.UpdateSession(account.Id, sessionKey, cookieHeader);
+                var org = orgs.FirstOrDefault(o => o.Uuid == account.OrganizationId);
+                if (org is not null)
+                {
+                    _accountStore.UpdatePlan(account.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
+                }
+                refreshedIds.Add(account.Id);
+            }
+        }
+        catch (AccountPersistenceException)
+        {
+            _accountStore.RestoreActiveCookies();
+            DebugLog("Manual sign-in could not save a repaired account");
+            return ManualSignInResult.SaveFailed;
+        }
+
+        var activeRefreshed = _accountStore.ActiveAccountId is { } activeId && refreshedIds.Contains(activeId);
+        if (!activeRefreshed)
+        {
+            _accountStore.RestoreActiveCookies();
+        }
+
+        DebugLog($"Manual sign-in repaired {refreshedIds.Count} stored organizations");
+        return ManualSignInResult.AlreadySignedInAllOrgs(refreshedIds.Count, activeRefreshed);
+    }
+
+    private ManualSignInResult AddOrReactivate(
+        Organization org, string sessionKey, string? cookieHeader, string email, IReadOnlyList<Organization> orgs)
     {
         // UpsertAccount adds a new account OR updates an existing org in place (the corrected Mac
         // re-auth path); it primes the jar + bumps the generation when the account becomes/stays
-        // active. A false return means a genuinely new account would exceed the 5-account cap; an
+        // active. A false return means a genuinely new account would exceed the account cap; an
         // AccountPersistenceException means the secret blob could not be written (nothing changed).
         var account = new Account
         {
@@ -250,6 +312,7 @@ public sealed class ManualSignIn
         };
 
         Account resolved;
+        var repaired = 0;
         try
         {
             if (!_accountStore.UpsertAccount(account))
@@ -268,6 +331,21 @@ public sealed class ManualSignIn
             // sign-in window does (R9, R56).
             _accountStore.UpdatePlan(resolved.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
 
+            // The same credentials revive every other stored organization they can reach, before the
+            // switch below, so the switch stays the last thing to touch the jar (R16).
+            foreach (var sibling in AuthManager.MatchedAccounts(orgs, _accountStore.Accounts)
+                         .Where(a => a.OrganizationId != org.Uuid)
+                         .ToList())
+            {
+                _accountStore.UpdateSession(sibling.Id, sessionKey, cookieHeader);
+                var siblingOrg = orgs.FirstOrDefault(o => o.Uuid == sibling.OrganizationId);
+                if (siblingOrg is not null)
+                {
+                    _accountStore.UpdatePlan(sibling.Id, siblingOrg.RateLimitTier, siblingOrg.Capabilities, siblingOrg.BillingType);
+                }
+                repaired++;
+            }
+
             if (resolved.Id != _accountStore.ActiveAccountId)
             {
                 _accountStore.SwitchTo(resolved.Id);
@@ -285,7 +363,7 @@ public sealed class ManualSignIn
         }
 
         DebugLog("Manual sign-in added/reactivated an account");
-        return ManualSignInResult.Success(resolved.DisplayName);
+        return ManualSignInResult.Success(resolved.DisplayName, repaired);
     }
 
     // Email extraction is the shared AuthManager.ExtractEmail (called above); the previously
@@ -327,6 +405,12 @@ public sealed record ManualSignInResult
         /// prior active account's cookies are restored. Windows-only (the Mac Keychain path has no
         /// equivalent edge).
         SaveFailed,
+
+        /// <summary>
+        /// Every organization this paste can reach was already stored, so nothing was added and all
+        /// of them were repaired instead (R16, R24).
+        /// </summary>
+        AlreadySignedInAllOrgs,
     }
 
     public ResultKind Kind { get; private init; }
@@ -342,8 +426,26 @@ public sealed record ManualSignInResult
     /// the full Cookie header. Mirrors the Mac <c>authFailed(suggestFullHeader:)</c>.
     public bool SuggestFullHeader { get; private init; }
 
-    public static ManualSignInResult Success(string displayName) =>
-        new() { Kind = ResultKind.Success, DisplayName = displayName };
+    /// <summary>How many stored organizations this paste revived.</summary>
+    public int RefreshedCount { get; private init; }
+
+    /// <summary>
+    /// Whether the account the user is currently viewing was one of the ones repaired. False means
+    /// the paste fixed other organizations but left the visible one still expired, which is a
+    /// different message and a different next step for the user.
+    /// </summary>
+    public bool ActiveAccountRefreshed { get; private init; }
+
+    public static ManualSignInResult Success(string displayName, int refreshedCount = 0) =>
+        new() { Kind = ResultKind.Success, DisplayName = displayName, RefreshedCount = refreshedCount };
+
+    public static ManualSignInResult AlreadySignedInAllOrgs(int refreshedCount, bool activeAccountRefreshed) =>
+        new()
+        {
+            Kind = ResultKind.AlreadySignedInAllOrgs,
+            RefreshedCount = refreshedCount,
+            ActiveAccountRefreshed = activeAccountRefreshed,
+        };
 
     public static ManualSignInResult NeedsOrgChoice(IReadOnlyList<Organization> orgs) =>
         new() { Kind = ResultKind.NeedsOrgChoice, Orgs = orgs };

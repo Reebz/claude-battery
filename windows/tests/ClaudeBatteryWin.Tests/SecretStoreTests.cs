@@ -192,4 +192,23 @@ public sealed class SecretStoreTests : IDisposable
         Assert.NotNull(ex.InnerException);
         Assert.True(ex.InnerException is IOException or UnauthorizedAccessException);
     }
+
+    [Fact]
+    public void Delete_AlsoRemovesALeftoverTempBlob()
+    {
+        // A failed move leaves a decryptable copy of the credentials beside the real blob. Nothing
+        // reads it, so removing the account has to take it too (U6).
+        var store = new SecretStore(_dir);
+        var id = Guid.NewGuid();
+        store.Save(id, new AccountSecret { SessionKey = "sk-1", AllCookieHeader = "sessionKey=sk-1" });
+
+        var temp = Directory.GetFiles(_dir).Single() + ".tmp";
+        File.WriteAllBytes(temp, new byte[] { 1, 2, 3 });
+        Assert.True(File.Exists(temp));
+
+        store.Delete(id);
+
+        Assert.False(File.Exists(temp));
+        Assert.Empty(Directory.GetFiles(_dir));
+    }
 }

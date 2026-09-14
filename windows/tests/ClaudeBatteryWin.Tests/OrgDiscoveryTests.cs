@@ -81,13 +81,30 @@ public sealed class OrgDiscoveryTests : IDisposable
     }
 
     [Fact]
-    public void SelectOrg_MultiOrg_ExistingAccountMatch_AutoMatches()
+    public void SelectOrg_MultiOrg_OneStoredOneNot_StillNeedsChoice()
     {
+        // Covers R17: silently reusing the stored organization is exactly what made a second
+        // organization of the same login impossible to add.
         var existing = new Account { Email = "e@x.com", SessionKey = "old", OrganizationId = "b" };
         var result = AuthManager.SelectOrg(new[] { Org("a"), Org("b") }, new[] { existing });
-        Assert.Equal(OrgSelectionKind.AutoMatched, result.Kind);
-        Assert.Equal("b", result.Org!.Uuid);
-        Assert.Equal(existing.Id, result.AccountId);
+
+        Assert.Equal(OrgSelectionKind.NeedsChoice, result.Kind);
+        Assert.Equal(new[] { "a", "b" }, result.Orgs!.Select(o => o.Uuid).ToArray());
+    }
+
+    [Fact]
+    public void SelectOrg_MultiOrg_AllStored_IsARepair()
+    {
+        var accounts = new[]
+        {
+            new Account { Email = "e@x.com", SessionKey = "old", OrganizationId = "a" },
+            new Account { Email = "e@x.com", SessionKey = "old", OrganizationId = "b" },
+        };
+
+        var result = AuthManager.SelectOrg(new[] { Org("a"), Org("b") }, accounts);
+
+        Assert.Equal(OrgSelectionKind.AllAlreadyAdded, result.Kind);
+        Assert.Equal(new[] { "a", "b" }, result.Orgs!.Select(o => o.Uuid).ToArray()); // order preserved
     }
 
     // ---- single org auto-selects, no picker ----------------------------------------------------

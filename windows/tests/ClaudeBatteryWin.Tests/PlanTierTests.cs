@@ -343,13 +343,18 @@ public sealed class PlanTierTests : IDisposable
     [Fact]
     public void AccountsFileWrittenBeforeThisRelease_LoadsWithNulls()
     {
-        Directory.CreateDirectory(_root);
-        File.WriteAllText(MetadataPath, """
+        // Store an account normally so its encrypted blob exists, then replace the metadata file
+        // with the shape an older build wrote: none of the plan fields, none of the measurement.
+        var store = NewStore();
+        store.UpsertAccount(SeedAccount(org: "org-old", tier: "default_claude_pro", measurement: Measurement()));
+        var id = store.Accounts[0].Id;
+
+        File.WriteAllText(MetadataPath, $$"""
             {
-              "ActiveAccountId": "11111111-1111-1111-1111-111111111111",
+              "ActiveAccountId": "{{id}}",
               "Accounts": [
                 {
-                  "Id": "11111111-1111-1111-1111-111111111111",
+                  "Id": "{{id}}",
                   "Email": "old@example.com",
                   "SessionKey": "",
                   "OrganizationId": "org-old",

@@ -16,12 +16,12 @@ public partial class OrgPickerView : Window
     /// The org the user chose, or null if the picker was cancelled.
     public Organization? SelectedOrg { get; private set; }
 
-    public OrgPickerView(IReadOnlyList<Organization> orgs)
+    public OrgPickerView(IReadOnlyList<Organization> orgs, IReadOnlyCollection<string>? storedOrgIds = null)
     {
         _orgs = orgs;
         InitializeComponent();
 
-        foreach (var label in BuildDisambiguatedLabels(orgs))
+        foreach (var label in BuildDisambiguatedLabels(orgs, storedOrgIds))
         {
             OrgCombo.Items.Add(label);
         }
@@ -37,8 +37,17 @@ public partial class OrgPickerView : Window
     /// "Organization N" by position; two real orgs sharing a display name get a "(2)", "(3)" suffix
     /// by order of appearance. Pure + static so it is unit-testable without a window.
     /// </summary>
-    public static IReadOnlyList<string> BuildDisambiguatedLabels(IReadOnlyList<Organization> orgs)
+    /// <param name="storedOrgIds">
+    /// Organizations that already have an account. Those rows are marked, so a user adding a second
+    /// organization of the same login can see at a glance which one is the new one. The marking is a
+    /// label only: an already-stored row is still pickable, and picking it repairs that account.
+    /// </param>
+    public static IReadOnlyList<string> BuildDisambiguatedLabels(
+        IReadOnlyList<Organization> orgs, IReadOnlyCollection<string>? storedOrgIds = null)
     {
+        var stored = storedOrgIds is null
+            ? new HashSet<string>(StringComparer.Ordinal)
+            : new HashSet<string>(storedOrgIds, StringComparer.Ordinal);
         var labels = new List<string>(orgs.Count);
         for (var index = 0; index < orgs.Count; index++)
         {
@@ -64,6 +73,11 @@ public partial class OrgPickerView : Window
                 {
                     title = $"{title} ({duplicateCount + 1})";
                 }
+            }
+
+            if (stored.Contains(org.Uuid))
+            {
+                title += " (already added)";
             }
 
             labels.Add(title);
@@ -97,20 +111,26 @@ public partial class OrgPickerView : Window
 public sealed class OrgPicker : IOrgPicker
 {
     private readonly Func<Window?> _ownerProvider;
+    private readonly Func<IReadOnlyCollection<string>>? _storedOrgIds;
     private OrgPickerView? _open;
 
     /// <param name="ownerProvider">
     /// Returns the window to center the picker over (the login window). May return null; the picker
     /// then centers on screen.
     /// </param>
-    public OrgPicker(Func<Window?> ownerProvider)
+    /// <param name="storedOrgIds">
+    /// Reads which organizations already have an account, so the picker can mark those rows (R25).
+    /// Optional; without it nothing is marked.
+    /// </param>
+    public OrgPicker(Func<Window?> ownerProvider, Func<IReadOnlyCollection<string>>? storedOrgIds = null)
     {
         _ownerProvider = ownerProvider ?? throw new ArgumentNullException(nameof(ownerProvider));
+        _storedOrgIds = storedOrgIds;
     }
 
     public Task<Organization?> PickAsync(IReadOnlyList<Organization> orgs, CancellationToken cancellationToken)
     {
-        var view = new OrgPickerView(orgs);
+        var view = new OrgPickerView(orgs, _storedOrgIds?.Invoke());
         if (_ownerProvider() is { } owner)
         {
             view.Owner = owner;

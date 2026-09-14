@@ -108,6 +108,12 @@ public sealed class AuthManager
     public Action? OnManualSignInRequested { get; set; }
 
     /// <summary>
+    /// Raised with a sentence to show the user after a sign-in that repaired more than the account
+    /// it signed in to (R16, R25). Null on a plain re-authentication, which has nothing to report.
+    /// </summary>
+    public Action<string>? OnSignInConfirmation { get; set; }
+
+    /// <summary>
     /// The WebView2 session User-Agent, read from <c>CoreWebView2.Settings.UserAgent</c> after the
     /// first <c>NavigationCompleted</c> and asserted non-empty. Handed to U3's <see cref="ClaudeApi"/>
     /// so the outbound poll UA equals the login session UA verbatim (necessary, not sufficient, for
@@ -354,17 +360,142 @@ public sealed class AuthManager
             return OrgSelection.Single(orgs[0]);
         }
 
-        foreach (var account in accounts)
+        var unadded = orgs.Where(o => accounts.All(a => a.OrganizationId != o.Uuid)).ToList();
+
+        // Nothing left to choose: every organization in the response is already stored, so this
+        // sign-in is a repair of all of them.
+        if (unadded.Count == 0)
         {
-            var match = orgs.FirstOrDefault(o => o.Uuid == account.OrganizationId);
-            if (match is not null)
+            return OrgSelection.AllAlreadyAdded(orgs);
+        }
+
+        // Deliberately no silent match on an organization that is already stored, even when only one
+        // of several is: reusing it is exactly what made a second organization of the same login
+        // impossible to add (R17).
+        return OrgSelection.NeedsChoice(orgs);
+    }
+
+    /// <summary>
+    /// Revive every other stored organization that this login can reach, and return how many were
+    /// touched (R16). The organization just signed in to is written by the caller, so it is excluded.
+    /// </summary>
+    private int RefreshSiblings(IReadOnlyList<Organization> orgs, string chosenOrgId, string sessionKey)
+    {
+        var siblings = MatchedAccounts(orgs, _accountStore.Accounts)
+            .Where(a => a.OrganizationId != chosenOrgId)
+            .ToList();
+
+        foreach (var sibling in siblings)
+        {
+            _accountStore.UpdateSession(sibling.Id, sessionKey, _pendingCookieHeader);
+            var org = orgs.FirstOrDefault(o => o.Uuid == sibling.OrganizationId);
+            if (org is not null)
             {
-                return OrgSelection.AutoMatched(match, account.Id);
+                _accountStore.UpdatePlan(sibling.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
             }
         }
 
-        return OrgSelection.NeedsChoice(orgs);
+        return siblings.Count;
     }
+
+    /// <summary>
+    /// Repairs every stored organization this login covers, when the response offered nothing new to
+    /// add. The switch runs last, after all the writes, so it stays the only thing that re-primes the
+    /// live cookie jar.
+    /// </summary>
+    private void RepairAllStoredOrganizations(IReadOnlyList<Organization> orgs, string sessionKey)
+    {
+        var target = MatchedAccount(orgs);
+        if (target is null)
+        {
+            HandleOrgDiscoveryFailure("Account limit reached.");
+            return;
+        }
+
+        var repaired = MatchedAccounts(orgs, _accountStore.Accounts);
+        foreach (var account in repaired)
+        {
+            _accountStore.UpdateSession(account.Id, sessionKey, _pendingCookieHeader);
+            var org = orgs.FirstOrDefault(o => o.Uuid == account.OrganizationId);
+            if (org is not null)
+            {
+                _accountStore.UpdatePlan(account.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
+            }
+        }
+
+        if (target.Id != _accountStore.ActiveAccountId)
+        {
+            _accountStore.SwitchTo(target.Id);
+        }
+
+        ReportRepair(repaired.Count - 1, signedInOrgRepaired: true);
+
+        _pendingSessionKey = null;
+        _pendingCookieHeader = null;
+        LoginState = LoginState.Active;
+        StopLoginWindow();
+        OnAuthSuccess?.Invoke();
+    }
+
+    /// <summary>
+    /// Tells the user how many organizations a sign-in revived, but only when it revived one other
+    /// than the organization signed in to. A plain re-authentication of a single account has nothing
+    /// worth saying.
+    /// </summary>
+    private void ReportRepair(int siblingsRepaired, bool signedInOrgRepaired)
+    {
+        if (siblingsRepaired < 1)
+        {
+            return;
+        }
+
+        var count = siblingsRepaired + (signedInOrgRepaired ? 1 : 0);
+        OnSignInConfirmation?.Invoke(RepairConfirmation(count, viewedAccountRepaired: true));
+    }
+
+    /// <summary>
+    /// Every stored account whose organization appears in this response, in stored order. This is
+    /// the repair set: one sign-in refreshes all of them (R16).
+    /// </summary>
+    public static IReadOnlyList<Account> MatchedAccounts(
+        IReadOnlyList<Organization> orgs, IReadOnlyList<Account> accounts)
+    {
+        var ids = orgs.Select(o => o.Uuid).ToHashSet(StringComparer.Ordinal);
+        return accounts.Where(a => ids.Contains(a.OrganizationId)).ToList();
+    }
+
+    /// <summary>
+    /// Which of the repaired accounts to end up on. The active account wins when its organization is
+    /// in the response: only the active account's write re-primes the live cookie jar, so switching
+    /// anywhere else would leave the session that is actually polling on stale cookies.
+    /// </summary>
+    private Account? MatchedAccount(IReadOnlyList<Organization> orgs)
+    {
+        var ids = orgs.Select(o => o.Uuid).ToHashSet(StringComparer.Ordinal);
+        var active = _accountStore.ActiveAccount;
+        if (active is not null && ids.Contains(active.OrganizationId))
+        {
+            return active;
+        }
+        return _accountStore.Accounts.FirstOrDefault(a => ids.Contains(a.OrganizationId));
+    }
+
+    /// <summary>
+    /// What the user is told after a sign-in that repaired stored organizations (R16, R25).
+    /// </summary>
+    public static string RepairConfirmation(int refreshedCount, bool viewedAccountRepaired)
+    {
+        var label = refreshedCount == 1 ? "1 organization" : $"{refreshedCount} organizations";
+        return viewedAccountRepaired
+            ? $"Refreshed {label}."
+            : $"Refreshed {label}, but not the one you're viewing - switch to a refreshed one, or paste that account's cookie header.";
+    }
+
+    /// <summary>What a manual paste reports on success.</summary>
+    public static string SignInConfirmation(string name, int refreshedCount) =>
+        refreshedCount <= 0
+            ? $"Signed in as {name}."
+            : $"Signed in as {name}. " + RepairConfirmation(refreshedCount, viewedAccountRepaired: true);
 
     // ============================================================================================
     // Login lifecycle (U6).
@@ -786,10 +917,11 @@ public sealed class AuthManager
                     chosenOrg = single.Org!;
                     break;
 
-                case { Kind: OrgSelectionKind.AutoMatched } matched:
-                    chosenOrg = matched.Org!;
-                    DebugLog($"Re-auth auto-selected org for account {matched.AccountId:N}");
-                    break;
+                case { Kind: OrgSelectionKind.AllAlreadyAdded } all:
+                    // Every organization in the response is already stored, so there is nothing to
+                    // choose: this sign-in repairs all of them at once (R16, F2).
+                    RepairAllStoredOrganizations(all.Orgs!, sessionKey);
+                    return;
 
                 case { Kind: OrgSelectionKind.NeedsChoice } choice:
                 {
@@ -854,8 +986,13 @@ public sealed class AuthManager
                 PlanUpdatedAt = DateTimeOffset.UtcNow,
             };
 
-            // UpsertAccount returns false ONLY when a genuinely new account would exceed the 5-account
-            // limit; a duplicate org id updates the existing account in place (re-auth, no lockout).
+            // Whether this organization already had an account decides whether it counts as repaired
+            // in the confirmation below: a brand-new add is not a repair.
+            var existedBefore = _accountStore.Accounts.Any(a => a.OrganizationId == chosenOrg.Uuid);
+
+            // UpsertAccount returns false ONLY when a genuinely new account would exceed the account
+            // limit; a duplicate org id updates the existing account in place (re-auth, no lockout),
+            // so repairing an account at the limit always succeeds (R58).
             // A secret-blob write failure throws AccountPersistenceException (caught below) with
             // nothing changed in the store.
             if (!_accountStore.UpsertAccount(account))
@@ -878,10 +1015,17 @@ public sealed class AuthManager
                 // on the old plan (R9, R56).
                 _accountStore.UpdatePlan(owning.Id, chosenOrg.RateLimitTier, chosenOrg.Capabilities, chosenOrg.BillingType);
             }
+
+            // Every OTHER stored organization under this login is revived by the same credentials.
+            // Done before the switch below, so the switch stays the last thing to touch the jar.
+            var siblings = RefreshSiblings(orgs, chosenOrg.Uuid, sessionKey);
+
             if (owning is not null && owning.Id != _accountStore.ActiveAccountId)
             {
                 _accountStore.SwitchTo(owning.Id);
             }
+
+            ReportRepair(siblings, signedInOrgRepaired: existedBefore);
 
             // Success: clear pending state, close the window, notify.
             _pendingSessionKey = null;
@@ -958,7 +1102,11 @@ public sealed class AuthManager
 public enum OrgSelectionKind
 {
     Single,
-    AutoMatched,
+
+    /// <summary>Every organization in the response already has a stored account: there is nothing to
+    /// choose, only accounts to repair.</summary>
+    AllAlreadyAdded,
+
     NeedsChoice
 }
 
@@ -967,24 +1115,21 @@ public sealed record OrgSelection
 {
     public OrgSelectionKind Kind { get; private init; }
 
-    /// Non-null for <see cref="OrgSelectionKind.Single"/> and <see cref="OrgSelectionKind.AutoMatched"/>.
+    /// Non-null for <see cref="OrgSelectionKind.Single"/>.
     public Organization? Org { get; private init; }
 
-    /// Set only for <see cref="OrgSelectionKind.AutoMatched"/>: the existing account to re-auth.
-    public Guid AccountId { get; private init; }
-
-    /// Non-null for <see cref="OrgSelectionKind.NeedsChoice"/>: the orgs to present in the picker.
-    /// Both the WebView and manual-paste call sites read this directly (the prior <c>Choices</c> alias
-    /// was removed in issue #22).
+    /// <summary>
+    /// The organizations from the response, in the order they arrived. Set for
+    /// <see cref="OrgSelectionKind.NeedsChoice"/> (what to show in the picker) and for
+    /// <see cref="OrgSelectionKind.AllAlreadyAdded"/> (what to repair).
+    /// </summary>
     public IReadOnlyList<Organization>? Orgs { get; private init; }
 
     public static OrgSelection Single(Organization org) =>
         new() { Kind = OrgSelectionKind.Single, Org = org };
 
-    /// <param name="accountId">The existing account to re-auth (WebView path); the manual-paste path
-    /// has no account id to carry, so it defaults.</param>
-    public static OrgSelection AutoMatched(Organization org, Guid accountId = default) =>
-        new() { Kind = OrgSelectionKind.AutoMatched, Org = org, AccountId = accountId };
+    public static OrgSelection AllAlreadyAdded(IReadOnlyList<Organization> orgs) =>
+        new() { Kind = OrgSelectionKind.AllAlreadyAdded, Orgs = orgs };
 
     public static OrgSelection NeedsChoice(IReadOnlyList<Organization> orgs) =>
         new() { Kind = OrgSelectionKind.NeedsChoice, Orgs = orgs };
