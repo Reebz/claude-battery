@@ -305,45 +305,59 @@ public class IconRenderTests
     [Fact]
     public void Render_TopBarFillRun_GrowsWithSessionRemaining()
     {
-        // At 32 px the session bar is the top bar; count the fill pixels (opaque, not the white
-        // outline/nub) along its middle row. 75% remaining must paint a longer run than 25%.
+        // At 32 px the session bar is the top bar; count the painted pixels along its middle row.
+        // Counted by opacity rather than by colour: since the Mac tray rule landed, the fill is the
+        // same tint as the outline above twenty percent, so a colour test would see nothing.
         const int size = 32;
-        int run25 = TopBarFillRun(Snapshot(session: 25, weekly: 50), size);
-        int run75 = TopBarFillRun(Snapshot(session: 75, weekly: 50), size);
+        int run0 = TopBarPaintedRun(Snapshot(session: 0, weekly: 50), size);
+        int run25 = TopBarPaintedRun(Snapshot(session: 25, weekly: 50), size);
+        int run75 = TopBarPaintedRun(Snapshot(session: 75, weekly: 50), size);
 
-        Assert.True(run25 > 0, $"25% painted no fill pixels (run {run25})");
+        Assert.True(run25 > run0, $"25% ({run25}) painted no more than an empty bar ({run0})");
         Assert.True(run75 > run25, $"75% run ({run75}) is not longer than 25% run ({run25})");
     }
 
     [Fact]
     public void Render_ZeroRemaining_PaintsNoFillOnTopBar()
     {
-        Assert.Equal(0, TopBarFillRun(Snapshot(session: 0, weekly: 0), 32));
+        // Halfway along the bar is inside the interior, well clear of the outline and the nub, so a
+        // painted pixel there can only be fill.
+        Assert.False(TopBarMidpointIsPainted(Snapshot(session: 0, weekly: 0), 32));
+        Assert.True(TopBarMidpointIsPainted(Snapshot(session: 75, weekly: 0), 32));
     }
 
-    private static int TopBarFillRun(UsageSnapshot usage, int size)
+    private static Bitmap RenderTopBar(UsageSnapshot usage, int size)
     {
         using var renderer = new StackedBarsRenderer(); // fresh: the signature cache must not suppress
-        using Bitmap? bitmap = renderer.Render(new TrayRenderState.Battery(usage), ThemeBucket.Dark, "", size);
+        Bitmap? bitmap = renderer.Render(new TrayRenderState.Battery(usage), ThemeBucket.Dark, "", size);
         Assert.NotNull(bitmap);
+        return bitmap!;
+    }
 
-        // Top bar: y = round(0.08 * size), height = round(0.36 * size); sample its middle row.
-        int barTop = (int)Math.Round(size * 0.08);
-        int barHeight = (int)Math.Round(size * 0.36);
-        int row = barTop + barHeight / 2;
+    /// <summary>The middle row of the top bar: y = round(0.08 * size) + round(0.36 * size) / 2.</summary>
+    private static int TopBarRow(int size) =>
+        (int)Math.Round(size * 0.08) + (int)Math.Round(size * 0.36) / 2;
 
-        int fill = 0;
+    private static int TopBarPaintedRun(UsageSnapshot usage, int size)
+    {
+        using Bitmap bitmap = RenderTopBar(usage, size);
+        int row = TopBarRow(size);
+
+        int painted = 0;
         for (int x = 0; x < size; x++)
         {
-            Color px = bitmap!.GetPixel(x, row);
-            bool opaque = px.A > 127;
-            bool baseWhite = px.R > 200 && px.G > 200 && px.B > 200; // the dark-taskbar outline/nub
-            if (opaque && !baseWhite)
+            if (bitmap.GetPixel(x, row).A > 127)
             {
-                fill++;
+                painted++;
             }
         }
-        return fill;
+        return painted;
+    }
+
+    private static bool TopBarMidpointIsPainted(UsageSnapshot usage, int size)
+    {
+        using Bitmap bitmap = RenderTopBar(usage, size);
+        return bitmap.GetPixel(size / 2, TopBarRow(size)).A > 127;
     }
 
     // --- Icon artifacts for CI (the developer has no Windows box; this is how the icon is seen) ---

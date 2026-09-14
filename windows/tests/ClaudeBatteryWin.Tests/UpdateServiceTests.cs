@@ -375,14 +375,10 @@ public class UpdateServiceTests
     {
         // The updater hangs; only our own timeout ends it. The row has to say something.
         var updater = new HangingUpdater();
-        var service = new UpdateService(updater, new FakeTeardown(new FakeUpdater()));
+        var service = new UpdateService(
+            updater, new FakeTeardown(new FakeUpdater()), checkTimeout: TimeSpan.FromMilliseconds(50));
 
-        using var cts = new CancellationTokenSource();
-        var check = service.CheckForUpdatesAsync(cts.Token);
-        updater.Started.Wait(TimeSpan.FromSeconds(5));
-        updater.TimeRanOut(); // stand in for UpdateService.CheckTimeout elapsing
-
-        var result = await check;
+        var result = await service.CheckForUpdatesAsync();
 
         Assert.Null(result);
         Assert.True(service.LastCheckFailed);
@@ -392,28 +388,19 @@ public class UpdateServiceTests
     }
 
     [Fact]
-    public void TheCheckIsBoundedAtAMinute() => Assert.Equal(TimeSpan.FromMinutes(1), UpdateService.CheckTimeout);
+    public void TheCheckIsBoundedAtAMinuteInProduction() =>
+        Assert.Equal(TimeSpan.FromMinutes(1), UpdateService.CheckTimeout);
 
-    /// <summary>An updater whose check only ends when the linked token is cancelled.</summary>
+    /// <summary>An updater whose check never returns on its own: only the token ends it.</summary>
     private sealed class HangingUpdater : IVelopackUpdater
     {
-        private readonly TaskCompletionSource<VelopackUpdateInfo?> _never = new();
-        private CancellationToken _token;
-
-        public readonly ManualResetEventSlim Started = new(false);
-
         public bool IsInstalled => true;
 
-        public Task<VelopackUpdateInfo?> CheckForUpdatesAsync(CancellationToken cancellationToken)
+        public async Task<VelopackUpdateInfo?> CheckForUpdatesAsync(CancellationToken cancellationToken)
         {
-            _token = cancellationToken;
-            cancellationToken.Register(() => _never.TrySetCanceled(cancellationToken));
-            Started.Set();
-            return _never.Task;
+            await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+            return null;
         }
-
-        /// <summary>Cancel the token the service linked to its timeout, as the timeout itself would.</summary>
-        public void TimeRanOut() => _never.TrySetCanceled(_token);
 
         public Task DownloadUpdatesAsync(VelopackUpdateInfo update, CancellationToken cancellationToken) =>
             Task.CompletedTask;

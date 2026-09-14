@@ -13,6 +13,7 @@ namespace ClaudeBatteryWin.Tests;
 /// with no real WebView2. These encode documented Mac regressions (the capture-guard lockout and the
 /// SPA-late-cookie capture) and are written test-first per the unit's execution note.
 /// </summary>
+[Collection(DiagnosticsSharedLogger.Name)]
 public sealed class AuthManagerTests : IDisposable
 {
     private readonly string _root;

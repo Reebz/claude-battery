@@ -59,10 +59,15 @@ public sealed class UpdateService
     /// <summary>How long a single check may take before it counts as failed (R47).</summary>
     public static readonly TimeSpan CheckTimeout = TimeSpan.FromMinutes(1);
 
-    public UpdateService(IVelopackUpdater updater, IUpdateTeardown teardown)
+    private readonly TimeSpan _checkTimeout;
+
+    /// <param name="checkTimeout">How long one check may run. Only the tests pass this; production
+    /// takes <see cref="CheckTimeout"/>.</param>
+    public UpdateService(IVelopackUpdater updater, IUpdateTeardown teardown, TimeSpan? checkTimeout = null)
     {
         _updater = updater;
         _teardown = teardown;
+        _checkTimeout = checkTimeout ?? CheckTimeout;
     }
 
     /// <summary>
@@ -88,7 +93,7 @@ public sealed class UpdateService
         // A check that never answers would leave the About row reading "Checking for updates..."
         // for the life of the process (R47). Bound it, and treat running out of time as a failed
         // check, which the row already has words for.
-        using var timeout = new CancellationTokenSource(CheckTimeout);
+        using var timeout = new CancellationTokenSource(_checkTimeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeout.Token);
 
         try
@@ -109,9 +114,11 @@ public sealed class UpdateService
             LastCheckFailed = false;
             return info;
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException)
+            when (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
         {
-            // Our own timeout, not the caller's: a slow check reads as a failed one.
+            // Our own timeout, not the caller's and not one the updater raised itself: a slow check
+            // reads as a failed one.
             LastCheckFailed = true;
             return null;
         }

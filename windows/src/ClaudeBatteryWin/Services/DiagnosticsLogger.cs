@@ -72,8 +72,10 @@ public sealed class DiagnosticsLogger : IDiagnosticsLogger, IDisposable
     /// <summary>The app-wide instance. Producers that are not constructor-injected use this.</summary>
     public static IDiagnosticsLogger Shared { get; private set; } = new DiagnosticsLogger(settings: null);
 
-    /// <summary>Called once from the composition root, after settings exist.</summary>
-    public static void SetShared(IDiagnosticsLogger logger) => Shared = logger;
+    /// <summary>Called once from the composition root, after settings exist. Null restores the
+    /// inert default, which is what a test wants when it is done with its own logger.</summary>
+    public static void SetShared(IDiagnosticsLogger? logger) =>
+        Shared = logger ?? new DiagnosticsLogger(settings: null);
 
     public string? CurrentSessionFilePath
     {

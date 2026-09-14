@@ -14,6 +14,7 @@ namespace ClaudeBatteryWin.Tests;
 /// provider saw the page stop, with no message, no explanation, and no reason to think the manual
 /// paste under Settings would work.
 /// </summary>
+[Collection(DiagnosticsSharedLogger.Name)]
 public sealed class BlockedNavigationTests : IDisposable
 {
     private readonly string _root;
@@ -27,6 +28,9 @@ public sealed class BlockedNavigationTests : IDisposable
 
     public void Dispose()
     {
+        // Leave no test-owned logger installed as the app-wide one: a later test that emits a
+        // milestone would write into a directory this test has already deleted.
+        DiagnosticsLogger.SetShared(null);
         try
         {
             if (Directory.Exists(_root))
