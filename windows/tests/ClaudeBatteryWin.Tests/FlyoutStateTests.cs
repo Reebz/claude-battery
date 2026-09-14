@@ -689,11 +689,14 @@ public class FlyoutStateTests
     {
         // Every fill is a fraction of its track's ActualWidth (PercentOfWidth MultiBinding); a literal
         // track width drifts from the layout and overstates the bar.
+        //
+        // The pace bar this test also used to pin is gone: U11 replaced it with the two-ring dial and
+        // a pace word underneath, so there is no PaceTrack left to measure against.
         var xaml = File.ReadAllText(Path.Combine(FindSourceDir(), "Views", "FlyoutWindow.xaml"));
         Assert.DoesNotContain("ConverterParameter=110", xaml, StringComparison.Ordinal);
         Assert.DoesNotContain("ConverterParameter=120", xaml, StringComparison.Ordinal);
         Assert.DoesNotContain("ConverterParameter=270", xaml, StringComparison.Ordinal);
-        Assert.Contains("ElementName=\"PaceTrack\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ElementName=\"PaceTrack\"", xaml, StringComparison.Ordinal);
         Assert.Contains("ElementName=\"ModelTrack\"", xaml, StringComparison.Ordinal);
         Assert.Contains("ElementName=\"SpendTrack\"", xaml, StringComparison.Ordinal);
     }
