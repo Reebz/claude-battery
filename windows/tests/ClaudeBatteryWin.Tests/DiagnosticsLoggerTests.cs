@@ -38,11 +38,25 @@ public class DiagnosticsLoggerTests : IDisposable
     private static Func<IDictionary<string, object?>> Payload(params (string Key, object? Value)[] pairs) =>
         () => pairs.ToDictionary(p => p.Key, p => p.Value);
 
+    /// <summary>
+    /// Reads a log file the logger still has open for append. Windows refuses the plain read helpers
+    /// against a file another handle is writing, so the share flags have to say so explicitly.
+    /// </summary>
+    private static string ReadWhileOpen(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    private static string[] LinesOf(string path) =>
+        ReadWhileOpen(path).Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
     private string[] Lines()
     {
         var files = Directory.GetFiles(_dir, "diag-*.jsonl");
         Assert.Single(files);
-        return File.ReadAllLines(files[0]);
+        return LinesOf(files[0]);
     }
 
     private static JsonNode Parse(string line) => JsonNode.Parse(line)!;
@@ -130,7 +144,7 @@ public class DiagnosticsLoggerTests : IDisposable
         second.EmitMilestone("second-launch", Payload(("x", 2)));
 
         Assert.NotEqual(first.CurrentSessionFilePath, second.CurrentSessionFilePath);
-        Assert.DoesNotContain("first-launch", File.ReadAllText(second.CurrentSessionFilePath!), StringComparison.Ordinal);
+        Assert.DoesNotContain("first-launch", ReadWhileOpen(second.CurrentSessionFilePath!), StringComparison.Ordinal);
         Assert.Equal(2, LogsExporter.EligibleLogFiles(_dir, DateTimeOffset.MinValue).Count);
     }
 
@@ -144,7 +158,7 @@ public class DiagnosticsLoggerTests : IDisposable
             ("note", "account for victim@example.com"),
             ("__cf_bm", "cfbmRAWVALUE")));
 
-        var text = File.ReadAllText(Directory.GetFiles(_dir, "diag-*.jsonl")[0]);
+        var text = ReadWhileOpen(Directory.GetFiles(_dir, "diag-*.jsonl")[0]);
         Assert.DoesNotContain("sk-ant-LOGGERSECRET", text, StringComparison.Ordinal);
         Assert.DoesNotContain("victim@example.com", text, StringComparison.Ordinal);
         Assert.DoesNotContain("cfbmRAWVALUE", text, StringComparison.Ordinal);
@@ -157,7 +171,7 @@ public class DiagnosticsLoggerTests : IDisposable
         EnabledLogger().EmitMilestone("io-failed", Payload(
             ("message", "Could not find C:\\Users\\someone\\AppData\\Local\\ClaudeBatteryWin\\x.json")));
 
-        var text = File.ReadAllText(Directory.GetFiles(_dir, "diag-*.jsonl")[0]);
+        var text = ReadWhileOpen(Directory.GetFiles(_dir, "diag-*.jsonl")[0]);
         Assert.DoesNotContain("someone", text, StringComparison.Ordinal);
         Assert.Contains("[USER]", text, StringComparison.Ordinal);
     }

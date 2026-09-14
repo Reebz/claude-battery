@@ -2,8 +2,9 @@ namespace ClaudeBatteryWin.Models;
 
 /// <summary>
 /// A signed-in claude.ai account. Mirrors the Mac <c>Account</c> struct
-/// (Services/StorageService.swift) field-for-field. Up to 5 are held by the AccountStore (U5)
-/// with organization-id uniqueness enforced on add.
+/// (Services/StorageService.swift) field-for-field. The AccountStore holds up to
+/// <see cref="Services.AccountStore.MaxAccounts"/> of them, with organization-id uniqueness
+/// enforced on add.
 ///
 /// Persistence differs from the Mac: <see cref="SessionKey"/> and <see cref="AllCookieHeader"/>
 /// are DPAPI-encrypted at rest (U5), not stored in plaintext. The model itself carries the
@@ -57,6 +58,37 @@ public sealed record Account
     /// DPAPI-encrypted at rest.
     /// </summary>
     public string? AllCookieHeader { get; init; }
+
+    /// <summary>
+    /// The organization's own name, captured at sign-in. What tells two organizations of the same
+    /// account apart in every list that shows them (R20). Null for accounts stored before this
+    /// existed, and for an organization that publishes no name.
+    /// </summary>
+    public string? OrganizationName { get; init; }
+
+    /// <summary>
+    /// Which plan this organization is on, from <c>rate_limit_tier</c> on the organizations response,
+    /// refreshed on every sign-in and re-authentication (R9). This is what makes the weekly-to-session
+    /// conversion possible; null means the app shows the true session number rather than guessing.
+    /// </summary>
+    public string? RateLimitTier { get; init; }
+
+    /// <summary>Plan capabilities, carried for the diagnostics record. Nothing in the dial reads it.</summary>
+    public IReadOnlyList<string>? Capabilities { get; init; }
+
+    /// <summary>How this organization pays, carried for the diagnostics record. It cannot identify a
+    /// plan on its own, since two plans can share a payment method.</summary>
+    public string? BillingType { get; init; }
+
+    /// <summary>When the plan fields above were last refreshed.</summary>
+    public DateTimeOffset? PlanUpdatedAt { get; init; }
+
+    /// <summary>
+    /// What this account has learned about its own weekly-to-session conversion (R13). Null until the
+    /// first poll folds a reading in, and cleared when the stored plan changes from one known plan to
+    /// a different one, because a measurement taken on the old plan says nothing about the new one.
+    /// </summary>
+    public RatioMeasurement? RatioMeasurement { get; init; }
 
     /// What shows in the account list and notifications: the nickname when set, else the email.
     public string DisplayName => Nickname ?? Email;

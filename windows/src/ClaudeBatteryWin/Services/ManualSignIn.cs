@@ -241,6 +241,12 @@ public sealed class ManualSignIn
             SessionKey = sessionKey,
             OrganizationId = org.Uuid,
             AllCookieHeader = cookieHeader,
+            // A brand-new account takes its plan from the organization just fetched; an account that
+            // already existed is refreshed through UpdatePlan below (R9).
+            RateLimitTier = org.RateLimitTier,
+            Capabilities = org.Capabilities,
+            BillingType = org.BillingType,
+            PlanUpdatedAt = DateTimeOffset.UtcNow,
         };
 
         Account resolved;
@@ -257,6 +263,11 @@ public sealed class ManualSignIn
             // generation (the issue #18 pattern, applied here for parity). SwitchTo still covers the
             // add-a-non-first-account and pick-a-different-org cases.
             resolved = _accountStore.Accounts.First(a => a.OrganizationId == org.Uuid);
+
+            // Refresh the stored plan from this paste's organizations response, the same way the
+            // sign-in window does (R9, R56).
+            _accountStore.UpdatePlan(resolved.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
+
             if (resolved.Id != _accountStore.ActiveAccountId)
             {
                 _accountStore.SwitchTo(resolved.Id);

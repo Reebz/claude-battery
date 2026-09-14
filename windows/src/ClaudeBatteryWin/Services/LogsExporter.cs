@@ -149,7 +149,7 @@ public static class LogsExporter
             Directory.CreateDirectory(stage);
             foreach (var file in files)
             {
-                File.Copy(file, Path.Combine(stage, Path.GetFileName(file)), overwrite: true);
+                CopyEvenWhileOpen(file, Path.Combine(stage, Path.GetFileName(file)));
             }
 
             if (File.Exists(archive))
@@ -172,6 +172,19 @@ public static class LogsExporter
             {
             }
         }
+    }
+
+    /// <summary>
+    /// Copies a file that something else may still be writing to. The current launch's own log is
+    /// open for append the whole time the app runs, and <c>File.Copy</c> asks for exclusive-enough
+    /// access to fail against it, which would make export throw for the one user who has logging on
+    /// right now - the only user who ever exports.
+    /// </summary>
+    private static void CopyEvenWhileOpen(string source, string destination)
+    {
+        using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var output = new FileStream(destination, FileMode.Create, FileAccess.Write, FileShare.None);
+        input.CopyTo(output);
     }
 
     /// <summary>

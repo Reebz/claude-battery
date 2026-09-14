@@ -845,6 +845,13 @@ public sealed class AuthManager
                 // Persist the session UA so a cold-start restore seeds the poll transport with the same
                 // UA the login captured (U1/U2). Null until the first NavigationCompleted captures it.
                 UserAgent = CapturedUserAgent,
+                // A brand-new account takes its plan straight from the organization that was just
+                // fetched; an account that already existed is refreshed through UpdatePlan below, which
+                // is where the plan-change rule lives (R9).
+                RateLimitTier = chosenOrg.RateLimitTier,
+                Capabilities = chosenOrg.Capabilities,
+                BillingType = chosenOrg.BillingType,
+                PlanUpdatedAt = DateTimeOffset.UtcNow,
             };
 
             // UpsertAccount returns false ONLY when a genuinely new account would exceed the 5-account
@@ -864,6 +871,13 @@ public sealed class AuthManager
             // Mac parity: fetchOrganizationId switches to the logged-in account (incl. a re-auth of a
             // non-active one); the only change here is dropping the redundant second bump.
             var owning = _accountStore.Accounts.FirstOrDefault(a => a.OrganizationId == chosenOrg.Uuid);
+            if (owning is not null)
+            {
+                // Refresh the stored plan from this response. On a re-authentication this is the only
+                // thing that updates it, and it is where a plan change discards a measurement taken
+                // on the old plan (R9, R56).
+                _accountStore.UpdatePlan(owning.Id, chosenOrg.RateLimitTier, chosenOrg.Capabilities, chosenOrg.BillingType);
+            }
             if (owning is not null && owning.Id != _accountStore.ActiveAccountId)
             {
                 _accountStore.SwitchTo(owning.Id);

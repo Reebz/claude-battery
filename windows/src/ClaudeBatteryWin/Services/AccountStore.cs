@@ -222,16 +222,23 @@ public sealed class AccountStore
             return false;
         }
 
+        // A deferred (unreadable-at-launch) entry for the same org is superseded by this fresh
+        // sign-in. Its plan and its measurement are carried onto the survivor first: a locked
+        // accounts.json at launch followed by a re-sign-in would otherwise throw away weeks of
+        // accumulated measurement for no reason the user could see.
+        var superseded = _deferredMetadata.Where(a => a.OrganizationId == account.OrganizationId).ToList();
+        foreach (var stale in superseded)
+        {
+            account = CarryPlanFields(from: stale, onto: account);
+        }
+
         // Write-then-commit: persist the secret first so a save failure never leaves a phantom
         // account in the list (grey row in Settings, no active id, every retry taking the
         // re-auth branch and failing the same way).
         SaveSecret(account);
         _accounts.Add(account);
 
-        // A deferred (unreadable-at-launch) entry for the same org is superseded by this fresh
-        // sign-in: drop it from the carry-over list and its orphaned blob, or the next launch would
-        // load two accounts for one org.
-        foreach (var stale in _deferredMetadata.Where(a => a.OrganizationId == account.OrganizationId).ToList())
+        foreach (var stale in superseded)
         {
             _deferredMetadata.Remove(stale);
             _secretStore.Delete(stale.Id);
@@ -357,6 +364,62 @@ public sealed class AccountStore
     }
 
     /// <summary>Set the low-usage notification dedup latch (U11). Mac parity.</summary>
+    /// <summary>
+    /// Record which plan an organization is on, from a fresh organizations response (R9). Called on
+    /// every sign-in and re-authentication route, never from the poll: the poll only reads the
+    /// stored tier. Credentials are untouched.
+    ///
+    /// One rule earns its own branch (R56). A stored tier moving from one known plan to a different
+    /// known plan discards that account's measurement, because a measurement taken on the old plan
+    /// says nothing about the new one. Learning the tier for the first time keeps it, and a tier that
+    /// stops arriving keeps it too: a field going missing means the response changed, not that the
+    /// user changed plan.
+    /// </summary>
+    public void UpdatePlan(Guid id, string? rateLimitTier, IReadOnlyList<string>? capabilities, string? billingType = null)
+    {
+        var index = _accounts.FindIndex(a => a.Id == id);
+        if (index < 0)
+        {
+            return;
+        }
+
+        var existing = _accounts[index];
+        var changedPlan = existing.RateLimitTier is not null
+            && rateLimitTier is not null
+            && !string.Equals(existing.RateLimitTier, rateLimitTier, StringComparison.Ordinal);
+
+        _accounts[index] = existing with
+        {
+            RateLimitTier = rateLimitTier,
+            Capabilities = capabilities,
+            BillingType = billingType,
+            PlanUpdatedAt = DateTimeOffset.UtcNow,
+            RatioMeasurement = changedPlan ? null : existing.RatioMeasurement,
+        };
+
+        PersistMetadata();
+
+        if (changedPlan)
+        {
+            DebugLog($"Plan changed for {id:N}; measurement discarded");
+        }
+    }
+
+    /// <summary>
+    /// Moves the plan fields and the ratio measurement off an entry that is about to be dropped, onto
+    /// the record that survives it. Only fills what the survivor is missing, so a value the current
+    /// session just learned is never overwritten by an older one.
+    /// </summary>
+    private static Account CarryPlanFields(Account from, Account onto) => onto with
+    {
+        OrganizationName = onto.OrganizationName ?? from.OrganizationName,
+        RateLimitTier = onto.RateLimitTier ?? from.RateLimitTier,
+        Capabilities = onto.Capabilities ?? from.Capabilities,
+        BillingType = onto.BillingType ?? from.BillingType,
+        PlanUpdatedAt = onto.PlanUpdatedAt ?? from.PlanUpdatedAt,
+        RatioMeasurement = onto.RatioMeasurement ?? from.RatioMeasurement,
+    };
+
     public void UpdateDidNotify(Guid id, bool value)
     {
         var index = _accounts.FindIndex(a => a.Id == id);
@@ -759,10 +822,14 @@ public sealed class AccountStore
                 continue;
             }
 
-            if (_accounts.Any(a => a.OrganizationId == entry.OrganizationId))
+            var survivorIndex = _accounts.FindIndex(a => a.OrganizationId == entry.OrganizationId);
+            if (survivorIndex >= 0)
             {
                 // Signed into this org again under a fresh id this session: the on-disk entry is
-                // superseded, and carrying it would load two accounts for one org next launch.
+                // superseded, and carrying it would load two accounts for one org next launch. Its
+                // plan and measurement move onto the survivor first, so the relaunch does not cost
+                // the account everything it had learned about its own conversion.
+                _accounts[survivorIndex] = CarryPlanFields(from: entry, onto: _accounts[survivorIndex]);
                 _secretStore.Delete(entry.Id);
                 DebugLog($"Dropped superseded on-disk entry {entry.Id:N} - its org was signed into again this session");
                 continue;
