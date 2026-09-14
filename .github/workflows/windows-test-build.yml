@@ -43,16 +43,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $version = "${{ github.ref_name }}" -replace '^windows-test-', ''
           $notes = @"
-          Unsigned self-contained TEST build of the Windows port (not for production).
+          Unsigned self-contained beta of the Windows port. Feature parity with Mac v1.72.
 
           How to run:
           1. Download and unzip ClaudeBattery-${{ github.ref_name }}-win-x64.zip.
           2. Windows SmartScreen will warn (the build is not code-signed): click "More info" then "Run anyway".
           3. The app needs the WebView2 Evergreen Runtime (preinstalled on Windows 11 and most Windows 10); if it is missing the app will download and install it (about 2 MB); if that fails, install it from Microsoft's WebView2 page (https://developer.microsoft.com/microsoft-edge/webview2/) and click Retry.
 
+          New in this build:
+          - Session and Weekly are two-ring dials now: the outer ring is how much quota is left, the inner one how much of the window is left, with a pace word underneath, a run-out estimate when you are spending faster than the clock, and each dial's own reset countdown.
+          - The Session number is the session figure your plan actually allows, converted from the weekly quota, and the same number appears in the tray, the tooltip and the panel. The app also learns your own conversion rate from your usage and shows how confident it is.
+          - Two tray icon styles, picked in Settings: Stacked Bars (what the beta shipped) and Dual Arc Gauge (the panel's rings). The icon is one tint for your taskbar theme and red under 20 percent, matching the Mac.
+          - Sign-in: one paste repairs every organization on the account, a blocked single sign-on redirect now says what happened and offers the manual paste, accounts show their real email and organization name, and polling pauses while the sign-in window is open.
+          - Opt-in diagnostics logging and a redacted export, for attaching to a bug report. Off until you turn it on; no passwords, tokens, emails or account names are written.
+          - Settings tells you when Windows is blocking notifications and links to the setting, repeats how to pin the tray icon, and the app re-checks for updates daily and on waking instead of only at launch.
+          - Money and dates follow your region, the credits reset date no longer needs a spend cap, and the running version is in the panel footer and the tray menu.
+
           Notes:
           - This is a raw exe, not an installer: no Start-menu shortcut and no auto-update.
-          - The login/poll path has never run on real hardware yet, so this build is itself the validation. Please report what happens at sign-in (Google, email-code, manual cookie paste) and whether the tray battery updates.
+          - Windows hides new tray icons. On first launch the app tells you to click the chevron (^) in the notification area and drag the icon onto the taskbar; Settings repeats it.
+          - Please report anything that looks wrong at https://github.com/Reebz/claude-battery/issues. Settings > Diagnostics produces a redacted log to attach.
           "@
-          gh release create "${{ github.ref_name }}" "ClaudeBattery-${{ github.ref_name }}-win-x64.zip" --prerelease --title "Windows test build (${{ github.ref_name }})" --notes "$notes"
+          gh release create "${{ github.ref_name }}" "ClaudeBattery-${{ github.ref_name }}-win-x64.zip" --prerelease --title "Windows Beta ($version)" --notes "$notes"
