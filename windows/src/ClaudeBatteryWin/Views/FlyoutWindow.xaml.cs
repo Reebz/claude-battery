@@ -123,6 +123,10 @@ public partial class FlyoutWindow : Window
     /// This only works because the window's base dictionary defines NO theme token itself: WPF reads
     /// the base dictionary before the merged ones, so a base-level token would shadow the swap.
     /// </summary>
+    /// <summary>Where the theme dictionaries live, named by assembly so the URI resolves whatever
+    /// process loads this window.</summary>
+    internal const string ThemeResourceBase = "pack://application:,,,/ClaudeBatteryWin;component/";
+
     public void ApplyTheme(ThemeBucket bucket)
     {
         var source = bucket == ThemeBucket.Dark
@@ -130,7 +134,9 @@ public partial class FlyoutWindow : Window
             : "Themes/LightTokens.xaml";
         var dict = new ResourceDictionary
         {
-            Source = new Uri($"pack://application:,,,/{source}", UriKind.Absolute),
+            // The assembly is named, not left to the process's entry assembly: under a test runner
+            // the entry assembly is the runner, and the dictionary is then not found at all.
+            Source = new Uri($"{ThemeResourceBase}{source}", UriKind.Absolute),
         };
 
         // Replace the single theme dictionary (slot 0, seeded with DarkTokens.xaml by the XAML) rather

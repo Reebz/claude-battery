@@ -229,20 +229,10 @@ public class FlyoutSnapshotSpikeTests
             $"the panel rendered as one flat colour at {scale:0.#}x scale; apply the KD12 fallback.");
     }
 
-    /// <summary>
-    /// WPF resolves a relative resource URI such as <c>/Themes/DarkTokens.xaml</c> against the
-    /// resource assembly, which defaults to whichever assembly started the process. Under the test
-    /// runner that is the runner, not the app, so the theme dictionary is not found. Point it at the
-    /// app's assembly first, then make the Application instance the window expects; it is never
-    /// started.
-    /// </summary>
+    /// <summary>The window expects an Application instance to resolve its resources through. The
+    /// test host has none, so make one; it is never started.</summary>
     private static void EnsureApplication()
     {
-        if (Application.ResourceAssembly is null)
-        {
-            Application.ResourceAssembly = typeof(FlyoutWindow).Assembly;
-        }
-
         if (Application.Current is null)
         {
             _ = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };

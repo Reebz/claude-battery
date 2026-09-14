@@ -33,7 +33,10 @@
                  is consumed via DynamicResource; converters, styles and templates (StaticResource)
                  stay in this base dictionary so nothing breaks at parse time. -->
             <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="/Themes/DarkTokens.xaml" />
+                <!-- Named with the assembly, not left relative: a bare "/Themes/..." resolves against
+                     whichever assembly started the process, which is the test runner under CI and
+                     would be any host that loads this window. -->
+                <ResourceDictionary Source="pack://application:,,,/ClaudeBatteryWin;component/Themes/DarkTokens.xaml" />
             </ResourceDictionary.MergedDictionaries>
 
             <!-- Converters. Defined inline because the inline-controls approach defers a Controls/

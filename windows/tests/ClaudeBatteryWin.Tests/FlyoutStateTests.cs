@@ -717,7 +717,10 @@ public class FlyoutStateTests
         // ApplyTheme a no-op (base entries win over merged ones). Tokens live only in Themes/*.xaml.
         var xaml = File.ReadAllText(Path.Combine(FindSourceDir(), "Views", "FlyoutWindow.xaml"));
         Assert.DoesNotContain("<SolidColorBrush x:Key=", xaml, StringComparison.Ordinal);
-        Assert.Contains("Source=\"/Themes/DarkTokens.xaml\"", xaml, StringComparison.Ordinal);
+        Assert.Contains(
+            "Source=\"pack://application:,,,/ClaudeBatteryWin;component/Themes/DarkTokens.xaml\"",
+            xaml,
+            StringComparison.Ordinal);
     }
 
     /// <summary>
