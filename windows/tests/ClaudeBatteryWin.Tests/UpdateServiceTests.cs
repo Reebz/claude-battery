@@ -371,6 +371,30 @@ public class UpdateServiceTests
     }
 
     [Fact]
+    public async Task AfterAFinishedCheckFindsARelease_TheRowNamesIt()
+    {
+        var updater = new FakeUpdater { CheckResult = new VelopackUpdateInfo { Version = "1.99.0" } };
+        var service = new UpdateService(updater, new FakeTeardown(updater));
+
+        await service.CheckForUpdatesAsync();
+
+        Assert.Equal("Update available: v1.99.0", UpdateService.UpdateRowText(
+            isInstalled: true, service.AvailableUpdate?.Version, service.HasChecked, service.LastCheckFailed));
+    }
+
+    [Fact]
+    public async Task AfterAFailedCheck_TheRowSaysSoRatherThanStayingOnChecking()
+    {
+        var updater = new FakeUpdater { CheckThrows = new HttpRequestException("offline") };
+        var service = new UpdateService(updater, new FakeTeardown(updater));
+
+        await service.CheckForUpdatesAsync();
+
+        Assert.Equal("Couldn't check for updates.", UpdateService.UpdateRowText(
+            isInstalled: true, service.AvailableUpdate?.Version, service.HasChecked, service.LastCheckFailed));
+    }
+
+    [Fact]
     public async Task ACheckThatNeverAnswers_ResolvesTheRowInsteadOfSittingOnChecking()
     {
         // The updater hangs; only our own timeout ends it. The row has to say something.

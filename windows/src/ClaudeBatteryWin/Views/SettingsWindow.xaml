@@ -116,6 +116,13 @@
                        Margin="0,2,0,0"
                        Text="Stacked Bars draws two thin bars, session above weekly. Dual Arc Gauge draws two rings, matching the dials in the panel." />
 
+            <!-- R44: the first-run notice shows once. A user who dismissed it, or who never saw it
+                 because Windows dropped the toast, can read the same instructions here. -->
+            <TextBlock x:Name="TrayPinHelp"
+                       Style="{StaticResource Caption}"
+                       Margin="0,10,0,0"
+                       TextWrapping="Wrap" />
+
             <!-- Accounts -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="ACCOUNTS" />
             <Border Style="{StaticResource Card}">

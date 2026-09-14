@@ -103,6 +103,7 @@ public partial class SettingsWindow : Window
         _suppressToggleEvents = false;
 
         RefreshNotificationsBlockedLine();
+        TrayPinHelp.Text = ClaudeBatteryWin.App.TrayNoticeBody;
 
         // The test-toast button only makes sense when the host wired a real sender.
         TestNotificationButton.Visibility = _sendTestToast is null ? Visibility.Collapsed : Visibility.Visible;

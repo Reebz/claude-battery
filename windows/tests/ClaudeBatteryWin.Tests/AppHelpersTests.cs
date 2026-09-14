@@ -1,3 +1,4 @@
+using System.IO;
 using ClaudeBatteryWin.Services;
 using ClaudeBatteryWin.Models;
 using Xunit;
@@ -134,6 +135,34 @@ public class AppHelpersTests
         Assert.Equal(
             ClaudeBatteryWin.App.TrayNotice.None,
             ClaudeBatteryWin.App.DecideTrayNotice(alreadyShown: true, permission));
+
+    [Fact]
+    public void SettingsRepeatsThePinInstructions()
+    {
+        // The notice fires once. Anyone who dismissed it, or whose toast Windows dropped, can read
+        // the same words in Settings rather than being told once and never again.
+        var xaml = File.ReadAllText(Path.Combine(SourceDir(), "Views", "SettingsWindow.xaml"));
+        Assert.Contains("x:Name=\"TrayPinHelp\"", xaml, StringComparison.Ordinal);
+
+        var code = File.ReadAllText(Path.Combine(SourceDir(), "Views", "SettingsWindow.xaml.cs"));
+        Assert.Contains("TrayPinHelp.Text = ClaudeBatteryWin.App.TrayNoticeBody", code, StringComparison.Ordinal);
+    }
+
+    /// <summary>Locate <c>src/ClaudeBatteryWin</c> by walking up from the test output directory.</summary>
+    private static string SourceDir()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            var candidate = Path.Combine(dir.FullName, "src", "ClaudeBatteryWin");
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+            dir = dir.Parent;
+        }
+        throw new DirectoryNotFoundException("could not find src/ClaudeBatteryWin above the test output");
+    }
 
     [Fact]
     public void TheNoticeNamesTheChevronAndTheDrag()
