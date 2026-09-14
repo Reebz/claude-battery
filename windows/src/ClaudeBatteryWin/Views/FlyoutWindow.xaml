@@ -53,118 +53,100 @@
                 <Setter Property="Padding" Value="10" />
             </Style>
 
-            <!-- Gauge card: the 270-degree arc (track + trimmed fill) with the centered percent
-                 label, then the pace bar beneath. Geometry mirrors the Mac ArcGauge (start 135deg,
-                 sweep 270deg). The arc path data is produced by GaugeArcConverter from the remaining
-                 percent so the SwiftUI .trim(...) is reproduced without code-behind drawing.
-                 The dial host Grid is a fixed 58x58 box centred in the card: the Paths use the WPF
-                 default Stretch=None and draw at the converter's absolute 58-box coordinates, so the
-                 host must be exactly that box or the ring slides off the label. Do not put
-                 HorizontalAlignment on the Paths themselves (each would centre on its own bounds,
-                 and the fill arc's bounds shrink with the percent). -->
+            <!-- Gauge card (R26, R27, R51, R52): two concentric 270-degree arcs - quota remaining on
+                 the outside, time left in the window on the inside - with the percentage in the
+                 middle and three lines underneath. Geometry mirrors the Mac ArcGauge (start 135deg,
+                 sweep 270deg); the path data comes from GaugeArcConverter so the SwiftUI trim is
+                 reproduced without drawing in code-behind.
+                 The dial host Grid is a fixed 80x80 box centred in the card: the Paths draw at the
+                 converter's absolute coordinates with the WPF default Stretch=None, so the host must
+                 be exactly that box or the rings slide off the label. Do not put HorizontalAlignment
+                 on the Paths themselves (each would centre on its own bounds, and the fill arc's
+                 bounds shrink with the percent).
+                 The card carries one sentence as its accessibility name, covering both rings, the
+                 pace and both lines, so a screen reader gets the dial as a whole rather than four
+                 disconnected fragments. WPF has no way to take the individual text lines back out of
+                 the accessibility tree short of a custom automation peer, so they stay readable
+                 individually as well; recorded as a difference from the Mac, not a gap. -->
             <DataTemplate x:Key="GaugeCardTemplate" DataType="{x:Type vm:GaugeCard}">
                 <Border Style="{StaticResource CardBorderStyle}"
-                        AutomationProperties.Name="{Binding Title}">
+                        AutomationProperties.Name="{Binding AccessibilityLabel}">
                     <StackPanel>
                         <TextBlock Text="{Binding Title}"
                                    FontSize="13"
                                    FontWeight="SemiBold"
                                    Foreground="{DynamicResource ForegroundBrush}" />
-                        <Grid Width="58" Height="58" Margin="0,12,0,0" HorizontalAlignment="Center">
-                            <!-- Track arc (full sweep, muted). -->
+                        <Grid Width="80" Height="80" Margin="0,10,0,0" HorizontalAlignment="Center">
+                            <!-- Outer track (full sweep, muted). -->
                             <Path Stroke="{DynamicResource BarTrackBrush}"
                                   StrokeThickness="5"
                                   StrokeStartLineCap="Round"
                                   StrokeEndLineCap="Round"
                                   Data="{Binding Converter={StaticResource GaugeArc}, ConverterParameter=track}" />
-                            <!-- Interior ticks (5 session / 7 weekly, from the bound TickCount). -->
+                            <!-- Interior notches: four on the session dial, six on the weekly one. -->
                             <Path Stroke="{DynamicResource ArcTickBrush}"
                                   StrokeThickness="1.5"
                                   StrokeStartLineCap="Round"
                                   StrokeEndLineCap="Round"
                                   Data="{Binding Converter={StaticResource GaugeTicks}}" />
-                            <!-- Fill arc (trimmed to remaining percent, in the remaining color). -->
+                            <!-- Outer fill: quota remaining, coloured by pace with a red floor. -->
                             <Path Stroke="{Binding Color, Converter={StaticResource UsageColorToBrush}}"
                                   StrokeThickness="5"
                                   StrokeStartLineCap="Round"
                                   StrokeEndLineCap="Round"
                                   Data="{Binding Converter={StaticResource GaugeArc}, ConverterParameter=fill}" />
-                            <!-- Label centre sits at y=31 (Mac: ZStack centre + offset 2), inside
-                                 the ring whose centre is at y=35. -->
-                            <TextBlock Text="{Binding PercentLabel}"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center"
-                                       Margin="0,4,0,0"
-                                       FontSize="15"
-                                       FontWeight="Bold"
-                                       Foreground="{DynamicResource ForegroundBrush}" />
+                            <!-- Inner track and fill: time left in the window. Both are hidden when
+                                 there is no reset time, because an unknown ring cannot be drawn
+                                 honestly as either empty or full. -->
+                            <Path Stroke="{DynamicResource ArcTickBrush}"
+                                  StrokeThickness="4"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  Visibility="{Binding HasTimeRing, Converter={StaticResource BoolToVisibility}}"
+                                  Data="{Binding Converter={StaticResource GaugeArc}, ConverterParameter=inner-track}" />
+                            <Path Stroke="{DynamicResource LabelMutedBrush}"
+                                  StrokeThickness="4"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round"
+                                  Visibility="{Binding HasTimeRing, Converter={StaticResource BoolToVisibility}}"
+                                  Data="{Binding Converter={StaticResource GaugeArc}, ConverterParameter=inner-fill}" />
+                            <!-- Centre: the big quota percentage, and the time percentage under it
+                                 when there is an inner ring to explain. -->
+                            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,6,0,0">
+                                <TextBlock Text="{Binding PercentLabel}"
+                                           HorizontalAlignment="Center"
+                                           FontSize="15"
+                                           FontWeight="Bold"
+                                           Foreground="{DynamicResource ForegroundBrush}" />
+                                <TextBlock Text="{Binding TimeRemainingLabel}"
+                                           HorizontalAlignment="Center"
+                                           FontSize="9"
+                                           FontWeight="Medium"
+                                           Foreground="{DynamicResource LabelMutedBrush}"
+                                           Visibility="{Binding HasTimeRing, Converter={StaticResource BoolToVisibility}}" />
+                            </StackPanel>
                         </Grid>
-                        <!-- Pace bar (omitted entirely when the reset date is unknown, KTD4). -->
-                        <Grid Margin="0,12,0,0"
-                              Visibility="{Binding Pace.HasValue, Converter={StaticResource BoolToVisibility}}">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <!-- The fill width is a fraction of the track's REAL ActualWidth (a
-                                 MultiBinding), never a hard-coded track width: the star column
-                                 narrows with the percent label, so a literal overstates the bar. -->
-                            <Grid Grid.Column="0" Height="6" VerticalAlignment="Center">
-                                <Border x:Name="PaceTrack" CornerRadius="3" Background="{DynamicResource BarTrackBrush}" />
-                                <Border CornerRadius="3"
-                                        HorizontalAlignment="Left"
-                                        Background="{Binding Pace.Color, Converter={StaticResource UsageColorToBrush}}">
-                                    <Border.Width>
-                                        <MultiBinding Converter="{StaticResource PercentOfWidth}">
-                                            <Binding Path="Pace.Percent" />
-                                            <Binding ElementName="PaceTrack" Path="ActualWidth" />
-                                        </MultiBinding>
-                                    </Border.Width>
-                                </Border>
-                            </Grid>
-                            <TextBlock Grid.Column="1"
-                                       Text="{Binding Pace.PercentLabel}"
-                                       Margin="6,0,0,0"
-                                       FontSize="9"
-                                       FontWeight="Medium"
-                                       VerticalAlignment="Center"
-                                       Foreground="{DynamicResource LabelMutedBrush}" />
-                        </Grid>
-                    </StackPanel>
-                </Border>
-            </DataTemplate>
-
-            <!-- Resets card: either the "unavailable" line or the Session/Weekly reset rows. -->
-            <DataTemplate x:Key="ResetsCardTemplate" DataType="{x:Type vm:ResetsCard}">
-                <Border Style="{StaticResource CardBorderStyle}" AutomationProperties.Name="Resets">
-                    <StackPanel>
-                        <TextBlock Text="Resets" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" />
-                        <TextBlock Text="Reset times unavailable"
-                                   Margin="0,8,0,0"
+                        <!-- The pace word. Hidden when there is no reset time to compare against. -->
+                        <TextBlock Text="{Binding PaceCaption}"
+                                   Margin="0,10,0,0"
+                                   HorizontalAlignment="Center"
+                                   FontSize="11"
+                                   FontWeight="SemiBold"
+                                   Foreground="{Binding PaceCaptionColor, Converter={StaticResource UsageColorToBrush}}"
+                                   Visibility="{Binding HasPaceCaption, Converter={StaticResource BoolToVisibility}}" />
+                        <!-- When usage is running ahead of the clock, when it is due to run out. -->
+                        <TextBlock Text="{Binding RunOutLine}"
+                                   Margin="0,2,0,0"
+                                   HorizontalAlignment="Center"
                                    FontSize="10"
-                                   Foreground="{DynamicResource LabelSubtleBrush}"
-                                   Visibility="{Binding Unavailable, Converter={StaticResource BoolToVisibility}}" />
-                        <ItemsControl Margin="0,8,0,0"
-                                      ItemsSource="{Binding Rows}"
-                                      Visibility="{Binding Unavailable, Converter={StaticResource BoolToVisibility}, ConverterParameter=Invert}">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate DataType="{x:Type vm:ResetRow}">
-                                    <Grid Margin="0,0,0,4">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="Auto" />
-                                        </Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="{Binding Label}" FontSize="10" Foreground="{DynamicResource ForegroundBrush}" />
-                                        <TextBlock Grid.Column="1"
-                                                   Text="{Binding Value}"
-                                                   FontSize="10"
-                                                   FontWeight="Medium"
-                                                   FontFamily="Consolas"
-                                                   Foreground="{DynamicResource ForegroundBrush}" />
-                                    </Grid>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
+                                   Foreground="{DynamicResource LabelMutedBrush}"
+                                   Visibility="{Binding HasRunOutLine, Converter={StaticResource BoolToVisibility}}" />
+                        <!-- The reset countdown, always present, refreshed on the minute clock. -->
+                        <TextBlock Text="{Binding Countdown}"
+                                   Margin="0,2,0,0"
+                                   HorizontalAlignment="Center"
+                                   FontSize="10"
+                                   Foreground="{DynamicResource LabelMutedBrush}" />
                     </StackPanel>
                 </Border>
             </DataTemplate>
@@ -217,6 +199,7 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <Ellipse Grid.Column="0"
                                  Width="7"
@@ -239,7 +222,33 @@
                                    FontSize="11"
                                    TextTrimming="CharacterEllipsis"
                                    VerticalAlignment="Center"
-                                   Foreground="{DynamicResource ForegroundBrush}" />
+                                   Foreground="{DynamicResource ForegroundBrush}"
+                                   Visibility="{Binding IsNotEditing, Converter={StaticResource BoolToVisibility}}" />
+                        <!-- Renaming happens where the name is read, instead of sending the user to
+                             Settings to fix a label they are looking at right now (R36). -->
+                        <TextBox Grid.Column="1"
+                                 x:Name="RenameBox"
+                                 Text="{Binding DisplayName, Mode=OneWay}"
+                                 Tag="{Binding Id}"
+                                 FontSize="11"
+                                 VerticalAlignment="Center"
+                                 Visibility="{Binding IsEditing, Converter={StaticResource BoolToVisibility}}"
+                                 KeyDown="OnRenameKeyDown"
+                                 LostFocus="OnRenameLostFocus"
+                                 AutomationProperties.Name="Account name" />
+                        <Button Grid.Column="2"
+                                Content="Rename"
+                                Margin="8,0,0,0"
+                                Padding="0"
+                                FontSize="9"
+                                Cursor="Hand"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                Foreground="{DynamicResource LabelMutedBrush}"
+                                Visibility="{Binding IsNotEditing, Converter={StaticResource BoolToVisibility}}"
+                                Command="{Binding DataContext.BeginRenameCommand, RelativeSource={RelativeSource AncestorType={x:Type ItemsControl}}}"
+                                CommandParameter="{Binding Id}"
+                                AutomationProperties.Name="Rename this account" />
                     </Grid>
                 </Button>
             </DataTemplate>
@@ -338,6 +347,22 @@
             <StackPanel Margin="12"
                         Visibility="{Binding State, Converter={StaticResource StateToVisibility}, ConverterParameter=Authenticated}">
 
+                <!-- Update notice, full width at the top of the panel where it is actually read
+                     (R32). It no longer displaces the freshness line in the footer. -->
+                <Button x:Name="UpdateLinkButton"
+                        Margin="0,0,0,8"
+                        Padding="8,5"
+                        HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Center"
+                        Cursor="Hand"
+                        BorderThickness="0"
+                        Background="{DynamicResource CardBackgroundBrush}"
+                        Foreground="{DynamicResource SpendCyanBrush}"
+                        FontSize="11"
+                        Content="{Binding UpdateLinkText}"
+                        Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVisibility}}"
+                        AutomationProperties.Name="{Binding UpdateLinkText}" />
+
                 <!-- What the last sign-in repaired, when it repaired more than the account it
                      signed in to (R16). Hidden the rest of the time. -->
                 <TextBlock Text="{Binding SignInConfirmation}"
@@ -405,64 +430,40 @@
                             </Border>
                         </Grid>
                         <!-- Enabled detail lines -->
-                        <StackPanel Margin="0,2,0,0"
-                                    Visibility="{Binding Credits.HasMonthlySpendLimit, Converter={StaticResource BoolToVisibility}}">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="Monthly spend limit" FontSize="10" Foreground="{DynamicResource LabelSubtleBrush}" />
-                                <TextBlock Grid.Column="1" Text="{Binding Credits.MonthlySpendLimitText}" FontSize="10" FontWeight="Medium" Foreground="{DynamicResource LabelDetailBrush}" />
-                            </Grid>
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="Resets" FontSize="10" Foreground="{DynamicResource LabelSubtleBrush}" />
-                                <TextBlock Grid.Column="1" Text="{Binding Credits.ResetsText}" FontSize="10" FontWeight="Medium" Foreground="{DynamicResource LabelDetailBrush}" />
-                            </Grid>
-                        </StackPanel>
+                        <!-- The monthly cap only appears when there is one. -->
+                        <Grid Margin="0,2,0,0"
+                              Visibility="{Binding Credits.HasMonthlySpendLimit, Converter={StaticResource BoolToVisibility}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Monthly spend limit" FontSize="10" Foreground="{DynamicResource LabelSubtleBrush}" />
+                            <TextBlock Grid.Column="1" Text="{Binding Credits.MonthlySpendLimitText}" FontSize="10" FontWeight="Medium" Foreground="{DynamicResource LabelDetailBrush}" />
+                        </Grid>
+                        <!-- The reset date does not depend on there being a cap: credits reset on the
+                             same day either way, and hiding it left the common case with no date at
+                             all (R33). -->
+                        <Grid Visibility="{Binding Credits.HasResetsText, Converter={StaticResource BoolToVisibility}}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="Resets" FontSize="10" Foreground="{DynamicResource LabelSubtleBrush}" />
+                            <TextBlock Grid.Column="1" Text="{Binding Credits.ResetsText}" FontSize="10" FontWeight="Medium" Foreground="{DynamicResource LabelDetailBrush}" />
+                        </Grid>
                     </StackPanel>
                 </Border>
 
-                <!-- Resets + Models. When there are model bars they sit side by side; otherwise
-                     Resets spans full width (KTD3). Two layouts, visibility-gated on HasModelBars. -->
-                <!-- Full-width Resets (no models) -->
-                <ContentControl Margin="0,8,0,0"
-                                Content="{Binding Resets}"
-                                ContentTemplate="{StaticResource ResetsCardTemplate}"
-                                Visibility="{Binding HasModelBars, Converter={StaticResource BoolToVisibility}, ConverterParameter=Invert}" />
-                <!-- Resets + Models split -->
-                <Grid Margin="0,8,0,0"
-                      Visibility="{Binding HasModelBars, Converter={StaticResource BoolToVisibility}}">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="8" />
-                        <ColumnDefinition Width="*" />
-                    </Grid.ColumnDefinitions>
-                    <ContentControl Grid.Column="0" Content="{Binding Resets}" ContentTemplate="{StaticResource ResetsCardTemplate}" />
-                    <Border Grid.Column="2" Style="{StaticResource CardBorderStyle}" AutomationProperties.Name="Models">
-                        <StackPanel>
-                            <TextBlock Text="Models" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" />
-                            <ItemsControl Margin="0,6,0,0" ItemsSource="{Binding ModelBars}" ItemTemplate="{StaticResource ModelBarTemplate}" />
-                        </StackPanel>
-                    </Border>
-                </Grid>
-
-                <!-- Claude Design row (informational, shares standard limits) -->
-                <Border Style="{StaticResource CardBorderStyle}"
-                        Margin="0,8,0,0"
-                        AutomationProperties.Name="Claude Design, shares standard usage limits">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <TextBlock Grid.Column="0" Text="Claude Design" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource LabelMutedBrush}" />
-                        <TextBlock Grid.Column="1" Text="Shares standard usage limits" FontSize="10" Foreground="{DynamicResource LabelFaintBrush}" />
-                    </Grid>
+                <!-- Models. The per-dial countdowns replaced the separate Resets card, so this is
+                     full width whenever there are per-model limits, and absent when there are not. -->
+                <Border Margin="0,8,0,0"
+                        Style="{StaticResource CardBorderStyle}"
+                        AutomationProperties.Name="Models"
+                        Visibility="{Binding HasModelBars, Converter={StaticResource BoolToVisibility}}">
+                    <StackPanel>
+                        <TextBlock Text="Models" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource ForegroundBrush}" />
+                        <ItemsControl Margin="0,6,0,0" ItemsSource="{Binding ModelBars}" ItemTemplate="{StaticResource ModelBarTemplate}" />
+                    </StackPanel>
                 </Border>
 
                 <!-- Account list (more than one account) -->
@@ -488,21 +489,12 @@
                         FontSize="11"
                         FontWeight="Medium" />
 
-                <!-- Version / update row -->
+                <!-- Footer: the running version and how fresh the reading is. Always shown: it used
+                     to disappear whenever an update was available, which is exactly when a user is
+                     most likely to be checking what they are running (R32, R54). -->
                 <StackPanel Margin="0,6,0,0" HorizontalAlignment="Center">
-                    <Button x:Name="UpdateLinkButton"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Cursor="Hand"
-                            HorizontalAlignment="Center"
-                            Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVisibility}}"
-                            Content="{Binding UpdateLinkText}"
-                            Foreground="{DynamicResource SpendCyanBrush}"
-                            FontSize="11"
-                            AutomationProperties.Name="{Binding UpdateLinkText}" />
-                    <TextBlock Text="{Binding LastUpdatedText}"
+                    <TextBlock Text="{Binding FooterText}"
                                HorizontalAlignment="Center"
-                               Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVisibility}, ConverterParameter=Invert}"
                                FontSize="11"
                                Foreground="{DynamicResource LabelMutedBrush}" />
                     <TextBlock Text="Right-click the tray icon for Settings."

@@ -89,9 +89,12 @@ public sealed class BlockedNavigationTests : IDisposable
             AuthManagerTests.Cookie("__cf_bm", "cf"),
         });
 
+        var before = manager.LoginState;
+
         web.RaiseNavigationStarting("https://acme.okta.com/app/sso");
 
-        Assert.NotEqual(LoginStateKind.Error, manager.LoginState.Kind);
+        Assert.Equal(before, manager.LoginState);
+        Assert.NotEqual(AuthManager.SsoBlockedMessage, manager.LoginState.Message);
     }
 
     // --- What is recorded ----------------------------------------------------------------------

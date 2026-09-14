@@ -379,6 +379,8 @@ public partial class App : Application
         _flyoutViewModel = new FlyoutViewModel();
         // Tapping a flyout account row switches to it (U15); the VM raises the id, the store switches.
         _flyoutViewModel.SwitchAccountRequested += id => _accountStore?.SwitchTo(id);
+        // Renaming from the panel writes through the same store call Settings uses (R36).
+        _flyoutViewModel.RenameAccountRequested += (id, name) => _accountStore?.UpdateNickname(id, name);
     }
 
     /// <summary>
@@ -506,6 +508,16 @@ public partial class App : Application
     private System.Windows.Controls.ContextMenu BuildTrayContextMenu()
     {
         var menu = new System.Windows.Controls.ContextMenu();
+
+        // The running version, first and unclickable. A tester asked which build they were on and had
+        // no way to find out without opening Settings (R54).
+        var version = new System.Windows.Controls.MenuItem
+        {
+            Header = VersionMenuTitle(),
+            IsEnabled = false,
+        };
+        menu.Items.Add(version);
+        menu.Items.Add(new System.Windows.Controls.Separator());
 
         var settings = new System.Windows.Controls.MenuItem { Header = "Settings…" };
         settings.Click += (_, _) => OpenSettings();
@@ -1278,7 +1290,7 @@ public partial class App : Application
     /// The shipped version for the crash log header. Assembly version, not Assembly.Location /
     /// FileVersionInfo: those are empty or throw under PublishSingleFile (the shipped raw exe).
     /// </summary>
-    private static string AppVersion => typeof(App).Assembly.GetName().Version?.ToString(3) ?? "unknown";
+    private static string AppVersion => AppVersionInfo.Version;
 
     /// <summary>
     /// Append one entry to <c>%LocalAppData%\ClaudeBatteryWin\crash.log</c>. Swallows everything: a
@@ -1301,6 +1313,9 @@ public partial class App : Application
             // Never throw from the crash logger.
         }
     }
+
+    /// <summary>The tray menu's first row. Internal so the exact text is pinned by a test.</summary>
+    internal static string VersionMenuTitle() => $"Claude Battery v{AppVersionInfo.Version}";
 
     private static string CrashLogDirectory() => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

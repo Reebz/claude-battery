@@ -43,6 +43,34 @@ public static class CountdownFormat
     }
 
     /// <summary>
+    /// Whole days, hours and minutes of a duration, truncated. Shared by the dial countdown and the
+    /// spoken label so both say the same numbers for the same instant.
+    /// </summary>
+    public static (int Days, int Hours, int Minutes) Components(double seconds)
+    {
+        var total = (long)seconds;
+        return ((int)(total / 86400), (int)((total % 86400) / 3600), (int)((total % 3600) / 60));
+    }
+
+    /// <summary>
+    /// Minute-resolution countdown for the lines under a dial: "3d 00h", "2h 14m", "5m", or "&lt;1m".
+    /// Takes seconds rather than a date, so the run-out line can print a duration that has no date.
+    /// </summary>
+    public static string MinuteResolution(double seconds)
+    {
+        var (days, hours, minutes) = Components(seconds);
+        if (days > 0)
+        {
+            return $"{days}d {hours:00}h";
+        }
+        if (hours > 0)
+        {
+            return $"{hours}h {minutes:00}m";
+        }
+        return minutes >= 1 ? $"{minutes}m" : "<1m";
+    }
+
+    /// <summary>
     /// Compact menu-bar countdown, never more than three characters. Returns null when there is
     /// nothing to count down.
     /// </summary>

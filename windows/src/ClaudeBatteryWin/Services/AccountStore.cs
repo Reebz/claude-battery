@@ -188,7 +188,12 @@ public sealed class AccountStore
             var existing = _accounts[existingIndex];
             var updated = existing with
             {
-                Email = account.Email,
+                // A later sign-in never renames a row that already has a real address (R21). Two
+                // logins can share an organization, and the row belongs to whoever added it first;
+                // only the app's own "Account N" placeholders get replaced.
+                Email = AuthManager.IsPlaceholderEmail(existing.Email) && !AuthManager.IsPlaceholderEmail(account.Email)
+                    ? account.Email
+                    : existing.Email,
                 SessionKey = account.SessionKey,
                 // A paste that carried only a session key must not wipe the stored header: the
                 // header holds the Cloudflare and CSRF cookies the poll needs, and losing them

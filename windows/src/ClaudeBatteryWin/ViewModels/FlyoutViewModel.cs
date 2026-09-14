@@ -57,7 +57,10 @@ public enum UsageColor
 {
     Red,
     Orange,
-    Green
+    Green,
+
+    /// <summary>Secondary grey. The pace word uses it when there is no pace to grade.</summary>
+    Muted
 }
 
 /// <summary>
@@ -74,44 +77,67 @@ public enum SpendColor
 }
 
 /// <summary>
-/// One pace bar's display data (the thin time-remaining bar under a gauge). Mirrors the Mac
-/// <c>paceBar</c>: <see cref="Percent"/> counts the time remaining in the window down 100 -> 0 and
-/// drives both the fill width and the color (shared remaining scale). When the reset date is
-/// unknown the whole bar is omitted (<c>HasValue</c> false), never shown as a misleading empty or
-/// full track (KTD4).
-/// </summary>
-public sealed record PaceBar
-{
-    public bool HasValue { get; init; }
-    public double Percent { get; init; }
-    public UsageColor Color { get; init; }
-
-    /// "<n>%" trailing label, matching the Mac (rounded). Empty when <see cref="HasValue"/> is false.
-    public string PercentLabel { get; init; } = string.Empty;
-
-    public static readonly PaceBar None = new() { HasValue = false };
-}
-
-/// <summary>
-/// One gauge card's display data (Session or Weekly). Mirrors the Mac <c>sessionCard</c>/
-/// <c>weeklyCard</c>: an arc gauge fed by remaining percent + the remaining-scale color and a tick
-/// count (5 for session, 7 for weekly), plus the pace bar beneath it.
+/// One dial's display data (R26, R27, R51, R52).
+///
+/// Two rings: how much quota is left on the outside, how much of the window is left on the inside.
+/// The gap between them is the pace, which is what the word underneath names. Under that, a run-out
+/// estimate when there is one worth showing, and the reset countdown, which is always there.
 /// </summary>
 public sealed record GaugeCard
 {
     public required string Title { get; init; }
+
+    /// <summary>Quota remaining, which is what the outer ring draws and the centre label prints.</summary>
     public required double RemainingPercent { get; init; }
+
+    /// <summary>Colour of the outer ring: the pace, with a red floor under twenty percent.</summary>
     public required UsageColor Color { get; init; }
+
+    /// <summary>Five for the session dial, seven for the weekly one. Four and six notches are drawn:
+    /// the ends of the arc are not notches.</summary>
     public required int TickCount { get; init; }
-    public required PaceBar Pace { get; init; }
+
+    /// <summary>How much of the window is left. Null hides the inner ring, because there is no
+    /// honest way to draw an unknown one.</summary>
+    public double? TimeRemainingPercent { get; init; }
+
+    public bool HasTimeRing => TimeRemainingPercent is not null;
+
+    /// <summary>"&lt;n&gt;%" beside the small clock in the middle. Empty when there is no time ring.</summary>
+    public string TimeRemainingLabel =>
+        TimeRemainingPercent is { } value ? $"{(int)Math.Round(value)}%" : string.Empty;
+
+    /// <summary>How usage is running against the clock.</summary>
+    public required PaceStatus Pace { get; init; }
+
+    /// <summary>The pace word. Empty hides the line.</summary>
+    public string PaceCaption { get; init; } = string.Empty;
+
+    public bool HasPaceCaption => PaceCaption.Length > 0;
+
+    /// <summary>Colour of the pace word, which shares the ring's red floor so the two agree.</summary>
+    public UsageColor PaceCaptionColor { get; init; } = UsageColor.Muted;
+
+    /// <summary>"Out in ~2h 15m", or empty when there is nothing sound to project.</summary>
+    public string RunOutLine { get; init; } = string.Empty;
+
+    public bool HasRunOutLine => RunOutLine.Length > 0;
+
+    /// <summary>"Resets in 2h 14m", or "Reset time unavailable".</summary>
+    public string Countdown { get; init; } = string.Empty;
 
     /// <summary>
     /// True when this dial is showing a value capped by the weekly quota rather than its own window.
-    /// U11 renders the "Limited by weekly" line from it.
     /// </summary>
     public bool IsWeeklyLimited { get; init; }
 
-    /// "<n>%" center label for the arc, matching the Mac <c>String(format: "%.0f%%")</c>.
+    /// <summary>
+    /// The whole dial as one spoken sentence (R37). A screen reader announces each dial once instead
+    /// of reading four disconnected fragments, which is why the lines themselves are hidden from it.
+    /// </summary>
+    public string AccessibilityLabel { get; init; } = string.Empty;
+
+    /// "<n>%" centre label for the outer ring.
     public string PercentLabel => $"{(int)Math.Round(RemainingPercent)}%";
 }
 
@@ -129,31 +155,6 @@ public sealed record ModelBarRow
     public required UsageColor Color { get; init; }
 
     public string PercentLabel => $"{(int)Math.Round(RemainingPercent)}%";
-}
-
-/// <summary>
-/// A single reset row in the Resets card. Mirrors the Mac <c>resetRow</c>: a label and either the
-/// long-form countdown or "--" when the date is unknown.
-/// </summary>
-public sealed record ResetRow
-{
-    public required string Label { get; init; }
-
-    /// The long-form countdown ("2d 03h" / "4h 05m" / "12m 30s") or "--" when the date is unknown.
-    public required string Value { get; init; }
-
-    public bool HasDate { get; init; }
-}
-
-/// <summary>
-/// The Resets card display data. When both session and weekly reset dates are missing the Mac shows
-/// one explicit "Reset times unavailable" line rather than two bare "--" rows (issue #23); that is
-/// <see cref="Unavailable"/> here.
-/// </summary>
-public sealed record ResetsCard
-{
-    public bool Unavailable { get; init; }
-    public IReadOnlyList<ResetRow> Rows { get; init; } = Array.Empty<ResetRow>();
 }
 
 /// <summary>
@@ -185,6 +186,10 @@ public sealed record CreditsRow
     public string ResetsText { get; init; } = string.Empty;
     public bool HasMonthlySpendLimit => MonthlySpendLimitText is not null;
 
+    /// <summary>True when there is a reset date to show. Independent of whether a cap is set: credits
+    /// reset on the same day either way (R33).</summary>
+    public bool HasResetsText => ResetsText.Length > 0;
+
     public static readonly CreditsRow None = new() { HasCredits = false };
 }
 
@@ -197,6 +202,11 @@ public sealed record AccountRow
     public required Guid Id { get; init; }
     public required string DisplayName { get; init; }
     public required bool IsActive { get; init; }
+
+    /// <summary>True while this row is being renamed, which swaps its label for an edit field (R36).</summary>
+    public bool IsEditing { get; init; }
+
+    public bool IsNotEditing => !IsEditing;
 }
 
 /// <summary>
@@ -277,6 +287,50 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
                 SwitchAccountRequested?.Invoke(id);
             }
         });
+
+        BeginRenameCommand = new RelayCommand(p =>
+        {
+            if (p is Guid id)
+            {
+                BeginRename(id);
+            }
+        });
+    }
+
+    // MARK: - Renaming from the panel (R36)
+
+    private Guid? _editingAccountId;
+
+    /// <summary>
+    /// Raised when a rename is committed from the panel. The integration layer calls
+    /// <c>AccountStore.UpdateNickname</c>; the panel never owns the store.
+    /// </summary>
+    public event Action<Guid, string>? RenameAccountRequested;
+
+    /// <summary>The command the rename affordance on a row binds to; its parameter is the row id.</summary>
+    public ICommand BeginRenameCommand { get; }
+
+    /// <summary>Puts one row into edit mode. Renaming from Settings alone meant leaving the panel to
+    /// fix a label the panel is where you read it (R36).</summary>
+    public void BeginRename(Guid id)
+    {
+        _editingAccountId = id;
+        MaybeRefresh();
+    }
+
+    /// <summary>Applies a rename and leaves edit mode.</summary>
+    public void CommitRename(Guid id, string name)
+    {
+        _editingAccountId = null;
+        RenameAccountRequested?.Invoke(id, name);
+        MaybeRefresh();
+    }
+
+    /// <summary>Leaves edit mode without changing anything.</summary>
+    public void CancelRename()
+    {
+        _editingAccountId = null;
+        MaybeRefresh();
     }
 
     // MARK: - Account switching (U15)
@@ -389,7 +443,15 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     public DateTimeOffset? LastSuccessfulFetch
     {
         get => _lastSuccessfulFetch;
-        set { _lastSuccessfulFetch = value; if (!_refreshSuspended) { RaiseChanged(nameof(LastUpdatedText)); } }
+        set
+        {
+            _lastSuccessfulFetch = value;
+            if (!_refreshSuspended)
+            {
+                RaiseChanged(nameof(LastUpdatedText));
+                RaiseChanged(nameof(FooterText));
+            }
+        }
     }
 
     public IReadOnlyList<Account> Accounts
@@ -458,10 +520,9 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     public GaugeCard? SessionCard { get; private set; }
     public GaugeCard? WeeklyCard { get; private set; }
     public CreditsRow Credits { get; private set; } = CreditsRow.None;
-    public ResetsCard Resets { get; private set; } = new() { Unavailable = true };
 
-    /// True when there are per-model bars: the Models card shows and the Resets card takes half
-    /// width. False omits the Models card and lets Resets span the full width (KTD3, Mac parity).
+    /// True when there are per-model bars, which is what decides whether the Models card appears at
+    /// all. The separate Resets card is gone: each dial carries its own countdown now (R52).
     public bool HasModelBars { get; private set; }
 
     public ObservableCollection<ModelBarRow> ModelBars { get; } = new();
@@ -483,6 +544,20 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     /// "v1.51 available - Download" link text. Empty when no update. Mac parity (the link copy).
     public string UpdateLinkText =>
         _availableUpdateVersion is { } v ? $"v{v} available - Download" : string.Empty;
+
+    /// <summary>
+    /// The footer line: the running version and how fresh the reading is (R54). The version is read
+    /// from the one place the whole app reads it, so the panel, the tray menu and the About row can
+    /// never disagree.
+    /// </summary>
+    public string FooterText
+    {
+        get
+        {
+            var version = Services.AppVersionInfo.Version;
+            return version == "unknown" ? LastUpdatedText : $"v{version} \u00b7 {LastUpdatedText}";
+        }
+    }
 
     /// "Updated just now" / "Updated N minutes ago" / "Not yet updated". Verbatim Mac copy and
     /// thresholds (Views/UsagePopoverView.swift <c>lastUpdatedText</c>).
@@ -547,29 +622,32 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         var now = _now();
 
         // The dial shows the display value: when the week converts to less session than the session
-        // window itself has left, the week is what is actually stopping the user (R10, R11). Pace
-        // still reads the raw session value, which is the true five-hour window (KTD9).
-        SessionCard = new GaugeCard
-        {
-            Title = "Session",
-            RemainingPercent = reading.SessionDisplayRemaining,
-            Color = RemainingColor(reading.SessionDisplayRemaining),
-            TickCount = SessionTickCount,
-            Pace = MakePaceBar(usage.SessionResetDate, SessionWindowSeconds, now),
-            IsWeeklyLimited = reading.IsSessionWeeklyLimited,
-        };
+        // window itself has left, the week is what is actually stopping the user (R10, R11). Pace and
+        // the run-out still read the raw session value, which is the true five-hour window (KTD9).
+        var sessionPace = DialForecast.SessionPace(reading, now);
+        SessionCard = MakeGaugeCard(
+            title: "Session",
+            remaining: reading.SessionDisplayRemaining,
+            rawRemaining: usage.SessionRemaining,
+            resetsAt: usage.SessionResetDate,
+            windowSeconds: SessionWindowSeconds,
+            tickCount: SessionTickCount,
+            pace: sessionPace,
+            isWeeklyLimited: reading.IsSessionWeeklyLimited,
+            now: now);
 
-        WeeklyCard = new GaugeCard
-        {
-            Title = "Weekly",
-            RemainingPercent = usage.WeeklyRemaining,
-            Color = RemainingColor(usage.WeeklyRemaining),
-            TickCount = WeeklyTickCount,
-            Pace = MakePaceBar(usage.WeeklyResetDate, WeeklyWindowSeconds, now),
-        };
+        WeeklyCard = MakeGaugeCard(
+            title: "Weekly",
+            remaining: usage.WeeklyRemaining,
+            rawRemaining: usage.WeeklyRemaining,
+            resetsAt: usage.WeeklyResetDate,
+            windowSeconds: WeeklyWindowSeconds,
+            tickCount: WeeklyTickCount,
+            pace: DialForecast.Pace(usage.WeeklyRemaining, usage.WeeklyResetDate, WeeklyWindowSeconds, now),
+            isWeeklyLimited: false,
+            now: now);
 
         Credits = MakeCreditsRow(usage.Credits, now);
-        Resets = MakeResetsCard(usage, now);
 
         // Model bars: the synthetic "All Models" row (real weekly aggregate, never fabricated)
         // followed by the per-model bars in order. The Models card is omitted entirely and Resets
@@ -601,6 +679,7 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
                     // be two identical lines (R20).
                     DisplayName = Services.AccountStore.DisambiguatedName(account, _accounts),
                     IsActive = account.Id == _activeAccountId,
+                    IsEditing = account.Id == _editingAccountId,
                 });
             }
         }
@@ -611,7 +690,6 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         SessionCard = null;
         WeeklyCard = null;
         Credits = CreditsRow.None;
-        Resets = new ResetsCard { Unavailable = true };
         HasModelBars = false;
         ModelBars.Clear();
         ShowAccountList = false;
@@ -738,24 +816,40 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         return Math.Max(0, Math.Min(100, percent));
     }
 
+
     /// <summary>
-    /// The pace bar for a gauge: percent + remaining-scale color + the "<n>%" label, or
-    /// <see cref="PaceBar.None"/> when the reset date yields no countdown.
+    /// Assembles one dial: the two ring values, the pace word and its colour, the run-out line, the
+    /// countdown, and the sentence a screen reader says. Pure and static so every dial's contents can
+    /// be checked without a window.
     /// </summary>
-    public static PaceBar MakePaceBar(DateTimeOffset? resetsAt, double windowSeconds, DateTimeOffset now)
+    public static GaugeCard MakeGaugeCard(
+        string title,
+        double remaining,
+        double rawRemaining,
+        DateTimeOffset? resetsAt,
+        double windowSeconds,
+        int tickCount,
+        PaceStatus pace,
+        bool isWeeklyLimited,
+        DateTimeOffset now)
     {
-        var percent = TimeRemainingPercent(resetsAt, windowSeconds, now);
-        if (percent is not { } p)
+        var timeRemaining = DialForecast.TimeRemainingPercent(resetsAt, windowSeconds, now);
+        var lines = DialForecast.DialLines(pace, rawRemaining, resetsAt, windowSeconds, now);
+
+        return new GaugeCard
         {
-            return PaceBar.None;
-        }
-        var rounded = (int)Math.Round(p);
-        return new PaceBar
-        {
-            HasValue = true,
-            Percent = p,
-            Color = RemainingColor(p),
-            PercentLabel = $"{rounded}%",
+            Title = title,
+            RemainingPercent = remaining,
+            Color = DialForecast.RingColor(remaining, pace),
+            TickCount = tickCount,
+            TimeRemainingPercent = timeRemaining,
+            Pace = pace,
+            PaceCaption = lines.Caption ?? string.Empty,
+            PaceCaptionColor = DialForecast.PaceCaptionColor(remaining, pace),
+            RunOutLine = lines.RunOut ?? string.Empty,
+            Countdown = lines.Countdown,
+            IsWeeklyLimited = isWeeklyLimited,
+            AccessibilityLabel = DialForecast.GaugeAccessibilityLabel(title, remaining, timeRemaining, pace, lines),
         };
     }
 
@@ -787,37 +881,6 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
             });
         }
         return rows;
-    }
-
-    /// <summary>
-    /// The Resets card. When both reset dates are missing the Mac shows one explicit
-    /// "Reset times unavailable" line (issue #23) rather than two "--" rows; otherwise it shows a
-    /// Session row and a Weekly row, each carrying the long-form countdown or "--".
-    /// </summary>
-    public static ResetsCard MakeResetsCard(UsageSnapshot usage, DateTimeOffset now)
-    {
-        if (usage.SessionResetDate is null && usage.WeeklyResetDate is null)
-        {
-            return new ResetsCard { Unavailable = true };
-        }
-        return new ResetsCard
-        {
-            Unavailable = false,
-            Rows = new[]
-            {
-                MakeResetRow("Session", usage.SessionResetDate, now),
-                MakeResetRow("Weekly", usage.WeeklyResetDate, now),
-            },
-        };
-    }
-
-    private static ResetRow MakeResetRow(string label, DateTimeOffset? date, DateTimeOffset now)
-    {
-        if (date is { } d)
-        {
-            return new ResetRow { Label = label, Value = FormatCountdown(d, now), HasDate = true };
-        }
-        return new ResetRow { Label = label, Value = "--", HasDate = false };
     }
 
     /// <summary>
@@ -949,9 +1012,12 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         return new DateTimeOffset(startOfMonth.AddMonths(1));
     }
 
-    /// <summary>Medium-style date, no time -- the Mac credits "Resets" line format.</summary>
+    /// <summary>
+    /// A date in the user's own format (R34). A reader in Britain or Germany expects the day before
+    /// the month; printing the US order at them is a small thing that reads as wrong every time.
+    /// </summary>
     public static string ShortDate(DateTimeOffset date)
-        => date.LocalDateTime.ToString("MMM d, yyyy", CultureInfo.CurrentCulture);
+        => date.LocalDateTime.ToString("d", CultureInfo.CurrentCulture);
 
     /// <summary>
     /// Currency-aware formatting. Falls back to USD when the code is missing/empty, matching the Mac
@@ -961,20 +1027,64 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     public static string FormatCurrency(double value, string? code)
     {
         var resolved = string.IsNullOrEmpty(code) ? "USD" : code!;
-        var symbol = CurrencySymbol(resolved);
-        return symbol + value.ToString("N2", CultureInfo.CurrentCulture);
+
+        // The amount's own currency decides the symbol; the user's region decides everything else -
+        // where the symbol sits, which separators group the digits (R34, KTD14). Formatting an
+        // Australian balance with a German user's grouping is right; forcing German euros on it is
+        // not.
+        var format = (NumberFormatInfo)CultureInfo.CurrentCulture.NumberFormat.Clone();
+        format.CurrencySymbol = CurrencySymbol(resolved);
+        format.CurrencyDecimalDigits = 2;
+        return value.ToString("C", format);
     }
 
-    private static string CurrencySymbol(string isoCode) => isoCode.ToUpperInvariant() switch
+    /// <summary>
+    /// The symbol for an ISO currency code, taken from whichever region publishes it, so a code the
+    /// app has never seen still prints its real symbol rather than the bare letters.
+    /// </summary>
+    internal static string CurrencySymbol(string isoCode)
     {
-        "USD" => "$",
-        "AUD" => "A$",
-        "CAD" => "C$",
-        "GBP" => "£",
-        "EUR" => "€",
-        "JPY" => "¥",
-        _ => isoCode + " ",
-    };
+        var upper = isoCode.ToUpperInvariant();
+        if (SymbolCache.TryGetValue(upper, out var cached))
+        {
+            return cached;
+        }
+
+        var symbol = upper switch
+        {
+            "USD" => "$",
+            "AUD" => "A$",
+            "CAD" => "C$",
+            "GBP" => "£",
+            "EUR" => "€",
+            "JPY" => "¥",
+            _ => LookUpSymbol(upper) ?? upper + " ",
+        };
+
+        SymbolCache[upper] = symbol;
+        return symbol;
+    }
+
+    private static readonly Dictionary<string, string> SymbolCache = new(StringComparer.Ordinal);
+
+    private static string? LookUpSymbol(string isoCode)
+    {
+        try
+        {
+            foreach (var culture in CultureInfo.GetCultures(CultureTypes.SpecificCultures))
+            {
+                var region = new RegionInfo(culture.Name);
+                if (string.Equals(region.ISOCurrencySymbol, isoCode, StringComparison.OrdinalIgnoreCase))
+                {
+                    return region.CurrencySymbol;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is ArgumentException or CultureNotFoundException)
+        {
+        }
+        return null;
+    }
 
     // MARK: - INotifyPropertyChanged
 

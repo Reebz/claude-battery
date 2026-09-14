@@ -46,7 +46,11 @@ public class FlyoutSnapshotSpikeTests
         RemainingPercent = 76,
         Color = UsageColor.Green,
         TickCount = 5,
-        Pace = new PaceBar { HasValue = true, Percent = 40, Color = UsageColor.Green, PercentLabel = "40%" }
+        TimeRemainingPercent = 40,
+        Pace = PaceStatus.OnTrack,
+        PaceCaption = "On Track",
+        PaceCaptionColor = UsageColor.Green,
+        Countdown = "Resets in 2h 00m"
     };
 
     /// <summary>

@@ -249,12 +249,14 @@ public sealed class RepairAllTests : IDisposable
     {
         var store = NewStore();
         store.UpsertAccount(Stored("org-a"));
+        store.UpsertAccount(Stored("org-b"));
         store.UpsertAccount(Stored("org-untouched", key: "sk-other"));
         var viewing = store.Accounts.First(a => a.OrganizationId == "org-untouched");
         store.SwitchTo(viewing.Id);
 
-        // The paste's login only covers org-a.
-        var api = new FakeClaudeApi { Orgs = new[] { Org("org-a") } };
+        // The pasted login covers two stored organizations, and the one being viewed is not one of
+        // them: everything it can reach is already stored, so it repairs and stops.
+        var api = new FakeClaudeApi { Orgs = new[] { Org("org-a"), Org("org-b") } };
         var result = await new ManualSignIn(api, store).SignInAsync("sessionKey=sk-pasted; __cf_bm=cf-new");
 
         Assert.Equal(viewing.Id, store.ActiveAccountId);

@@ -208,43 +208,6 @@ public class FlyoutStateTests
         Assert.Equal(ids.Count, ids.Distinct().Count());
     }
 
-    [Fact]
-    public void ResetsCard_BothMissing_IsUnavailable()
-    {
-        var usage = new UsageSnapshot { SessionRemaining = 50, WeeklyRemaining = 50 };
-        var card = FlyoutViewModel.MakeResetsCard(usage, Now);
-        Assert.True(card.Unavailable);
-        Assert.Empty(card.Rows);
-    }
-
-    [Fact]
-    public void ResetsCard_PresentDates_ShowsSessionAndWeeklyRows()
-    {
-        var usage = UsageWithModels();
-        var card = FlyoutViewModel.MakeResetsCard(usage, Now);
-        Assert.False(card.Unavailable);
-        Assert.Collection(card.Rows,
-            r => { Assert.Equal("Session", r.Label); Assert.True(r.HasDate); },
-            r => { Assert.Equal("Weekly", r.Label); Assert.True(r.HasDate); });
-    }
-
-    [Fact]
-    public void ResetRow_UnknownDate_RendersDashesNotACrash()
-    {
-        // Only the session date present: the weekly row must render "--", never throw on a null date.
-        var usage = new UsageSnapshot
-        {
-            SessionRemaining = 50,
-            WeeklyRemaining = 50,
-            SessionResetDate = Now.AddHours(2),
-            WeeklyResetDate = null,
-        };
-        var card = FlyoutViewModel.MakeResetsCard(usage, Now);
-        Assert.False(card.Unavailable);
-        Assert.Equal("--", card.Rows[1].Value);
-        Assert.False(card.Rows[1].HasDate);
-    }
-
     // MARK: - Color scales (remaining vs spend) at the documented boundaries
 
     [Theory]
@@ -396,40 +359,31 @@ public class FlyoutStateTests
         Assert.NotNull(row.BalanceText);
     }
 
-    // MARK: - Pace bar (time remaining) percent + omission
+    // MARK: - Time remaining in the window, which is what the inner ring draws
 
     [Fact]
-    public void PaceBar_FullWindowRemaining_IsHundredPercent()
+    public void TimeRemaining_FullWindow_IsHundredPercent()
     {
-        // resetsAt one full session window from now => 100% time remaining.
-        var pace = FlyoutViewModel.MakePaceBar(Now.AddSeconds(FlyoutViewModel.SessionWindowSeconds), FlyoutViewModel.SessionWindowSeconds, Now);
-        Assert.True(pace.HasValue);
-        Assert.Equal(100, pace.Percent, 3);
-        Assert.Equal("100%", pace.PercentLabel);
+        var percent = DialForecast.TimeRemainingPercent(
+            Now.AddSeconds(DialForecast.SessionWindowSeconds), DialForecast.SessionWindowSeconds, Now);
+        Assert.Equal(100, percent!.Value, 3);
     }
 
     [Fact]
-    public void PaceBar_HalfWindowRemaining_IsFiftyPercent()
+    public void TimeRemaining_HalfWindow_IsFiftyPercent()
     {
-        var pace = FlyoutViewModel.MakePaceBar(Now.AddSeconds(FlyoutViewModel.WeeklyWindowSeconds / 2), FlyoutViewModel.WeeklyWindowSeconds, Now);
-        Assert.True(pace.HasValue);
-        Assert.Equal(50, pace.Percent, 3);
+        var percent = DialForecast.TimeRemainingPercent(
+            Now.AddSeconds(DialForecast.WeeklyWindowSeconds / 2), DialForecast.WeeklyWindowSeconds, Now);
+        Assert.Equal(50, percent!.Value, 3);
     }
 
     [Fact]
-    public void PaceBar_NullResetDate_IsOmitted()
-    {
-        var pace = FlyoutViewModel.MakePaceBar(null, FlyoutViewModel.SessionWindowSeconds, Now);
-        Assert.False(pace.HasValue);
-    }
+    public void TimeRemaining_NoResetDate_IsUnknown() =>
+        Assert.Null(DialForecast.TimeRemainingPercent(null, DialForecast.SessionWindowSeconds, Now));
 
     [Fact]
-    public void PaceBar_PastResetDate_IsOmitted()
-    {
-        // A reset already in the past yields no countdown, so the bar is omitted (KTD4).
-        var pace = FlyoutViewModel.MakePaceBar(Now.AddHours(-1), FlyoutViewModel.SessionWindowSeconds, Now);
-        Assert.False(pace.HasValue);
-    }
+    public void TimeRemaining_PastResetDate_IsUnknown() =>
+        Assert.Null(DialForecast.TimeRemainingPercent(Now.AddHours(-1), DialForecast.SessionWindowSeconds, Now));
 
     // MARK: - Long-form countdown format (Mac formatCountdown parity)
 

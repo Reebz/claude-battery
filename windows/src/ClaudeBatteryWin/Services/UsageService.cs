@@ -105,6 +105,11 @@ public sealed class UsageService : IDisposable
     /// True between a sign-in's suspend and its resume. Kept so a resume that arrives after the
     /// sign-in already restarted polling does not start a second chain.
     private bool _suspended;
+
+    /// Completes when the poll currently running finishes. Null when none is. Tracked here rather
+    /// than relying on the scheduler's chain, so a suspend waits for the real request whatever
+    /// started it.
+    private TaskCompletionSource? _inFlightPoll;
     private CancellationTokenSource? _pollCts;
 
     /// The task that decides whether to re-arm after a timer fire (U3). Held so a test can await the
@@ -255,19 +260,25 @@ public sealed class UsageService : IDisposable
     /// </summary>
     public async Task SuspendPollingAsync()
     {
-        Task inFlight;
+        Task chained;
+        Task? inFlight;
         lock (_gate)
         {
             _suspendEpoch++;
             _suspended = true;
             _pollCts?.Cancel();
             _clock.Disarm();
-            inFlight = _currentPoll;
+            chained = _currentPoll;
+            inFlight = _inFlightPoll?.Task;
         }
 
         try
         {
-            await inFlight.ConfigureAwait(false);
+            await chained.ConfigureAwait(false);
+            if (inFlight is not null)
+            {
+                await inFlight.ConfigureAwait(false);
+            }
         }
         catch (Exception)
         {
@@ -429,6 +440,7 @@ public sealed class UsageService : IDisposable
         {
             if (_isPolling) return;
             _isPolling = true;
+            _inFlightPoll = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         }
 
         try
@@ -621,7 +633,14 @@ public sealed class UsageService : IDisposable
         }
         finally
         {
-            lock (_gate) { _isPolling = false; }
+            TaskCompletionSource? finished;
+            lock (_gate)
+            {
+                _isPolling = false;
+                finished = _inFlightPoll;
+                _inFlightPoll = null;
+            }
+            finished?.TrySetResult();
         }
     }
 

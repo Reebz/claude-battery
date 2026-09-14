@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -57,6 +58,48 @@ public partial class FlyoutWindow : Window
     /// second half of a toggle-close and must be swallowed.
     /// </summary>
     private long? _hiddenByDeactivationAtMs;
+    // ---- Renaming an account from the panel (R36) -----------------------------------------------
+
+    /// <summary>Enter commits the new name, Escape abandons it.</summary>
+    private void OnRenameKeyDown(object sender, KeyEventArgs e)
+    {
+        if (sender is not TextBox box || ViewModel is null)
+        {
+            return;
+        }
+
+        if (e.Key == Key.Enter)
+        {
+            e.Handled = true;
+            CommitRename(box);
+        }
+        else if (e.Key == Key.Escape)
+        {
+            e.Handled = true;
+            ViewModel.CancelRename();
+        }
+    }
+
+    /// <summary>Clicking away commits too: an edit field left open over a panel that can close is a
+    /// change the user thinks they made.</summary>
+    private void OnRenameLostFocus(object sender, RoutedEventArgs e)
+    {
+        if (sender is TextBox box)
+        {
+            CommitRename(box);
+        }
+    }
+
+    private void CommitRename(TextBox box)
+    {
+        if (ViewModel is null || box.Tag is not Guid id)
+        {
+            return;
+        }
+
+        ViewModel.CommitRename(id, box.Text);
+    }
+
 
     // The anchor resolved at the last ShowAtTray, in device pixels: the tray rect when the icon had
     // an on-screen rect at click time, else null, plus the click-time cursor. Size-driven
@@ -568,6 +611,7 @@ public sealed class UsageColorToBrushConverter : IValueConverter
             UsageColor.Red => "UsageRedBrush",
             UsageColor.Orange => "UsageOrangeBrush",
             UsageColor.Green => "UsageGreenBrush",
+            UsageColor.Muted => "UsageMutedBrush",
             _ => null,
         };
         return ResolveBrush(key);
@@ -584,6 +628,9 @@ public sealed class UsageColorToBrushConverter : IValueConverter
     private static readonly SolidColorBrush Green = Frozen(0x2E, 0xCC, 0x71);
     private static readonly SolidColorBrush Cyan = Frozen(0x22, 0xC3, 0xE6);
 
+    /// The secondary grey: the pace word when there is no pace to grade, and the inner time ring.
+    private static readonly SolidColorBrush Muted = Frozen(0x99, 0x99, 0x99);
+
     private static SolidColorBrush Frozen(byte r, byte g, byte b)
     {
         var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
@@ -597,6 +644,7 @@ public sealed class UsageColorToBrushConverter : IValueConverter
         "UsageOrangeBrush" => Orange,
         "UsageGreenBrush" => Green,
         "SpendCyanBrush" => Cyan,
+        "UsageMutedBrush" => Muted,
         _ => Brushes.Transparent,
     };
 }
@@ -702,14 +750,17 @@ public sealed class PercentOfWidthConverter : IMultiValueConverter
 /// </summary>
 public sealed class GaugeArcConverter : IValueConverter
 {
-    // Nominal geometry box. The Mac centers at (midX, midY+6) with radius min(w,h)/2 - 3 over a
-    // ~58pt square; these constants reproduce that arc proportionally.
-    private const double BoxSize = 58;
+    /// The dial box. Both rings share this centre and these angles; the inner one is simply a
+    /// smaller radius, which is what makes them read as concentric.
+    private const double BoxSize = 80;
     private const double Radius = BoxSize / 2 - 3;
     private const double CenterX = BoxSize / 2;
     private const double CenterY = BoxSize / 2 + 6;
     private const double StartAngleDeg = 135;
     private const double SweepDeg = 270;
+
+    /// The gap between the outer and inner rings, wide enough that they never read as one thick arc.
+    private const double InnerInset = 9;
 
     public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
     {
@@ -719,17 +770,21 @@ public sealed class GaugeArcConverter : IValueConverter
         }
 
         var which = parameter as string ?? "fill";
-        double fraction = string.Equals(which, "track", StringComparison.OrdinalIgnoreCase)
-            ? 1.0
-            : Math.Max(0, Math.Min(100, card.RemainingPercent)) / 100.0;
-
-        return BuildArc(fraction);
+        return which switch
+        {
+            "track" => BuildArc(1.0, Radius),
+            "inner-track" => BuildArc(1.0, Radius - InnerInset),
+            "inner-fill" => BuildArc(Fraction(card.TimeRemainingPercent ?? 0), Radius - InnerInset),
+            _ => BuildArc(Fraction(card.RemainingPercent), Radius),
+        };
     }
+
+    private static double Fraction(double percent) => Math.Max(0, Math.Min(100, percent)) / 100.0;
 
     public object ConvertBack(object value, Type targetType, object? parameter, CultureInfo culture)
         => throw new NotSupportedException();
 
-    private static Geometry BuildArc(double fraction)
+    private static Geometry BuildArc(double fraction, double radius)
     {
         var geometry = new StreamGeometry();
         if (fraction <= 0)
@@ -738,15 +793,15 @@ public sealed class GaugeArcConverter : IValueConverter
         }
 
         var sweep = SweepDeg * fraction;
-        var start = PointOnArc(StartAngleDeg);
-        var end = PointOnArc(StartAngleDeg + sweep);
+        var start = PointOnArc(StartAngleDeg, radius);
+        var end = PointOnArc(StartAngleDeg + sweep, radius);
 
         using (var ctx = geometry.Open())
         {
             ctx.BeginFigure(start, isFilled: false, isClosed: false);
             ctx.ArcTo(
                 end,
-                new Size(Radius, Radius),
+                new Size(radius, radius),
                 rotationAngle: 0,
                 isLargeArc: sweep > 180,
                 SweepDirection.Clockwise,
@@ -758,11 +813,12 @@ public sealed class GaugeArcConverter : IValueConverter
         return geometry;
     }
 
-    private static Point PointOnArc(double angleDeg)
+    private static Point PointOnArc(double angleDeg, double radius)
     {
         var radians = angleDeg * Math.PI / 180.0;
-        return new Point(CenterX + Radius * Math.Cos(radians), CenterY + Radius * Math.Sin(radians));
+        return new Point(CenterX + radius * Math.Cos(radians), CenterY + radius * Math.Sin(radians));
     }
+
 }
 
 /// <summary>
@@ -774,14 +830,14 @@ public sealed class GaugeArcConverter : IValueConverter
 /// </summary>
 public sealed class GaugeTicksConverter : IValueConverter
 {
-    // Same nominal geometry box as GaugeArcConverter so the ticks sit on the arc.
-    private const double BoxSize = 58;
+    // Same geometry box as GaugeArcConverter so the notches sit on the outer ring.
+    private const double BoxSize = 80;
     private const double Radius = BoxSize / 2 - 3;
     private const double CenterX = BoxSize / 2;
     private const double CenterY = BoxSize / 2 + 6;
     private const double StartAngleDeg = 135;
     private const double SweepDeg = 270;
-    private const double TickHalfLength = 3.0; // notch length, centered on the track radius
+    private const double TickHalfLength = 3.5; // notch length, centred on the outer ring
 
     public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
     {
@@ -790,10 +846,12 @@ public sealed class GaugeTicksConverter : IValueConverter
             return Geometry.Empty;
         }
 
+        // Interior notches only: an N-segment dial has N-1 dividers, and the two ends of the arc
+        // are where it starts and stops, not divisions of it (R31).
         var group = new GeometryGroup();
-        for (var i = 0; i < card.TickCount; i++)
+        for (var i = 1; i < card.TickCount; i++)
         {
-            var angle = StartAngleDeg + SweepDeg * i / (card.TickCount - 1);
+            var angle = StartAngleDeg + SweepDeg * i / card.TickCount;
             var radians = angle * Math.PI / 180.0;
             var cos = Math.Cos(radians);
             var sin = Math.Sin(radians);
