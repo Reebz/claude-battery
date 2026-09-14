@@ -321,9 +321,10 @@ public class IconRenderTests
     public void Render_ZeroRemaining_PaintsNoFillOnTopBar()
     {
         // Halfway along the bar is inside the interior, well clear of the outline and the nub, so a
-        // painted pixel there can only be fill.
-        Assert.False(TopBarMidpointIsPainted(Snapshot(session: 0, weekly: 0), 32));
-        Assert.True(TopBarMidpointIsPainted(Snapshot(session: 75, weekly: 0), 32));
+        // painted pixel there can only be fill. Both readings carry a live week: a spent week forces
+        // the session number to zero (the exhausted-week rule), which would prove nothing here.
+        Assert.False(TopBarMidpointIsPainted(Snapshot(session: 0, weekly: 50), 32));
+        Assert.True(TopBarMidpointIsPainted(Snapshot(session: 75, weekly: 50), 32));
     }
 
     private static Bitmap RenderTopBar(UsageSnapshot usage, int size)
