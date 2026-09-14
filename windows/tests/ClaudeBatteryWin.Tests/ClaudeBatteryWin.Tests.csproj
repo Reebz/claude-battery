@@ -15,6 +15,9 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
     <PackageReference Include="xunit" Version="2.9.2" />
+    <!-- STA + Dispatcher test attributes ([WpfFact]) for the flyout render spike. 1.2.69 is the last
+         Xunit.StaFact release for xUnit v2, which this project pins. -->
+    <PackageReference Include="Xunit.StaFact" Version="1.2.69" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>

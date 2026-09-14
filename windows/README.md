@@ -1,12 +1,13 @@
 # Claude Battery for Windows
 
-A standalone Windows system-tray app that mirrors Claude Battery v1.50: it shows claude.ai usage as
-a battery icon in the tray, with a borderless Fluent flyout, up to 5 accounts, DPAPI-encrypted
+A standalone Windows system-tray app that mirrors the macOS Claude Battery: it shows claude.ai usage
+as a battery icon in the tray, with a borderless Fluent flyout, multiple accounts, DPAPI-encrypted
 secrets, and Velopack in-app auto-update. C#/.NET 8 + WPF + WebView2. The macOS app under
 `../ClaudeBattery/` is a separate codebase and is untouched.
 
-This is a port-in-progress. See `../docs/plans/2026-06-19-001-feat-windows-port-plan.md` for the
-plan and `../docs/brainstorms/2026-06-19-windows-port-requirements.md` for requirements.
+The port shipped as a beta at macOS v1.50 parity and is being brought up to v1.72. See
+`../docs/plans/2026-08-05-001-feat-windows-parity-plan.md` for the current plan and
+`../docs/plans/2026-09-10-windows-parity-gap-register.md` for per-requirement status.
 
 ## Layout
 
@@ -41,8 +42,16 @@ dotnet test -c Release --no-build
 
 CI mirrors these exact steps. `.github/workflows/windows-ci.yml` (at the repo root) runs on
 `windows-latest`, restores, builds `-c Release`, and tests `-c Release --no-build`, in
-`working-directory: windows`. It triggers on push to `feat/windows-port` and on every pull request.
-It does not touch the GitHub Pages deploy (`pages.yml`) or the macOS app.
+`working-directory: windows`. It triggers on push to `feat/windows-port` and
+`fix/windows-session-restore`, and on every pull request. It does not touch the GitHub Pages deploy
+(`pages.yml`) or the macOS app.
+
+CI is the only automated gate: there is no Windows machine in the loop. Two jobs carry the evidence.
+`build-test` writes every tray-icon state as a PNG into the `tray-icons` artifact (plus the flyout
+dial, when the render spike in `FlyoutSnapshotSpikeTests` passes on the runner). `smoke-launch`
+publishes the exe, runs it on the runner's desktop, opens the tray overflow and the flyout, and
+uploads desktop screenshots as the `smoke-launch` artifact. Judge a rendering change by opening those
+artifacts on the run.
 
 ### Run / package a release build
 
@@ -50,44 +59,31 @@ Releases are built on Windows via `build/pack.ps1` (the analog of the Mac `scrip
 publishes the self-contained single-file app, runs `vpk pack`, and signs via SignPath Foundation
 (OV-cert fallback wired in). That script is gated on the U13 spike below.
 
-## Spike gates (UNPROVEN)
+## Current state
 
-Two spikes must run on a real Windows box before the corresponding assumptions can be trusted in
-production. Neither has run (they need a Windows box, a real claude.ai login, and SignPath):
+The gap register at `../docs/plans/2026-09-10-windows-parity-gap-register.md` is the tracking
+document: it carries every parity requirement with its status, the Windows and Mac evidence behind
+it, and the commit that closed it. This section lists only what CI can never settle.
 
-- **U2 - WebView2 auth + Cloudflare cookie-replay.** `spikes/U2-auth-cloudflare-spike-TODO.md`. The
-  load-bearing test: fire a real `GET /api/organizations/{org}/usage` from a `SocketsHttpHandler`
-  seeded with WebView2-captured cookies + the matched UA and assert **200, not 403**. A 403 means the
-  TLS/JA3 fingerprint gates the separate-`HttpClient` poll and polling must move into WebView2.
-- **U13 - Velopack + SignPath + single-file packaging.** `spikes/U13-packaging-spike-TODO.md`. Prove
-  `vpk pack` + single-file reconciliation + one SignPath submit-and-poll round-trip compose, and that
-  WebView2 initializes from the packaged single-file build.
+Verified in the field or on CI:
 
-The code is structured so the U2 verdict is a one-line composition-root change: every consumer holds
-`IClaudeApi`, and the transport is wrapped in `SwappableClaudeApi`, so switching to an in-WebView2
-transport is `Swap`-in only (`App.BuildObjectGraph` / `App.RebuildApiWithUserAgent`).
+- The app builds, tests, and launches on the runner, and has shipped to a beta tester.
+- Cookie replay works. A `SocketsHttpHandler` seeded with WebView2-captured cookies and the matched
+  user agent polls `/api/organizations/{org}/usage` without a Cloudflare 403, which was the port's
+  biggest open risk. The `IClaudeApi` / `SwappableClaudeApi` seam that would have let polling move
+  inside WebView2 stays in place but is not needed.
 
-## What is NOT yet verified
+Field-gated, and written down as unverified rather than assumed fixed:
 
-Be explicit about the state of this tree:
-
-- **Nothing here has compiled.** The source was authored on macOS, where the WPF/WebView2/WinRT
-  target framework cannot build. First compilation + test run happens on Windows CI
-  (`windows-ci.yml`). Expect to fix compile errors there.
-- **The "`SocketsHttpHandler` clears Cloudflare" assumption is unproven** (U2). The default transport
-  is a `SocketsHttpHandler` + shared `CookieContainer`; if the fingerprint gates it (403), the
-  in-WebView2 polling fallback must be implemented and swapped in. This is the single most
-  load-bearing assumption in the port.
-- **The packaging/signing chain is unproven** (U13). `build/pack.ps1` encodes the intended
-  SignPath-async-vs-Velopack-sync workaround, but it has not round-tripped against a real SignPath
-  project, and the single-file-vs-Velopack-bundle reconciliation is not decided.
-- **Embedded provider login coverage is unknown** (U2 provider matrix). Email-code + manual cookie
-  paste are the default-on fallbacks; embedded Google/Apple/SSO is progressive enhancement only where
-  the spike proves it completes.
-- **SystemEvents in a windowless WPF app** (`PowerModeChanged` for wake-repoll, `UserPreferenceChanged`
-  for theme) are assumed to fire; if they do not, the fallback is a hidden message-only window
-  (noted in `App.xaml.cs`). The U1 verification step covers this.
-- **WebView2 UDF disk residual** is assumed; U2 confirms what actually lands on disk so the
-  `LoginWindow` sweep/delete paths are covering a real file.
-- **No signed build exists**, so SmartScreen reputation has not started; that is gated on SignPath
-  enrollment (an external approval).
+- **Anything judged by eye on a real Windows screen.** Tray icon legibility in the live notification
+  area, flyout layout at non-integer DPI scales, and Fluent theming against a real desktop.
+- **A real sign-in against claude.ai.** The login state machine is driven by `ILoginWebView` fakes in
+  the tests; provider coverage (email code, Google, Apple, company single sign-on) and the exact
+  shape of a live `GET /api/account` response can only be confirmed by signing in.
+- **Diagnostics export to an unusual destination.** A reparse point, a mapped drive, or a cloud-sync
+  placeholder folder cannot be fabricated on the runner.
+- **Toast notification permission.** Whether reading the setting throws on this app's unpackaged
+  registration is unknown; the read is wrapped either way.
+- **The packaging and signing chain.** `build/pack.ps1` encodes the intended Velopack plus SignPath
+  flow but has never round-tripped against a real SignPath project. No signed build exists, so
+  SmartScreen reputation has not started. Distribution is out of scope for the parity plan.

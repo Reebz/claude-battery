@@ -1,10 +1,10 @@
 name: Windows CI
 
 # Build + test the Windows port (windows/). The Mac app and the GitHub Pages deploy are untouched:
-# this workflow is scoped to the windows/ tree and runs only on the port branch and on PRs.
+# this workflow is scoped to the windows/ tree and runs only on the port branches and on PRs.
 on:
   push:
-    branches: [feat/windows-port]
+    branches: [feat/windows-port, fix/windows-session-restore]
   pull_request:
 
 permissions:
