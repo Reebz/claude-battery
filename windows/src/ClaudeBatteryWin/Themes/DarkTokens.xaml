@@ -1,0 +1,27 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Dark theme tokens. The dark column of the plan's light/dark token table (the Mac
+         Color(white: N) values). FlyoutWindow.ApplyTheme(ThemeBucket.Dark) merges this so every
+         DynamicResource neutral re-resolves to the dark surface. Semantic colors (red/orange/green,
+         spend cyan) are theme-invariant and identical in both dictionaries (Mac parity). -->
+
+    <!-- Neutral surfaces -->
+    <SolidColorBrush x:Key="PopoverSurfaceBrush" Color="#FF1E1E1E" />
+    <SolidColorBrush x:Key="CardBackgroundBrush" Color="#26FFFFFF" />   <!-- white 0.15 -->
+    <SolidColorBrush x:Key="BarTrackBrush" Color="#40FFFFFF" />          <!-- white 0.25 -->
+    <SolidColorBrush x:Key="LabelMutedBrush" Color="#99FFFFFF" />        <!-- white 0.6 -->
+    <SolidColorBrush x:Key="LabelDetailBrush" Color="#B3FFFFFF" />       <!-- white 0.7 -->
+    <SolidColorBrush x:Key="LabelSubtleBrush" Color="#80FFFFFF" />       <!-- white 0.5 -->
+    <SolidColorBrush x:Key="LabelFaintBrush" Color="#73FFFFFF" />        <!-- white 0.45 -->
+    <SolidColorBrush x:Key="ArcTickBrush" Color="#1FFFFFFF" />           <!-- white 0.12 -->
+    <SolidColorBrush x:Key="DividerBrush" Color="#4DFFFFFF" />           <!-- white 0.3 a0.3 -->
+    <SolidColorBrush x:Key="ForegroundBrush" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="EditFieldBorderBrush" Color="#99007ACC" />   <!-- Fluent accent -->
+
+    <!-- Semantic colors (theme-invariant) -->
+    <SolidColorBrush x:Key="UsageRedBrush" Color="#FFE74C3C" />
+    <SolidColorBrush x:Key="UsageOrangeBrush" Color="#FFF39C12" />
+    <SolidColorBrush x:Key="UsageGreenBrush" Color="#FF2ECC71" />
+    <SolidColorBrush x:Key="SpendCyanBrush" Color="#FF22C3E6" />
+    <SolidColorBrush x:Key="AccentGreenBrush" Color="#FF2ECC71" />
+</ResourceDictionary>

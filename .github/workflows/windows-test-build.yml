@@ -1,0 +1,69 @@
+name: Windows Test Build
+
+# Build a self-contained, single-file Windows .exe and publish it as a GitHub PRE-RELEASE for a
+# tester to try. Triggered by pushing a tag like `windows-test-1.50.0` (a tag-triggered workflow runs
+# the workflow file as it exists on the tagged commit, so this works from feat/windows-port without
+# the workflow needing to live on the default branch). The tag namespace is distinct from the Mac
+# `v{X}` release tags, and every release here is marked pre-release so it never becomes "Latest".
+on:
+  push:
+    tags:
+      - "windows-test-*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # The csproj already declares SelfContained + PublishSingleFile + win-x64, so the output is one
+      # ClaudeBatteryWin.exe with the .NET runtime and WebView2Loader.dll bundled in - no .NET install
+      # needed on the tester's box. WebView2 Evergreen Runtime is still required (the app downloads
+      # and runs the Evergreen bootstrapper itself if it is missing; the zip ships only the exe, no
+      # stub beside it). This build is UNSIGNED, so SmartScreen warns; that is expected.
+      - name: Publish self-contained single-file exe
+        run: dotnet publish src/ClaudeBatteryWin/ClaudeBatteryWin.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish
+
+      - name: Zip the exe
+        shell: pwsh
+        run: Compress-Archive -Path publish/ClaudeBatteryWin.exe -DestinationPath "ClaudeBattery-${{ github.ref_name }}-win-x64.zip" -Force
+
+      - name: Publish GitHub pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^windows-test-', ''
+          $notes = @"
+          Unsigned self-contained beta of the Windows port. Feature parity with Mac v1.72.
+
+          How to run:
+          1. Download and unzip ClaudeBattery-${{ github.ref_name }}-win-x64.zip.
+          2. Windows SmartScreen will warn (the build is not code-signed): click "More info" then "Run anyway".
+          3. The app needs the WebView2 Evergreen Runtime (preinstalled on Windows 11 and most Windows 10); if it is missing the app will download and install it (about 2 MB); if that fails, install it from Microsoft's WebView2 page (https://developer.microsoft.com/microsoft-edge/webview2/) and click Retry.
+
+          New in this build:
+          - Session and Weekly are two-ring dials now: the outer ring is how much quota is left, the inner one how much of the window is left, with a pace word underneath, a run-out estimate when you are spending faster than the clock, and each dial's own reset countdown.
+          - The Session number is the session figure your plan actually allows, converted from the weekly quota, and the same number appears in the tray, the tooltip and the panel. The app also learns your own conversion rate from your usage and shows how confident it is.
+          - Two tray icon styles, picked in Settings: Stacked Bars (what the beta shipped) and Dual Arc Gauge (the panel's rings). The icon is one tint for your taskbar theme and red under 20 percent, matching the Mac.
+          - Sign-in: one paste repairs every organization on the account, a blocked single sign-on redirect now says what happened and offers the manual paste, accounts show their real email and organization name, and polling pauses while the sign-in window is open.
+          - Opt-in diagnostics logging and a redacted export, for attaching to a bug report. Off until you turn it on; no passwords, tokens, emails or account names are written.
+          - Settings tells you when Windows is blocking notifications and links to the setting, repeats how to pin the tray icon, and the app re-checks for updates daily and on waking instead of only at launch.
+          - Money and dates follow your region, the credits reset date no longer needs a spend cap, and the running version is in the panel footer and the tray menu.
+
+          Notes:
+          - This is a raw exe, not an installer: no Start-menu shortcut and no auto-update.
+          - Windows hides new tray icons. On first launch the app tells you to click the chevron (^) in the notification area and drag the icon onto the taskbar; Settings repeats it.
+          - Please report anything that looks wrong at https://github.com/Reebz/claude-battery/issues. Settings > Diagnostics produces a redacted log to attach.
+          "@
+          gh release create "${{ github.ref_name }}" "ClaudeBattery-${{ github.ref_name }}-win-x64.zip" --prerelease --title "Windows Beta ($version)" --notes "$notes"

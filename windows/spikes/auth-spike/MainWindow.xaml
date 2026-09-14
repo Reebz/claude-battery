@@ -1,0 +1,43 @@
+<Window x:Class="AuthSpike.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="U2 Auth + Cloudflare Spike"
+        Width="1000"
+        Height="860"
+        WindowStartupLocation="CenterScreen">
+    <!-- Top: a toolbar to drive the harness. Middle: the real WebView2 the human logs in through
+         (ephemeral InPrivate, isolated user-data folder - mirrors the production LoginWindow).
+         Bottom: a read-only log panel that records every programmatic signal (cookie capture, UA,
+         the production ClaudeApi poll result, and the raw-status probe). Cookie/session VALUES are
+         never written to the log. -->
+    <DockPanel>
+        <ToolBarTray DockPanel.Dock="Top">
+            <ToolBar>
+                <Button x:Name="HomeButton" Content="Go to claude.ai/login" Click="OnHomeClicked" />
+                <Separator />
+                <Button x:Name="GateButton" Content="Run U2 gate test" Click="OnRunGateClicked" />
+                <Separator />
+                <Button x:Name="ClearLogButton" Content="Clear log" Click="OnClearLogClicked" />
+                <Button x:Name="CopyLogButton" Content="Copy log" Click="OnCopyLogClicked" />
+            </ToolBar>
+        </ToolBarTray>
+
+        <Border DockPanel.Dock="Bottom"
+                Height="260"
+                BorderBrush="#FF3C3C3C"
+                BorderThickness="0,1,0,0">
+            <TextBox x:Name="LogBox"
+                     IsReadOnly="True"
+                     FontFamily="Consolas"
+                     FontSize="12"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto"
+                     TextWrapping="NoWrap"
+                     Background="#FF1E1E1E"
+                     Foreground="#FFD4D4D4" />
+        </Border>
+
+        <wv2:WebView2 x:Name="WebView" />
+    </DockPanel>
+</Window>
