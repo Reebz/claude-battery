@@ -207,10 +207,16 @@ public class FlyoutSnapshotSpikeTests
         var root = (FrameworkElement)window.Content;
 
         // The window is 300 DIP wide with SizeToContent=Height; measure against that, unbounded down.
-        root.Measure(new Size(300, double.PositiveInfinity));
-        var size = new Size(300, root.DesiredSize.Height);
-        root.Arrange(new Rect(size));
-        root.UpdateLayout();
+        // Twice: the account list realises its rows during the first layout pass, so the height the
+        // first pass asks for is short by however many rows appeared, and the last one is cut off.
+        var size = new Size(300, 0);
+        for (var pass = 0; pass < 2; pass++)
+        {
+            root.Measure(new Size(300, double.PositiveInfinity));
+            size = new Size(300, root.DesiredSize.Height);
+            root.Arrange(new Rect(size));
+            root.UpdateLayout();
+        }
 
         var dpi = 96 * scale;
         var target = new RenderTargetBitmap(
@@ -224,6 +230,14 @@ public class FlyoutSnapshotSpikeTests
         SavePng(target, $"flyout-panel-{(int)(scale * 100)}");
 
         Assert.True(size.Height > 200, $"the panel laid out only {size.Height:0} DIP tall; it is not showing its content");
+
+        // The image is the evidence, so assert it shows what the evidence is supposed to show.
+        var vm = (FlyoutViewModel)window.DataContext;
+        Assert.NotNull(vm.SessionCard);
+        Assert.NotNull(vm.WeeklyCard);
+        Assert.True(vm.SessionCard!.HasRunOutLine, "the session dial has no run-out line to show");
+        Assert.True(vm.WeeklyCard!.HasRunOutLine, "the weekly dial has no run-out line to show");
+        Assert.True(vm.HasUpdate, "the update notice is not showing");
         Assert.True(
             HasNonUniformPixels(target),
             $"the panel rendered as one flat colour at {scale:0.#}x scale; apply the KD12 fallback.");
@@ -270,10 +284,13 @@ public class FlyoutSnapshotSpikeTests
         vm.LatestReading = new UsageReading(
             new UsageSnapshot
             {
-                SessionRemaining = 76,
-                SessionResetDate = now.AddHours(2),
+                // Spending faster than the clock on both windows, so each dial carries all three
+                // lines: the pace word, the run-out estimate, and the countdown. A comfortable
+                // reading hides the run-out line, which is correct and proves less.
+                SessionRemaining = 25,
+                SessionResetDate = now.AddHours(3),
                 SessionPercentWasRead = true,
-                WeeklyRemaining = 38,
+                WeeklyRemaining = 30,
                 WeeklyResetDate = now.AddDays(3),
                 WeeklyPercentWasRead = true,
                 ModelUsages = new[]
