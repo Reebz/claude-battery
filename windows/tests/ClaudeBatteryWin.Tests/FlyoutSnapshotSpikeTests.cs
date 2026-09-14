@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Xunit;
+using ClaudeBatteryWin.Models;
 using ClaudeBatteryWin.ViewModels;
 using ClaudeBatteryWin.Views;
 using ShapePath = System.Windows.Shapes.Path;
@@ -19,11 +20,12 @@ namespace ClaudeBatteryWin.Tests;
 /// dotnet/wpf pull 11467 is unmerged and targets .NET 12). The only known mitigation is the
 /// AppContext switch set in <see cref="EnableHeadlessRendering"/>.
 ///
-/// This class renders the real gauge dial - the real <see cref="GaugeCard"/> record through the real
-/// <see cref="GaugeArcConverter"/> and <see cref="GaugeTicksConverter"/> - and asserts the PNG is not
-/// one flat colour. A pass means flyout images can join the CI artifact matrix and the panel layout
-/// requirements (R26, R30) are judged from them. A fail means the fallback applies: layout is judged
-/// from the smoke-launch desktop screenshots with the flyout open (KD12).
+/// Two renders live here. The first is the spike itself: the real gauge dial, built from the real
+/// <see cref="GaugeCard"/> record through the real <see cref="GaugeArcConverter"/> and
+/// <see cref="GaugeTicksConverter"/>, asserted not to be one flat colour. The second renders the
+/// whole panel out of <see cref="FlyoutWindow"/> itself, which is the image the layout requirements
+/// (R26, R30) are actually judged from. A fail means the fallback applies: layout is judged from the
+/// smoke-launch desktop screenshots with the flyout open (KD12).
 ///
 /// Set <c>CLAUDE_BATTERY_ICON_ARTIFACTS</c> (CI does) and the PNGs land beside the tray icons.
 /// </summary>
@@ -179,6 +181,118 @@ public class FlyoutSnapshotSpikeTests
             HasNonUniformPixels(bitmap),
             $"RenderTargetBitmap produced a uniform image at {scale:0.#}x scale. " +
             "The headless render path is unavailable on this runner; apply the KD12 fallback.");
+    }
+
+    // --- The whole panel, as the user sees it -----------------------------------------------------
+
+    /// <summary>
+    /// The panel image the layout requirements are judged from: the real <see cref="FlyoutWindow"/>
+    /// content, with its real templates, converters and theme tokens, rendered at 100 and 200 percent
+    /// scaling (R3, R26, R30).
+    ///
+    /// The dial spike above proves the render path works; this proves the layout. It is the only way
+    /// anyone sees the Windows panel without a Windows machine, so the reading it carries is
+    /// deliberately busy: both dials with a pace word, a countdown and a run-out line, an update
+    /// notice at the top, model bars, a credits row and two accounts.
+    /// </summary>
+    [WpfTheory]
+    [InlineData(1.0)]
+    [InlineData(2.0)]
+    public void FlyoutPanel_RendersTheWholeCard(double scale)
+    {
+        EnableHeadlessRendering();
+        EnsureApplication();
+
+        var window = new FlyoutWindow { DataContext = BusyPanelViewModel() };
+        var root = (FrameworkElement)window.Content;
+
+        // The window is 300 DIP wide with SizeToContent=Height; measure against that, unbounded down.
+        root.Measure(new Size(300, double.PositiveInfinity));
+        var size = new Size(300, root.DesiredSize.Height);
+        root.Arrange(new Rect(size));
+        root.UpdateLayout();
+
+        var dpi = 96 * scale;
+        var target = new RenderTargetBitmap(
+            (int)Math.Round(size.Width * scale),
+            (int)Math.Round(size.Height * scale),
+            dpi,
+            dpi,
+            PixelFormats.Pbgra32);
+        target.Render(root);
+
+        SavePng(target, $"flyout-panel-{(int)(scale * 100)}");
+
+        Assert.True(size.Height > 200, $"the panel laid out only {size.Height:0} DIP tall; it is not showing its content");
+        Assert.True(
+            HasNonUniformPixels(target),
+            $"the panel rendered as one flat colour at {scale:0.#}x scale; apply the KD12 fallback.");
+    }
+
+    /// <summary>WPF resolves the theme dictionary through the resource assembly, which an
+    /// Application instance sets. The test host has none, so make one; it is never started.</summary>
+    private static void EnsureApplication()
+    {
+        if (Application.Current is null)
+        {
+            _ = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        }
+    }
+
+    /// <summary>A reading with something in every row, so nothing in the panel is left undrawn.</summary>
+    private static FlyoutViewModel BusyPanelViewModel()
+    {
+        var now = new DateTimeOffset(2026, 9, 14, 12, 0, 0, TimeSpan.Zero);
+        var vm = new FlyoutViewModel(() => now)
+        {
+            IsAuthenticated = true,
+            LastSuccessfulFetch = now.AddMinutes(-2),
+            AvailableUpdateVersion = "1.73",
+        };
+
+        var account = new Account
+        {
+            Email = "you@example.com",
+            SessionKey = "sk",
+            OrganizationId = "org-1",
+            OrganizationName = "Personal",
+        };
+        var other = new Account
+        {
+            Email = "work@example.com",
+            SessionKey = "sk",
+            OrganizationId = "org-2",
+            OrganizationName = "Acme",
+        };
+
+        vm.Accounts = new[] { account, other };
+        vm.ActiveAccountId = account.Id;
+        vm.LatestReading = new UsageReading(
+            new UsageSnapshot
+            {
+                SessionRemaining = 76,
+                SessionResetDate = now.AddHours(2),
+                SessionPercentWasRead = true,
+                WeeklyRemaining = 38,
+                WeeklyResetDate = now.AddDays(3),
+                WeeklyPercentWasRead = true,
+                ModelUsages = new[]
+                {
+                    new ModelUsage { DisplayName = "Opus", RemainingPercent = 12, ResetDate = now.AddDays(3) },
+                    new ModelUsage { DisplayName = "Sonnet", RemainingPercent = 64, ResetDate = now.AddDays(3) },
+                },
+                Credits = new UsageCredits
+                {
+                    StateKind = CreditsStateKind.Enabled,
+                    Spent = 12.5,
+                    SpendPercent = 25,
+                    SpendCurrency = "USD",
+                    StateResetDate = now.AddDays(17),
+                },
+            },
+            PlanRatio: null);
+
+        return vm;
     }
 
     /// <summary>
