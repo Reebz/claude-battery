@@ -5,9 +5,9 @@ using System.Text.Json;
 namespace ClaudeBatteryWin.Services;
 
 /// <summary>
-/// The two app-global UI preference flags the Mac kept in <c>UserDefaults</c> / <c>@AppStorage</c>
-/// (SettingsView.swift): the low-usage notifications master switch and the menu-bar
-/// session-countdown toggle. The per-account notification threshold and nickname live on the
+/// The app-global preference flags the Mac kept in <c>UserDefaults</c> / <c>@AppStorage</c>
+/// (SettingsView.swift): the low-usage notifications master switch, the menu-bar session-countdown
+/// toggle, and the opt-in diagnostics logging gate. The per-account notification threshold and nickname live on the
 /// <see cref="Models.Account"/> via the AccountStore (U5); these two are app-wide, not per-account.
 ///
 /// Defaults match the Mac verbatim: notifications OFF, countdown OFF.
@@ -24,6 +24,10 @@ public interface IAppSettings
     /// Show the compact session countdown to the left of the tray icon (Mac
     /// "showSessionCountdown"). Default false.
     bool ShowSessionCountdown { get; set; }
+
+    /// Opt-in diagnostics logging (Mac "diagnosticLoggingEnabled"). Default false: the logger writes
+    /// nothing at all, not even a directory, until this is on.
+    bool DiagnosticsEnabled { get; set; }
 
     /// Raised whenever a flag changes, so the tray renderer / poller can react (e.g. the icon
     /// re-composes the countdown cell when <see cref="ShowSessionCountdown"/> flips).
@@ -62,6 +66,12 @@ public sealed class AppSettings : IAppSettings
     {
         get { lock (_gate) { return _state.ShowSessionCountdown; } }
         set => Update(s => s with { ShowSessionCountdown = value });
+    }
+
+    public bool DiagnosticsEnabled
+    {
+        get { lock (_gate) { return _state.DiagnosticsEnabled; } }
+        set => Update(s => s with { DiagnosticsEnabled = value });
     }
 
     private void Update(Func<State, State> mutate)
@@ -139,5 +149,6 @@ public sealed class AppSettings : IAppSettings
     {
         public bool NotificationsEnabled { get; init; }
         public bool ShowSessionCountdown { get; init; }
+        public bool DiagnosticsEnabled { get; init; }
     }
 }

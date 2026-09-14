@@ -91,6 +91,7 @@ public partial class SettingsWindow : Window
         LaunchAtLoginToggle.IsChecked = _autostart.IsEnabled;
         NotificationsToggle.IsChecked = _settings.NotificationsEnabled;
         CountdownToggle.IsChecked = _settings.ShowSessionCountdown;
+        DiagnosticsToggle.IsChecked = _settings.DiagnosticsEnabled;
         _suppressToggleEvents = false;
 
         // The test-toast button only makes sense when the host wired a real sender.
@@ -189,6 +190,84 @@ public partial class SettingsWindow : Window
         }
 
         _settings.ShowSessionCountdown = CountdownToggle.IsChecked == true;
+    }
+
+    private void OnDiagnosticsToggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressToggleEvents)
+        {
+            return;
+        }
+
+        _settings.DiagnosticsEnabled = DiagnosticsToggle.IsChecked == true;
+    }
+
+    /// <summary>
+    /// Build the redacted archive and let the user save it. Each outcome gets its own message: an
+    /// empty export, a refused export, and a failed export mean different things and a user who is
+    /// told the wrong one wastes a round trip (R57).
+    /// </summary>
+    private void OnExportLogsClicked(object sender, RoutedEventArgs e)
+    {
+        var result = LogsExporter.Export(
+            DiagnosticsLogger.DefaultLogDirectory,
+            LogsExporter.ProductionInstallDate(),
+            ChooseExportDestination);
+
+        ApplyExportResult(result);
+    }
+
+    private static string? ChooseExportDestination(string suggestedName)
+    {
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Save Diagnostic Logs",
+            FileName = suggestedName,
+            AddExtension = false,
+            OverwritePrompt = true
+        };
+        return dialog.ShowDialog() == true ? dialog.FileName : null;
+    }
+
+    /// <summary>Maps one export outcome onto the status line and the issues link. Internal so the
+    /// message text is pinned by a test rather than only by reading the XAML.</summary>
+    internal static (string? Status, bool IsError, bool ShowLink) ExportStatus(ExportResult result) => result switch
+    {
+        ExportResult.Success success =>
+            ($"Saved to {System.IO.Path.GetFileName(success.SavedPath)}. Please attach it to a GitHub issue.", false, true),
+        ExportResult.Cancelled => (null, false, false),
+        ExportResult.NothingToExport =>
+            ("No diagnostic logs yet. Turn on logging, reproduce the problem, then export.", false, false),
+        ExportResult.InstallDateUnreadable =>
+            ("Couldn't determine the install date, so export is disabled for safety. Reinstall Claude Battery, then export again.", true, false),
+        ExportResult.Failure failure => (failure.Message, true, false),
+        _ => (null, false, false)
+    };
+
+    private void ApplyExportResult(ExportResult result)
+    {
+        var (status, isError, showLink) = ExportStatus(result);
+        if (status is null)
+        {
+            return; // cancelled: leave whatever was already showing
+        }
+
+        DiagnosticsStatus.Text = status;
+        DiagnosticsStatus.Foreground = (Brush)FindResource(
+            isError ? "SettingsErrorTextBrush" : "SettingsSuccessTextBrush");
+        DiagnosticsStatus.Visibility = Visibility.Visible;
+        DiagnosticsIssuesLink.Visibility = showLink ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnIssuesLinkClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(LogsExporter.IssuesUrl) { UseShellExecute = true });
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or System.IO.FileNotFoundException)
+        {
+        }
     }
 
     /// <summary>

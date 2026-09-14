@@ -160,6 +160,43 @@
                 </StackPanel>
             </Border>
 
+            <!-- Diagnostics (U2): opt-in redacted logging plus the export a bug report attaches. -->
+            <TextBlock Style="{StaticResource SectionHeader}" Text="DIAGNOSTICS" />
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource Caption}"
+                               Text="Records sign-in events, which plan your account is on, and how much of your session and weekly limits is left, to help diagnose problems. Hosts the sign-in window blocked, including a company identity provider, are recorded by name. No passwords, tokens, emails, or account names are saved." />
+
+                    <CheckBox x:Name="DiagnosticsToggle"
+                              Content="Enable diagnostic logging"
+                              Margin="0,10,0,0"
+                              Checked="OnDiagnosticsToggled"
+                              Unchecked="OnDiagnosticsToggled"
+                              AutomationProperties.Name="Enable diagnostic logging" />
+
+                    <Button x:Name="ExportLogsButton"
+                            Content="Export Diagnostic Logs&#x2026;"
+                            Margin="0,10,0,0"
+                            HorizontalAlignment="Left"
+                            Padding="12,6"
+                            Click="OnExportLogsClicked"
+                            AutomationProperties.Name="Export diagnostic logs" />
+
+                    <TextBlock x:Name="DiagnosticsStatus"
+                               Style="{StaticResource Caption}"
+                               Margin="0,8,0,0"
+                               Visibility="Collapsed" />
+
+                    <TextBlock x:Name="DiagnosticsIssuesLink"
+                               Margin="0,6,0,0"
+                               FontSize="11"
+                               Visibility="Collapsed">
+                        <Hyperlink Click="OnIssuesLinkClicked"
+                                   AutomationProperties.Name="Report on GitHub Issues">Report on GitHub Issues</Hyperlink>
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+
             <!-- Version / update row (bound to the U12 UpdateService). On a build the updater
                  cannot manage (the raw exe) the row says so and the button opens the releases page. -->
             <TextBlock Style="{StaticResource SectionHeader}" Text="ABOUT" />

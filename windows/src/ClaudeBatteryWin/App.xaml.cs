@@ -55,6 +55,7 @@ public partial class App : Application
     // the mutex HELD) - that is the update-relaunch double-instance bounce in #10. A FileStream held
     // with FileShare.None is process-scoped: disposing it frees the lock from ANY thread, and the OS
     // frees it on process exit even after a crash, so the relaunched instance always becomes primary.
+    private DiagnosticsLogger? _diagnostics;
     private FileStream? _singleInstanceLock;
     private EventWaitHandle? _showFlyoutEvent;
     private RegisteredWaitHandle? _showFlyoutWaitRegistration;
@@ -124,6 +125,9 @@ public partial class App : Application
         // can attach. Record it first, before anything else here can throw. The dispatcher hook
         // does NOT set Handled: the process still terminates, it just leaves a trace behind. The
         // CI smoke job and testers read %LocalAppData%\ClaudeBatteryWin\crash.log.
+        // Entries written by earlier betas are unredacted, so the first launch of a build that
+        // redacts them clears whatever is already on disk before adding to it (U2).
+        TruncateUnredactedCrashLogOnce();
         DispatcherUnhandledException += (_, args) => WriteCrashLog("dispatcher", args.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, args) => WriteCrashLog("appdomain", args.ExceptionObject as Exception);
         TaskScheduler.UnobservedTaskException += (_, args) =>
@@ -312,6 +316,12 @@ public partial class App : Application
 
         _settings = new AppSettings();
         _settings.Changed += (_, _) => RefreshIcon(); // countdown toggle re-composes the tooltip
+
+        // Diagnostics: inert until the user turns logging on in Settings. Constructed here so every
+        // producer shares one file per launch, and published as the app-wide instance for producers
+        // that are not constructor-injected (U2).
+        _diagnostics = new DiagnosticsLogger(_settings);
+        DiagnosticsLogger.SetShared(_diagnostics);
 
         // Notifier: weekly-low toasts, gated on the global enable flag (read live), latch on the
         // AccountStore, delivery through the WinRT sink (or a no-op sink off-Windows / in author build).
@@ -1141,6 +1151,11 @@ public partial class App : Application
     {
         SystemEvents.PowerModeChanged -= OnPowerModeChanged;
 
+        // Close the diagnostics file with a session-end record before anything else stops.
+        _diagnostics?.Flush();
+        _diagnostics?.Dispose();
+        _diagnostics = null;
+
         _countdownTimer?.Stop();
         _countdownTimer = null;
 
@@ -1247,13 +1262,11 @@ public partial class App : Application
     {
         try
         {
-            var dir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "ClaudeBatteryWin");
+            var dir = CrashLogDirectory();
             Directory.CreateDirectory(dir);
-            File.AppendAllText(
-                Path.Combine(dir, "crash.log"),
-                FormatCrashEntry(DateTimeOffset.Now, AppVersion, source, ex));
+            var path = Path.Combine(dir, "crash.log");
+            File.AppendAllText(path, FormatCrashEntry(DateTimeOffset.Now, AppVersion, source, ex));
+            TrimCrashLog(path);
         }
         catch
         {
@@ -1261,14 +1274,97 @@ public partial class App : Application
         }
     }
 
+    private static string CrashLogDirectory() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "ClaudeBatteryWin");
+
+    /// <summary>How many crash blocks the file keeps. Older ones are dropped, so a machine that
+    /// crash-loops cannot grow an unbounded file a tester is then asked to attach.</summary>
+    internal const int MaxCrashEntries = 20;
+
+    /// <summary>
+    /// Drops all but the most recent <see cref="MaxCrashEntries"/> blocks. Pure enough to test:
+    /// <see cref="TrimCrashEntries"/> does the work on the text.
+    /// </summary>
+    private static void TrimCrashLog(string path)
+    {
+        try
+        {
+            var text = File.ReadAllText(path);
+            var trimmed = TrimCrashEntries(text, MaxCrashEntries);
+            if (!string.Equals(trimmed, text, StringComparison.Ordinal))
+            {
+                File.WriteAllText(path, trimmed);
+            }
+        }
+        catch
+        {
+            // A trim that fails leaves a longer file, which is harmless.
+        }
+    }
+
+    /// <summary>Keeps the last <paramref name="keep"/> "====" blocks of a crash log.</summary>
+    internal static string TrimCrashEntries(string text, int keep)
+    {
+        const string marker = "==== ";
+        var starts = new List<int>();
+        for (var i = 0; i < text.Length; i++)
+        {
+            var isLineStart = i == 0 || text[i - 1] == '\n';
+            if (isLineStart && string.CompareOrdinal(text, i, marker, 0, marker.Length) == 0)
+            {
+                starts.Add(i);
+            }
+        }
+
+        if (starts.Count <= keep)
+        {
+            return text;
+        }
+        return text[starts[starts.Count - keep]..];
+    }
+
+    /// <summary>
+    /// Clears a crash log left by a build that did not redact its entries. Runs once per build: a
+    /// marker file beside the log records which version last did it.
+    /// </summary>
+    private static void TruncateUnredactedCrashLogOnce()
+    {
+        try
+        {
+            var dir = CrashLogDirectory();
+            var marker = Path.Combine(dir, "crash-log-redacted.marker");
+            if (File.Exists(marker)
+                && string.Equals(File.ReadAllText(marker).Trim(), AppVersion, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(dir);
+            var log = Path.Combine(dir, "crash.log");
+            if (File.Exists(log))
+            {
+                File.WriteAllText(log, string.Empty);
+            }
+            File.WriteAllText(marker, AppVersion);
+        }
+        catch
+        {
+            // Never throw from the crash-log path.
+        }
+    }
+
     /// <summary>
     /// One crash-log block: a header line with the ISO-8601 timestamp, the app version and the
-    /// source tag, then the exception's full text (type, message, inner exceptions, stack frames),
-    /// then a blank separator line. Pure + internal so it is unit-tested directly.
+    /// source tag, then the exception's text (type, message, inner exceptions, stack frames) run
+    /// through the redactor, then a blank separator line. .NET exception messages embed the user's
+    /// profile path, which names the Windows account, so this file goes through the same rules as
+    /// the diagnostics log even though it is never exportable. Pure + internal so it is unit-tested
+    /// directly.
     /// </summary>
     internal static string FormatCrashEntry(DateTimeOffset now, string version, string source, Exception? ex)
         => $"==== {now:O} ClaudeBatteryWin v{version} [{source}] ===={Environment.NewLine}"
-            + (ex?.ToString() ?? "(null exception)") + Environment.NewLine
+            + SecretRedactor.Redact(ex?.ToString() ?? "(null exception)") + Environment.NewLine
             + Environment.NewLine;
 
     // The shell's small-icon cell size (GetSystemMetrics(SM_CXSMICON)): 16 at 100% scaling, 24 at

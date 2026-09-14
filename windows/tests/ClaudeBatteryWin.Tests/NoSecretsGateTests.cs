@@ -5,7 +5,9 @@ using Xunit;
 namespace ClaudeBatteryWin.Tests;
 
 /// <summary>
-/// Build-failing redaction gate (U19/#17), the Windows analog of the Mac NoSecretsExportGateTests.
+/// Build-failing source scan (U19/#17), the cheaper of the two redaction gates. The expensive one is
+/// <see cref="NoSecretsExportGateTests"/>, which runs the real logger and exporter end to end; this
+/// one catches a leak the moment it is typed, in any sink, without running anything.
 /// Source-scans every production .cs file and fails if any logging/diagnostics sink line interpolates
 /// a secret-bearing value (a sessionKey, the full cookie header, or a captured cookie value). This is
 /// the cross-sink safety net: the per-class runtime test only proves ClaudeApi does not leak, whereas
@@ -51,6 +53,12 @@ public class NoSecretsGateTests
         Assert.True(LineLogsSecret("Clipboard.SetText($\"cookie={cookie.Value}\");"));
         Assert.True(LineLogsSecret("Clipboard.SetDataObject($\"sessionKey={key}\");"));
 
+        // The U2 sinks: a planted secret in any of them fails the build the same way.
+        Assert.True(LineLogsSecret("_diagnostics.EmitMilestone(\"probe\", () => new Dictionary<string, object?> { [\"k\"] = sessionKey });"));
+        Assert.True(LineLogsSecret("WriteCrashLog($\"sessionKey={key}\", ex);"));
+        Assert.True(LineLogsSecret("File.AppendAllText(path, $\"cookie={cookie.Value}\");"));
+        Assert.True(LineLogsSecret("LogsExporter.WriteArchive(sessionKey, destination);"));
+
         // Redacted status logs and non-sink lines MUST NOT be flagged.
         Assert.False(LineLogsSecret("DebugLog($\"Unexpected HTTP status: {status}\");"));
         Assert.False(LineLogsSecret("Debug.WriteLine(\"Session cookie captured\");"));
@@ -58,6 +66,9 @@ public class NoSecretsGateTests
         Assert.False(LineLogsSecret("_pendingSessionKey = sessionCookie.Value;")); // assignment, not a sink
         // A Clipboard copy of an already-redacted log box is a sink with no secret token: not flagged.
         Assert.False(LineLogsSecret("Clipboard.SetText(LogBox.Text);"));
+        // A milestone that carries a status or a host, not a value, is the shape producers must use.
+        Assert.False(LineLogsSecret("_diagnostics.EmitMilestone(\"nav-decision\", () => Payload((\"host\", host)));"));
+        Assert.False(LineLogsSecret("File.AppendAllText(path, FormatCrashEntry(now, version, source, ex));"));
     }
 
     [Fact]
@@ -100,7 +111,14 @@ public class NoSecretsGateTests
             || line.Contains("logger.", StringComparison.OrdinalIgnoreCase)
             // The clipboard is an egress sink: a diagnostics "copy" must never carry a secret (U10).
             || line.Contains("Clipboard.SetText", StringComparison.Ordinal)
-            || line.Contains("Clipboard.SetDataObject", StringComparison.Ordinal);
+            || line.Contains("Clipboard.SetDataObject", StringComparison.Ordinal)
+            // U2 sinks: the diagnostics logger, the crash log, and the export writer all put text
+            // somewhere a user can read or attach it.
+            || line.Contains("EmitMilestone(", StringComparison.Ordinal)
+            || line.Contains("WriteCrashLog(", StringComparison.Ordinal)
+            || line.Contains("FormatCrashEntry(", StringComparison.Ordinal)
+            || line.Contains("File.AppendAllText", StringComparison.Ordinal)
+            || line.Contains("WriteArchive(", StringComparison.Ordinal);
         if (!isSink)
         {
             return false;
