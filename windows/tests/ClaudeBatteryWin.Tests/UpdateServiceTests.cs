@@ -15,6 +15,21 @@ namespace ClaudeBatteryWin.Tests;
 /// </summary>
 public class UpdateServiceTests
 {
+    /// <summary>
+    /// A version the running build would actually accept as an update. Derived from the running
+    /// version rather than written out, because the service refuses to announce anything that is not
+    /// numerically newer, and a literal here silently stops being newer the next time the app's
+    /// version is bumped.
+    /// </summary>
+    private static readonly string ANewerVersion = NextMajorAfterRunning();
+
+    private static string NextMajorAfterRunning()
+    {
+        var parts = ClaudeBatteryWin.Services.AppVersionInfo.Version.Split('.');
+        var major = int.TryParse(parts[0], out var value) ? value : 1;
+        return $"{major + 1}.0.0";
+    }
+
     // --- Fakes ----------------------------------------------------------------------------------
 
     /// <summary>
@@ -135,17 +150,17 @@ public class UpdateServiceTests
     [Fact]
     public async Task CheckForUpdates_NonNullResult_ExposesVersionAndNotes()
     {
-        var pending = new VelopackUpdateInfo { Version = "1.51.0", ReleaseNotes = "Bug fixes." };
+        var pending = new VelopackUpdateInfo { Version = ANewerVersion, ReleaseNotes = "Bug fixes." };
         var (service, _, _) = BuildService(checkResult: pending);
 
         var result = await service.CheckForUpdatesAsync();
 
         Assert.NotNull(result);
-        Assert.Equal("1.51.0", result!.Version);
+        Assert.Equal(ANewerVersion, result!.Version);
         Assert.Equal("Bug fixes.", result.ReleaseNotes);
         // The flyout row binds these off the service.
         Assert.NotNull(service.AvailableUpdate);
-        Assert.Equal("1.51.0", service.AvailableUpdate!.Version);
+        Assert.Equal(ANewerVersion, service.AvailableUpdate!.Version);
         Assert.Equal("Bug fixes.", service.AvailableUpdate.ReleaseNotes);
         Assert.True(service.HasChecked);
     }
@@ -154,7 +169,7 @@ public class UpdateServiceTests
     public async Task CheckForUpdates_WhenNotInstalled_NoOpsToNull()
     {
         // dotnet-run / non-Velopack host: nothing to check against.
-        var pending = new VelopackUpdateInfo { Version = "1.51.0" };
+        var pending = new VelopackUpdateInfo { Version = ANewerVersion };
         var (service, updater, _) = BuildService(checkResult: pending, isInstalled: false);
 
         var result = await service.CheckForUpdatesAsync();
@@ -169,7 +184,7 @@ public class UpdateServiceTests
     public async Task CheckForUpdates_TransientFailure_DoesNotErasePriorUpdateOrFlipChecked()
     {
         // First check finds an update.
-        var pending = new VelopackUpdateInfo { Version = "1.51.0", ReleaseNotes = "Notes." };
+        var pending = new VelopackUpdateInfo { Version = ANewerVersion, ReleaseNotes = "Notes." };
         var (service, updater, _) = BuildService(checkResult: pending);
         await service.CheckForUpdatesAsync();
         Assert.NotNull(service.AvailableUpdate);
@@ -181,7 +196,7 @@ public class UpdateServiceTests
 
         Assert.Null(result);
         Assert.NotNull(service.AvailableUpdate);
-        Assert.Equal("1.51.0", service.AvailableUpdate!.Version);
+        Assert.Equal(ANewerVersion, service.AvailableUpdate!.Version);
     }
 
     // --- CheckForUpdatesAsync: failure lands on LastCheckFailed, never on "Up to date" -------------
@@ -270,7 +285,7 @@ public class UpdateServiceTests
     [Fact]
     public async Task ApplyUpdate_ReleasesMutexBeforeRelaunch_SoRelaunchIsSingleInstance()
     {
-        var pending = new VelopackUpdateInfo { Version = "1.51.0" };
+        var pending = new VelopackUpdateInfo { Version = ANewerVersion };
         var (service, updater, teardown) = BuildService(checkResult: pending);
         await service.CheckForUpdatesAsync();
 
@@ -287,7 +302,7 @@ public class UpdateServiceTests
     [Fact]
     public async Task ApplyUpdate_OrdersDownloadThenTeardownThenRestart()
     {
-        var pending = new VelopackUpdateInfo { Version = "1.51.0" };
+        var pending = new VelopackUpdateInfo { Version = ANewerVersion };
         var (service, updater, _) = BuildService(checkResult: pending);
         await service.CheckForUpdatesAsync();
 
@@ -317,7 +332,7 @@ public class UpdateServiceTests
     [Fact]
     public async Task ApplyUpdate_WhenNotInstalled_DoesNothing()
     {
-        var pending = new VelopackUpdateInfo { Version = "1.51.0" };
+        var pending = new VelopackUpdateInfo { Version = ANewerVersion };
         var (service, updater, teardown) = BuildService(checkResult: pending, isInstalled: false);
         // AvailableUpdate never gets set because the check no-ops when not installed, but guard the
         // apply path directly too.
@@ -373,12 +388,12 @@ public class UpdateServiceTests
     [Fact]
     public async Task AfterAFinishedCheckFindsARelease_TheRowNamesIt()
     {
-        var updater = new FakeUpdater { CheckResult = new VelopackUpdateInfo { Version = "1.99.0" } };
+        var updater = new FakeUpdater { CheckResult = new VelopackUpdateInfo { Version = ANewerVersion } };
         var service = new UpdateService(updater, new FakeTeardown(updater));
 
         await service.CheckForUpdatesAsync();
 
-        Assert.Equal("Update available: v1.99.0", UpdateService.UpdateRowText(
+        Assert.Equal($"Update available: v{ANewerVersion}", UpdateService.UpdateRowText(
             isInstalled: true, service.AvailableUpdate?.Version, service.HasChecked, service.LastCheckFailed));
     }
 
