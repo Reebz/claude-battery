@@ -422,14 +422,21 @@ final class RunOutForecastTests: XCTestCase {
     }
 
     func testDialLines_noResetTime_singleUnavailableLine() {
-        // AE5: no reset time -> no caption, no run-out, one "Reset time unavailable" line.
+        // AE5: no reset time -> no caption, no run-out, one "No reset time" line.
         let l = lines(40, nil, s)
         XCTAssertNil(l.caption)
         XCTAssertNil(l.runOut)
-        XCTAssertEqual(l.countdown, "Reset time unavailable")
+        XCTAssertEqual(l.countdown, "No reset time")
         XCTAssertNil(l.resetSeconds)
         XCTAssertNil(l.runOutSeconds)
         XCTAssertEqual(l.countdown, UsagePopoverView.resetUnavailableLine)
+    }
+
+    func testResetUnavailableLine_isTheShortString() {
+        // R11 shortened this wording: at 11pt medium the old three-word version ran past
+        // the 114pt card content width and `minimumScaleFactor` shrank the line instead of wrapping
+        // it, which is the opposite of making the countdown easier to read.
+        XCTAssertEqual(UsagePopoverView.resetUnavailableLine, "No reset time")
     }
 
     func testDialLines_pastResetTime_sameAsNoResetTime() {
@@ -439,7 +446,7 @@ final class RunOutForecastTests: XCTestCase {
         let stale = lines(40, -3600, s, paceOverride: .caution)
         XCTAssertNil(stale.caption)
         XCTAssertNil(stale.runOut)
-        XCTAssertEqual(stale.countdown, "Reset time unavailable")
+        XCTAssertEqual(stale.countdown, "No reset time")
     }
 
     func testDialLines_underAMinuteToReset_printsLessThanAMinute() {
@@ -514,7 +521,7 @@ final class RunOutForecastTests: XCTestCase {
         let l = UsagePopoverView.sessionDialLines(for: usage, now: now)
         XCTAssertNil(l.caption)
         XCTAssertNil(l.runOut)
-        XCTAssertEqual(l.countdown, "Reset time unavailable")
+        XCTAssertEqual(l.countdown, "No reset time")
     }
 
     func testSessionDialInputs_weeklyLimited_picksSessionPaceAndRawSession() {
@@ -540,7 +547,20 @@ final class RunOutForecastTests: XCTestCase {
         XCTAssertTrue(label.contains("resets in 2 hours 30 minutes"), label)
         XCTAssertTrue(label.contains("projected to run out in about 1 hour 40 minutes"), label)
         XCTAssertEqual(label, "Session usage 40 percent, time remaining 50 percent, caution, over pace, "
-                       + "projected to run out in about 1 hour 40 minutes, resets in 2 hours 30 minutes")
+                       + "resets in 2 hours 30 minutes, projected to run out in about 1 hour 40 minutes")
+    }
+
+    func testGaugeA11y_speaksResetBeforeRunOut() {
+        // R11: the voice reads the lines in the order the eye does, so with both present the reset
+        // must come first. Asserted on position, not presence, because the full-string test above
+        // would still pass if only one of the two phrases moved.
+        let label = UsagePopoverView.gaugeAccessibilityLabel(
+            name: "Session", usage: 40, timeRemaining: 50, pace: .caution, lines: lines(40, 9000, s))
+        guard let reset = label.range(of: "resets in"),
+              let runOut = label.range(of: "projected to run out in about") else {
+            return XCTFail("both phrases must be spoken: \(label)")
+        }
+        XCTAssertLessThan(reset.lowerBound, runOut.lowerBound, label)
     }
 
     func testGaugeA11y_noResetTime_speaksUnavailableAndNoTimePhrase() {
@@ -548,7 +568,8 @@ final class RunOutForecastTests: XCTestCase {
             name: "Session", usage: 40, timeRemaining: nil, pace: .unknown, lines: lines(40, nil, s))
         XCTAssertFalse(label.contains("resets in"), label)
         XCTAssertFalse(label.contains("projected to run out"), label)
-        XCTAssertEqual(label, "Session usage 40 percent, reset time unavailable")
+        XCTAssertTrue(label.contains("no reset time"), label)
+        XCTAssertEqual(label, "Session usage 40 percent, no reset time")
     }
 
     func testGaugeA11y_onTrack_speaksCountdownWithoutRunOut() {
@@ -579,9 +600,9 @@ final class RunOutForecastTests: XCTestCase {
 
     func testLastUpdatedText_movesWithNowNotWithAPoll() {
         let fetched = now
-        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: nil, now: now), "Not yet updated")
-        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(30)), "Updated just now")
-        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(60)), "Updated 1 minute ago")
-        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(5 * 60 + 10)), "Updated 5 minutes ago")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: nil, now: now), "Usage not yet updated")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(30)), "Usage updated just now")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(60)), "Usage updated 1 minute ago")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(5 * 60 + 10)), "Usage updated 5 minutes ago")
     }
 }

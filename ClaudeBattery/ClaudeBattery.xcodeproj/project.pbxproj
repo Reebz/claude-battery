@@ -38,6 +38,7 @@
 		F10000020000000000000002 /* PaceBarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000020000000000000002 /* PaceBarTests.swift */; };
 		F10000070000000000000007 /* RunOutForecastTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000070000000000000007 /* RunOutForecastTests.swift */; };
 		F10000030000000000000003 /* ModelsCardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000030000000000000003 /* ModelsCardTests.swift */; };
+		F100000A000000000000000A /* PopoverTextSizeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F200000A000000000000000A /* PopoverTextSizeTests.swift */; };
 		F10000040000000000000004 /* UsageCreditsRowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000040000000000000004 /* UsageCreditsRowTests.swift */; };
 		F10000050000000000000005 /* SettingsCountdownToggleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000050000000000000005 /* SettingsCountdownToggleTests.swift */; };
 		F10000060000000000000006 /* MenuBarCountdownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000060000000000000006 /* MenuBarCountdownTests.swift */; };
@@ -115,6 +116,7 @@
 		F20000020000000000000002 /* PaceBarTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = PaceBarTests.swift; path = PaceBarTests.swift; sourceTree = "<group>"; };
 		F20000070000000000000007 /* RunOutForecastTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = RunOutForecastTests.swift; path = RunOutForecastTests.swift; sourceTree = "<group>"; };
 		F20000030000000000000003 /* ModelsCardTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ModelsCardTests.swift; path = ModelsCardTests.swift; sourceTree = "<group>"; };
+		F200000A000000000000000A /* PopoverTextSizeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = PopoverTextSizeTests.swift; path = PopoverTextSizeTests.swift; sourceTree = "<group>"; };
 		F20000040000000000000004 /* UsageCreditsRowTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = UsageCreditsRowTests.swift; path = UsageCreditsRowTests.swift; sourceTree = "<group>"; };
 		F20000050000000000000005 /* SettingsCountdownToggleTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = SettingsCountdownToggleTests.swift; path = SettingsCountdownToggleTests.swift; sourceTree = "<group>"; };
 		F20000060000000000000006 /* MenuBarCountdownTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = MenuBarCountdownTests.swift; path = MenuBarCountdownTests.swift; sourceTree = "<group>"; };
@@ -187,6 +189,7 @@
 				F20000020000000000000002 /* PaceBarTests.swift */,
 				F20000070000000000000007 /* RunOutForecastTests.swift */,
 				F20000030000000000000003 /* ModelsCardTests.swift */,
+				F200000A000000000000000A /* PopoverTextSizeTests.swift */,
 				F20000040000000000000004 /* UsageCreditsRowTests.swift */,
 				F20000050000000000000005 /* SettingsCountdownToggleTests.swift */,
 				F20000060000000000000006 /* MenuBarCountdownTests.swift */,
@@ -474,6 +477,7 @@
 				F10000020000000000000002 /* PaceBarTests.swift in Sources */,
 				F10000070000000000000007 /* RunOutForecastTests.swift in Sources */,
 				F10000030000000000000003 /* ModelsCardTests.swift in Sources */,
+				F100000A000000000000000A /* PopoverTextSizeTests.swift in Sources */,
 				F10000040000000000000004 /* UsageCreditsRowTests.swift in Sources */,
 				F10000050000000000000005 /* SettingsCountdownToggleTests.swift in Sources */,
 				F10000060000000000000006 /* MenuBarCountdownTests.swift in Sources */,
@@ -682,7 +686,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.5;
-				MARKETING_VERSION = 1.72;
+				MARKETING_VERSION = 1.73;
 				PRODUCT_BUNDLE_IDENTIFIER = com.reebz.claudebattery;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE = "";
@@ -720,7 +724,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 13.5;
-				MARKETING_VERSION = 1.72;
+				MARKETING_VERSION = 1.73;
 				PRODUCT_BUNDLE_IDENTIFIER = com.reebz.claudebattery;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE = "";
