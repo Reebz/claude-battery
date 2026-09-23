@@ -128,7 +128,7 @@ struct UsagePopoverView: View {
         VStack(spacing: 8) {
             // Update notice leads the popover instead of sitting in the footer: down there it was
             // caption2 gray under the Settings hint and easy to miss, and it also REPLACED the
-            // "Updated N minutes ago" line, so noticing an update cost you the freshness line.
+            // freshness line, so noticing an update cost you that line.
             // Renders nothing when no update is available, leaving the usual layout untouched.
             updateBanner()
 
@@ -173,9 +173,10 @@ struct UsagePopoverView: View {
 
             VStack(spacing: 2) {
                 // Freshness line is now unconditional: the update notice lives in the top banner,
-                // so the two no longer compete for this slot. The version rides in front of it (#48).
-                // A leaf view, so the minute clock can move "Updated N minutes ago" without a poll
-                // and without re-evaluating anything above it (KTD10).
+                // so the two no longer compete for this slot. The version rides after it (#48): it
+                // used to sit in front of "Updated" and the line read as an app-update status.
+                // A leaf view, so the minute clock can move "Usage updated N minutes ago" without a
+                // poll and without re-evaluating anything above it (KTD10).
                 FooterStatusLineView(clock: clock, lastFetch: usageService.lastSuccessfulFetch)
                 Text("Right-click the battery icon in your menu bar for Settings.")
                     .font(PopoverTextSize.font(9, offset: textOffset))
@@ -654,11 +655,13 @@ struct UsagePopoverView: View {
         return "v\(version)"
     }
 
-    /// The footer's single status line: "v1.70 · Updated just now". Without a version it is the
-    /// freshness text alone, with no dangling separator.
+    /// The footer's single status line: "Usage updated just now · v1.72". The usage text leads
+    /// because the version used to sit in front of "Updated", and "v1.72 · Updated just now" read
+    /// as an app-update status (#48). Without a version it is the freshness text alone, with no
+    /// dangling separator.
     static func footerStatusLine(version: String?, updated: String) -> String {
         guard let label = versionLabel(version) else { return updated }
-        return "\(label) \u{00B7} \(updated)"
+        return "\(updated) \u{00B7} \(label)"
     }
 
     /// Full-width update banner at the top of the popover. The URL is host- and scheme-validated
@@ -803,15 +806,17 @@ struct UsagePopoverView: View {
 
     // MARK: - Formatting
 
-    /// The footer freshness text. Static and clock-driven so `FooterStatusLineView` can re-print
+    /// The footer freshness text, such as "Usage updated just now": the age of the last successful
+    /// usage fetch. It names "Usage" because a bare "Updated" beside the version read as an
+    /// app-update status (#48). Static and clock-driven so `FooterStatusLineView` can re-print
     /// it on each minute tick without a poll (KTD10), and so the copy is testable.
     static func lastUpdatedText(lastFetch: Date?, now: Date = Date()) -> String {
-        guard let lastFetch else { return "Not yet updated" }
+        guard let lastFetch else { return "Usage not yet updated" }
         let seconds = Int(now.timeIntervalSince(lastFetch))
-        if seconds < 60 { return "Updated just now" }
+        if seconds < 60 { return "Usage updated just now" }
         let minutes = seconds / 60
-        if minutes == 1 { return "Updated 1 minute ago" }
-        return "Updated \(minutes) minutes ago"
+        if minutes == 1 { return "Usage updated 1 minute ago" }
+        return "Usage updated \(minutes) minutes ago"
     }
 }
 
@@ -1079,9 +1084,10 @@ private struct DialLinesView: View {
     }
 }
 
-/// The footer's "v1.70 · Updated N minutes ago" line, in the tick scope so the freshness text
-/// moves without a poll (KTD10). `lastFetch` comes in as a value from the parent, which already
-/// observes `UsageService`; this view never does.
+/// The footer's "Usage updated N minutes ago · v1.72" line, in the tick scope so the freshness
+/// text moves without a poll (KTD10). Usage leads and the version trails because the old order,
+/// version in front of "Updated", read as an app-update status (#48). `lastFetch` comes in as a
+/// value from the parent, which already observes `UsageService`. This view never does.
 private struct FooterStatusLineView: View {
     @ObservedObject var clock: PopoverClock
     let lastFetch: Date?

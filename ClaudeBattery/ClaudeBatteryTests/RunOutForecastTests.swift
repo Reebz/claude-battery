@@ -600,9 +600,9 @@ final class RunOutForecastTests: XCTestCase {
 
     func testLastUpdatedText_movesWithNowNotWithAPoll() {
         let fetched = now
-        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: nil, now: now), "Not yet updated")
-        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(30)), "Updated just now")
-        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(60)), "Updated 1 minute ago")
-        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(5 * 60 + 10)), "Updated 5 minutes ago")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: nil, now: now), "Usage not yet updated")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(30)), "Usage updated just now")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(60)), "Usage updated 1 minute ago")
+        XCTAssertEqual(UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: now.addingTimeInterval(5 * 60 + 10)), "Usage updated 5 minutes ago")
     }
 }

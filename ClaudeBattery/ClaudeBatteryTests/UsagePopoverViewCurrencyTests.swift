@@ -165,7 +165,8 @@ final class UsagePopoverViewUpdateBannerTests: XCTestCase {
 }
 
 /// Locks the pure version formatters behind the popover footer (#48). The footer reads
-/// "v1.70 · Updated just now"; under XCTest `Bundle.main` is the test host, so the version
+/// "Usage updated just now · v1.72", usage first, because the old "v1.70 · Updated just now"
+/// read as an app-update status. Under XCTest `Bundle.main` is the test host, so the version
 /// string is passed in rather than read from `AppVersion`.
 final class UsagePopoverViewVersionTests: XCTestCase {
 
@@ -182,18 +183,29 @@ final class UsagePopoverViewVersionTests: XCTestCase {
     }
 
     func testFooterStatusLine_withVersion_joinsWithMiddleDot() {
-        let line = UsagePopoverView.footerStatusLine(version: "1.70", updated: "Updated just now")
-        XCTAssertEqual(line, "v1.70 · Updated just now")
+        let line = UsagePopoverView.footerStatusLine(version: "1.70", updated: "Usage updated just now")
+        XCTAssertEqual(line, "Usage updated just now · v1.70")
+    }
+
+    /// #48: the usage text starts the line and the version ends it. With the version in front,
+    /// the line read as an app-update status, so the order is what this test pins.
+    func testFooterStatusLine_usageTextLeads_versionTrails() {
+        let fetched = Date(timeIntervalSince1970: 1_750_000_000)
+        let updated = UsagePopoverView.lastUpdatedText(lastFetch: fetched, now: fetched.addingTimeInterval(12 * 60))
+        let line = UsagePopoverView.footerStatusLine(version: "1.72", updated: updated)
+        XCTAssertTrue(line.hasPrefix("Usage updated 12 minutes ago"), "got `\(line)`")
+        XCTAssertTrue(line.hasSuffix("v1.72"), "got `\(line)`")
+        XCTAssertEqual(line, "Usage updated 12 minutes ago · v1.72")
     }
 
     func testFooterStatusLine_withoutVersion_hasNoDanglingSeparator() {
-        let line = UsagePopoverView.footerStatusLine(version: nil, updated: "Not yet updated")
-        XCTAssertEqual(line, "Not yet updated")
+        let line = UsagePopoverView.footerStatusLine(version: nil, updated: "Usage not yet updated")
+        XCTAssertEqual(line, "Usage not yet updated")
         XCTAssertFalse(line.contains("\u{00B7}"), "got `\(line)`")
     }
 
     func testFooterStatusLine_emptyVersion_hasNoDanglingSeparator() {
-        let line = UsagePopoverView.footerStatusLine(version: "", updated: "Updated just now")
-        XCTAssertEqual(line, "Updated just now")
+        let line = UsagePopoverView.footerStatusLine(version: "", updated: "Usage updated just now")
+        XCTAssertEqual(line, "Usage updated just now")
     }
 }
