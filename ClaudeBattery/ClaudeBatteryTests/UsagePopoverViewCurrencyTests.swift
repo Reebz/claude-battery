@@ -165,7 +165,7 @@ final class UsagePopoverViewUpdateBannerTests: XCTestCase {
 }
 
 /// Locks the pure version formatters behind the popover footer (#48). The footer reads
-/// "Usage updated just now · v1.72", usage first, because the old "v1.70 · Updated just now"
+/// "Usage updated just now · v1.72", usage first, because the old "v1.72 · Updated just now"
 /// read as an app-update status. Under XCTest `Bundle.main` is the test host, so the version
 /// string is passed in rather than read from `AppVersion`.
 final class UsagePopoverViewVersionTests: XCTestCase {
