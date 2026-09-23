@@ -1,0 +1,1846 @@
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Net;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Windows;
+using System.Windows.Threading;
+using ClaudeBatteryWin.Icons;
+using ClaudeBatteryWin.Models;
+using ClaudeBatteryWin.Services;
+using ClaudeBatteryWin.ViewModels;
+using ClaudeBatteryWin.Views;
+using H.NotifyIcon;
+using Microsoft.Win32;
+using Velopack;
+
+namespace ClaudeBatteryWin;
+
+/// <summary>
+/// Windowless tray application entry point (R1) and the full startup/DI composition root. There is
+/// no <c>StartupUri</c>; the only persistent surface is the <see cref="H.NotifyIcon.TaskbarIcon"/>
+/// declared in App.xaml.
+///
+/// Responsibilities owned here:
+/// <list type="bullet">
+///   <item>Velopack's <c>VelopackApp.Build().Run()</c> as the FIRST line (U12) so install/update
+///   hooks execute and exit before any UI spins up.</item>
+///   <item>Single-instance enforcement via a named per-user <see cref="Mutex"/>; a second launch
+///   signals the first (named <see cref="EventWaitHandle"/>) to show the flyout, then exits. The
+///   mutex is released LAST on exit so an update relaunch (U12) can re-acquire it.</item>
+///   <item>The object graph: the shared <see cref="CookieContainer"/> -> <see cref="ClaudeApi"/>
+///   (<see cref="IClaudeApi"/>) -> <see cref="UsageService"/>; <see cref="SecretStore"/> +
+///   <see cref="AccountStore"/> (sharing the container); <see cref="ThemeWatcher"/>; the
+///   <see cref="StackedBarsRenderer"/> feeding the tray icon; <see cref="Notifier"/>;
+///   <see cref="UpdateService"/>; <see cref="WebView2Runtime"/> gating login.</item>
+///   <item>System event subscriptions (<see cref="SystemEvents.PowerModeChanged"/> for wake-repoll
+///   R6, <see cref="SystemEvents.UserPreferenceChanged"/> for theme R3).</item>
+///   <item>Tray-icon click -> <see cref="FlyoutWindow"/>; the flyout's update row -> the
+///   <see cref="UpdateService"/>.</item>
+///   <item>The crash log (<c>%LocalAppData%\ClaudeBatteryWin\crash.log</c>): the process is
+///   windowless, so an unhandled exception would otherwise die with nothing a tester can attach.
+///   The CI smoke job and testers read this file. The previous version's log is kept beside it as
+///   <c>crash.previous.log</c> across one update.</item>
+/// </list>
+/// </summary>
+public partial class App : Application
+{
+    // Per-user names: the suffix keeps two different Windows users from colliding on a machine
+    // with fast-user-switching. The GUID-ish base keeps the names from clashing with other apps.
+    private const string ShowFlyoutEventName = @"Local\ClaudeBatteryWin.ShowFlyout.7E2C1B44";
+
+    // Single-instance gate via an exclusive lock FILE rather than a Mutex. A Mutex is thread-affine
+    // (ReleaseMutex must run on the acquiring thread, else it throws ApplicationException and leaves
+    // the mutex HELD) - that is the update-relaunch double-instance bounce in #10. A FileStream held
+    // with FileShare.None is process-scoped: disposing it frees the lock from ANY thread, and the OS
+    // frees it on process exit even after a crash, so the relaunched instance always becomes primary.
+    private DiagnosticsLogger? _diagnostics;
+    private FileStream? _singleInstanceLock;
+    private EventWaitHandle? _showFlyoutEvent;
+    private RegisteredWaitHandle? _showFlyoutWaitRegistration;
+    private TaskbarIcon? _trayIcon;
+
+    // --- Object graph (constructed in OnStartup once we are the primary instance) --------------
+    private CookieContainer? _cookieJar;
+    private SecretStore? _secretStore;
+    private AccountStore? _accountStore;
+    private SwappableClaudeApi? _api;
+    private SystemNetworkAvailability? _network;
+    private SystemSchedulerClock? _clock;
+    private UsageService? _usageService;
+    private ThemeWatcher? _themeWatcher;
+    private TrayIconRendererHost? _renderer;
+    private AppSettings? _settings;
+    private IToastSink? _toastSink;
+    private Notifier? _notifier;
+    private WebView2Runtime? _runtime;
+    private AuthManager? _authManager;
+    private LoginWebViewFactory? _loginWebViewFactory;
+    private GitHubVelopackUpdater? _velopackUpdater;
+    private UpdateService? _updateService;
+    private AutostartService? _autostart;
+    private ManualSignIn? _manualSignIn;
+
+    private FlyoutWindow? _flyout;
+    private FlyoutViewModel? _flyoutViewModel;
+    private SettingsWindow? _settingsWindow;
+
+    // Per-minute countdown re-render timer and the stale-check timer (mirror the Mac MenuBarController).
+    private DispatcherTimer? _countdownTimer;
+    private UpdateRecheckScheduler? _updateSchedule;
+
+    // The single reusable theme-debounce timer (U11) and the latest coalesced re-read action.
+    private DispatcherTimer? _themeDebounceTimer;
+    private Action? _themeReevaluate;
+
+    // Guards against re-entrant tray clicks while the runtime-missing window is up.
+    private bool _runtimeWindowOpen;
+
+    // The LastSuccessfulFetch timestamp the Notifier was last evaluated against, so the weekly-low
+    // toast is evaluated only on a genuine poll success (when the fetch advances), not on every
+    // StateChanged tick incl. hard-failure/auth-failure ticks (issue #19).
+    private DateTimeOffset? _lastNotifiedFetch;
+
+    // Latched once at startup: at least one account was dropped at load because its DPAPI blob would
+    // not decrypt (profile copy / SID change). AccountStore.DroppedAccountIds is cleared on each Load,
+    // so the fact is captured here and fed into the flyout's distinct re-auth surface (U6/R4).
+    private bool _securityDataUnreadable;
+
+    // Mirrors "the polling transport currently runs the frozen DefaultUserAgent" (no persisted
+    // per-account UA). Read live by the UsageService CF-block escalation (review F1); written only
+    // at the initial seed and in RebuildApiWithUserAgent. UI-thread writes, poll-thread reads - a
+    // stale read is benign (one extra backoff round before escalation).
+    private bool _transportUaIsFallback;
+
+    // The User-Agent the current inner transport was built with. RebuildApiWithUserAgent skips the
+    // swap when the next UA is the same string, so an account change that keeps the UA does not
+    // dispose the transport under an in-flight request (review F2). UI-thread only.
+    private string? _transportUserAgent;
+
+    // The active account as last read on the UI thread, handed to the poller's pool-thread read
+    // (review F1). AccountStore is UI-thread-only: enumerating its live list from the poll thread
+    // races a UI-thread write. Account is an immutable record, so publishing the reference is safe;
+    // it is re-published before every poll (re)start and after every store write the poller cares
+    // about (see PublishPolledAccount).
+    private Account? _polledAccount;
+
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        // --- Velopack MUST run first (U12) ----------------------------------------------------
+        // Install/uninstall/update hooks run synchronously here and exit the process for hook
+        // invocations; if this is not first, a freshly applied update can re-run the old binary's
+        // UI on the hook launch. No tray icon, no window, no service may precede it.
+        VelopackApp.Build().Run();
+
+        // --- Crash log ------------------------------------------------------------------------
+        // The app is windowless: an unhandled exception kills the process with nothing a tester
+        // can attach. Record it first, before anything else here can throw. The dispatcher hook
+        // does NOT set Handled: the process still terminates, it just leaves a trace behind. The
+        // CI smoke job and testers read %LocalAppData%\ClaudeBatteryWin\crash.log.
+        // Entries written by earlier betas are unredacted, so the first launch of a build that
+        // redacts them clears whatever is already on disk before adding to it (U2). After that, the
+        // first launch of each new version moves the previous version's log to crash.previous.log
+        // rather than clearing it, so a crash from before an update survives it (review F3). The
+        // move redacts it again, in case an older unredacting beta added to it (review F2).
+        PrepareCrashLogForThisVersion();
+        DispatcherUnhandledException += (_, args) => WriteCrashLog("dispatcher", args.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, args) => WriteCrashLog("appdomain", args.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            WriteCrashLog("unobserved-task", args.Exception);
+            args.SetObserved();
+        };
+
+        // --- Single-instance gate -------------------------------------------------------------
+        // A null lock means another instance already holds the file lock.
+        _singleInstanceLock = TryAcquireSingleInstanceLock();
+
+        // The named auto-reset event the running instance waits on; a second launch sets it.
+        _showFlyoutEvent = new EventWaitHandle(
+            initialState: false,
+            mode: EventResetMode.AutoReset,
+            name: ShowFlyoutEventName);
+
+        if (_singleInstanceLock is null)
+        {
+            // Another instance is already running. Signal it to surface the flyout, then exit
+            // WITHOUT showing a tray icon (so a double-launch never yields two icons).
+            _showFlyoutEvent.Set();
+            // Release our (non-owning) handles before bailing; we never acquired the lock.
+            _showFlyoutEvent.Dispose();
+            _showFlyoutEvent = null;
+            Shutdown();
+            return;
+        }
+
+        // We are the primary instance. Wait (off the UI thread) for any later launch to signal,
+        // and marshal the show-flyout request back onto the dispatcher.
+        _showFlyoutWaitRegistration = ThreadPool.RegisterWaitForSingleObject(
+            _showFlyoutEvent,
+            (_, _) => Dispatcher.BeginInvoke(new Action(() => ShowFlyout())),
+            state: null,
+            timeout: Timeout.InfiniteTimeSpan,
+            executeOnlyOnce: false);
+
+        base.OnStartup(e);
+
+        // --- Startup stale-UDF sweep (U6 security) -------------------------------------------
+        // Before showing the tray icon, delete leftover login WebView2 user-data folders from a
+        // crashed prior session: a crash mid-login can otherwise leave an unencrypted session
+        // cookie on disk readable by any same-user process.
+        LoginWindow.SweepStaleLoginProfiles();
+
+        // --- Toast identity (U11) -------------------------------------------------------------
+        // Register the process AUMID so toasts resolve to the installed Start-menu shortcut's
+        // identity. Best-effort; a failure leaves the sink reporting not-delivered (no latch).
+#if WINDOWS10_0_19041_0_OR_GREATER
+        WinRtToastSink.EnsureRegistered();
+#endif
+
+        BuildObjectGraph();
+        if (!AcquireTrayIcon())
+        {
+            return; // Shutdown() already requested; OnExit runs the ordered teardown.
+        }
+        ShowFirstRunTrayNoticeIfDue();
+        SubscribeSystemEvents();
+        StartTimers();
+
+        // Start theme watching and paint the initial icon for the resolved (signed-out / loading)
+        // state, then kick off polling if an account was restored from disk.
+        _themeWatcher!.Start();
+        RefreshIcon();
+
+        if (_accountStore!.ActiveAccount is { } active)
+        {
+            _usageService!.StartPolling(active.OrganizationId);
+        }
+
+        // Latch whether the startup signed-out state is due to a DPAPI drop (a saved account's blob
+        // would not decrypt: profile copy / SID change) rather than a plain sign-out. DroppedAccountIds
+        // is cleared on each Load, so capture it now; SyncViewModelFromServices feeds it into the
+        // flyout's distinct re-auth surface (U6/R4) and retires it once an authenticated state appears.
+        _securityDataUnreadable = ShouldFlagSecurityDataUnreadable(_accountStore);
+
+        // Surface a DPAPI-drop as the distinct re-auth surface, or an ordinary signed-out/auth state,
+        // by refreshing the flyout view-model.
+        SyncViewModelFromServices();
+
+        // Check for updates now, then keep checking once a day for as long as the app runs (R47).
+        // A tray app is left running for weeks; a launch-only check never learns about a release.
+        _updateSchedule = new UpdateRecheckScheduler(
+            () => CheckForUpdatesAsync(), new DispatcherDelayedAction(Dispatcher));
+        _updateSchedule.Start();
+    }
+
+    // ============================================================================================
+    // Single-instance lock (U12)
+    // ============================================================================================
+
+    /// <summary>
+    /// Acquire the process-scoped single-instance lock, or return null when another instance already
+    /// holds it. Uses an exclusive (<c>FileShare.None</c>) handle on a per-user lock file: unlike a
+    /// Mutex it is NOT thread-affine, so it can be released from any thread, and the OS frees it on
+    /// process exit even after a crash - eliminating the thread-affine-release double-instance bounce.
+    /// </summary>
+    private static FileStream? TryAcquireSingleInstanceLock()
+    {
+        try
+        {
+            var dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "ClaudeBatteryWin");
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "singleinstance.lock");
+            return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (IOException)
+        {
+            return null; // already held by another running instance
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Free the single-instance lock immediately (from any thread). Idempotent. Called LAST in the
+    /// shutdown/relaunch teardown so a relaunch (incl. an update restart, U12) can acquire it without
+    /// bouncing off our predecessor; also the direct fallback when the dispatcher is unreachable.
+    /// </summary>
+    internal void ReleaseSingleInstanceLock()
+    {
+        _singleInstanceLock?.Dispose();
+        _singleInstanceLock = null;
+    }
+
+    // ============================================================================================
+    // Object graph
+    // ============================================================================================
+
+    private void BuildObjectGraph()
+    {
+        // Shared cookie jar: the SAME instance the AccountStore primes and the ClaudeApi transport
+        // reads from, so cookie rotation (__cf_bm) and account switches are reflected in both.
+        // Built by the store so the per-domain capacity suits the claude.ai capture (the .NET
+        // default of 20 per domain silently drops cookies).
+        _cookieJar = AccountStore.CreateCookieJar();
+
+        _secretStore = new SecretStore();
+        _accountStore = new AccountStore(_cookieJar, _secretStore);
+
+        // The outbound UA must equal the WebView2 session UA verbatim (necessary, not sufficient,
+        // for Cloudflare). It is captured after the first login NavigationCompleted (U6) and swapped
+        // in via RebuildApiWithUserAgent. The transport is wrapped in a SwappableClaudeApi so the
+        // UsageService/ManualSignIn can hold ONE reference while the inner transport is replaced on
+        // login (without modifying those units). Until a login happens this session, the inner is a
+        // ClaudeApi seeded with a plausible fallback Chromium-Edge UA so a restored-account first
+        // poll works (the U2 spike resolves whether this clears Cloudflare; if not, an in-WebView2
+        // IClaudeApi is substituted via Swap).
+        // Seed the inner transport with the RESTORED account's captured UA (U2) so a cold-start poll
+        // carries the same UA the login session used (a Cloudflare necessity), not the frozen
+        // DefaultUserAgent. The SwappableClaudeApi wrapper is unchanged - a live login still swaps the
+        // freshest UA in via OnAuthSuccess; this only fixes the no-login-this-session restore path.
+        var seedUserAgent = ResolveSeedUserAgent(_accountStore.ActiveAccount);
+        _transportUaIsFallback = seedUserAgent == DefaultUserAgent;
+        _api = new SwappableClaudeApi(new ClaudeApi(_cookieJar, seedUserAgent));
+        _transportUserAgent = seedUserAgent;
+        PublishPolledAccount();
+
+        _network = new SystemNetworkAvailability();
+        _clock = new SystemSchedulerClock();
+        // The poller reads the AccountStore's request generation live so a poll superseded by an
+        // account switch/re-auth discards its result instead of writing onto the new account (U2).
+        // A plain int read from the poll thread: never torn, and the poller reads it under its own
+        // lock, so a stale value only ever looks superseded.
+        _usageService = new UsageService(_api, _network, _clock,
+            () => _accountStore?.CurrentGeneration ?? 0,
+            // Live fallback-UA signal for the CF-block escalation (review F1): true only while the
+            // transport runs the frozen DefaultUserAgent. Updated on every re-seed in
+            // RebuildApiWithUserAgent, so a login swap or activation re-seed retires it.
+            () => _transportUaIsFallback,
+            // The account being polled, so a reading carries the conversion for the plan that
+            // actually produced it (KTD9). UsageService reads it on the UI thread when polling starts
+            // or switches and pairs it with the org; the read is the UI-published snapshot, never
+            // the store's live list (review F1).
+            () => Volatile.Read(ref _polledAccount),
+            // What the account learns about its own conversion is stored back on it, so the next
+            // launch starts from what it already knew rather than from nothing. The poller calls
+            // this from a pool thread and AccountStore is UI-thread-only, so the write is posted to
+            // the dispatcher, never run inline and never a blocking Invoke (review F1).
+            PersistMeasurementOnUiThread(Dispatcher, () => _accountStore, PublishPolledAccount));
+        _usageService.StateChanged += OnUsageStateChanged;
+        _usageService.AuthFailureDetected += OnAuthFailureDetected;
+
+        // The AccountStore drives the activation boundary; when the active account changes, restart
+        // (or stop) polling against the new org.
+        _accountStore.ActiveAccountChanged += OnActiveAccountChanged;
+
+        // ThemeWatcher debounce: coalesce a burst of General broadcasts onto one re-read after a
+        // short window on the UI thread. A real light/dark flip of EITHER bucket (taskbar or app
+        // windows: the two are independent settings) re-renders the icon for the taskbar bucket and
+        // re-themes the open flyout for the app bucket; an unrelated broadcast that lands on the
+        // same pair is suppressed (U9).
+        _themeWatcher = new ThemeWatcher(ScheduleThemeDebounced);
+        _themeWatcher.BucketsChanged += OnThemeBucketsChanged;
+
+        _settings = new AppSettings();
+
+        // The tray style is a stored setting, so the icon comes back in the style the user left it
+        // in. Built after the settings are read, and rebuilt whenever the setting changes (U14).
+        _renderer = new TrayIconRendererHost(_settings.IconStyle);
+        _settings.Changed += OnSettingsChanged;
+
+        // Diagnostics: inert until the user turns logging on in Settings. Constructed here so every
+        // producer shares one file per launch, and published as the app-wide instance for producers
+        // that are not constructor-injected (U2).
+        _diagnostics = new DiagnosticsLogger(_settings);
+        DiagnosticsLogger.SetShared(_diagnostics);
+
+        // Notifier: weekly-low toasts, gated on the global enable flag (read live), latch on the
+        // AccountStore, delivery through the WinRT sink (or a no-op sink off-Windows / in author build).
+        // The sink is kept so Settings can fire a test toast through the same path.
+        _toastSink = CreateToastSink();
+        _notifier = new Notifier(
+            notificationsEnabled: () => _settings.NotificationsEnabled,
+            latch: new AccountStoreNotifyLatch(_accountStore),
+            toastSink: _toastSink);
+
+        _runtime = new WebView2Runtime();
+
+        // Login: a production factory builds a real ephemeral WebView2-hosting LoginWindow per
+        // attempt; the AuthManager state machine consumes it. The org picker hosts OrgPickerView
+        // over the open login window.
+        _loginWebViewFactory = new LoginWebViewFactory(WireLoginWindow);
+        var orgPicker = new OrgPicker(
+            () => _loginWebViewFactory.CurrentWindow,
+            // Marks the organizations that already have an account, so the one being added stands
+            // out from the ones being repaired (R25).
+            () => _accountStore?.Accounts.Select(a => a.OrganizationId).ToList() ?? new List<string>());
+        _authManager = new AuthManager(_api, _accountStore, _loginWebViewFactory, orgPicker);
+        _authManager.OnAuthSuccess = OnAuthSuccess;
+        _authManager.OnManualSignInRequested = OpenSettingsAtManualSignIn;
+        // A sign-in that revived other stored organizations says so in the panel (R16).
+        _authManager.OnSignInConfirmation = message =>
+        {
+            if (_flyoutViewModel is not null)
+            {
+                _flyoutViewModel.SignInConfirmation = message;
+            }
+        };
+        _authManager.LoginStateChanged += OnLoginStateChanged;
+
+        _velopackUpdater = new GitHubVelopackUpdater();
+        _updateService = new UpdateService(_velopackUpdater, new AppUpdateTeardown(this));
+
+        _autostart = new AutostartService();
+        _manualSignIn = new ManualSignIn(_api, _accountStore);
+
+        // Nothing polls while a sign-in is rewriting the shared cookie jar, or a poll answered on
+        // half-written credentials marks a healthy account expired and stops (R22).
+        _authManager.OnSuspendPolling = () => _usageService?.SuspendPollingAsync() ?? Task.CompletedTask;
+        _authManager.OnResumePolling = () => _usageService?.ResumePolling();
+        _manualSignIn.OnSuspendPolling = () => _usageService?.SuspendPollingAsync() ?? Task.CompletedTask;
+        _manualSignIn.OnResumePolling = () => _usageService?.ResumePolling();
+
+        // The flyout view-model is the single state machine the borderless window binds against.
+        _flyoutViewModel = new FlyoutViewModel();
+        // Tapping a flyout account row switches to it (U15); the VM raises the id, the store switches.
+        _flyoutViewModel.SwitchAccountRequested += id => _accountStore?.SwitchTo(id);
+        // Renaming from the panel writes through the same store call Settings uses (R36).
+        _flyoutViewModel.RenameAccountRequested += (id, name) => _accountStore?.UpdateNickname(id, name);
+    }
+
+    /// <summary>
+    /// Swap the wrapped transport onto a freshly-captured WebView2 UA so the outbound poll UA equals
+    /// the login session UA verbatim. The <see cref="SwappableClaudeApi"/> replaces its inner
+    /// transport in place and disposes the prior one, so the <see cref="UsageService"/>,
+    /// <see cref="ManualSignIn"/>, and <see cref="AuthManager"/> keep their single reference. Called
+    /// from <see cref="OnAuthSuccess"/> after capture, when the AuthManager has a non-null UA. A
+    /// re-seed with the UA the transport already runs keeps the current transport (review F2).
+    /// </summary>
+    private void RebuildApiWithUserAgent(string userAgent)
+    {
+        if (_cookieJar is null || _api is null)
+        {
+            return;
+        }
+
+        // A transport captures only its UA and the cookie jar, and the jar is the one shared
+        // instance for the life of the app. So when the UA is unchanged the new transport would be
+        // identical, and the swap would only dispose the old one under whatever request is in
+        // flight (a poll on an account that did not change then counts a hard failure, and a
+        // sign-in step fails) (review F2).
+        if (ShouldRebuildTransport(_transportUserAgent, userAgent))
+        {
+            _api.Swap(new ClaudeApi(_cookieJar, userAgent));
+            _transportUserAgent = userAgent;
+        }
+
+        // Single invariant for the CF-block escalation: the flag mirrors "the transport UA is the
+        // frozen fallback" and is maintained ONLY here and at the initial seed - every re-seed
+        // (login swap with a captured UA, activation re-seed from a persisted UA) passes through.
+        _transportUaIsFallback = userAgent == DefaultUserAgent;
+    }
+
+    /// <summary>
+    /// Whether a re-seed to <paramref name="nextUserAgent"/> needs a new transport: only when it
+    /// differs (ordinal) from the UA the current transport was built with (review F2). Pure +
+    /// internal so it is unit-tested directly.
+    /// </summary>
+    internal static bool ShouldRebuildTransport(string? currentUserAgent, string nextUserAgent)
+        => !string.Equals(currentUserAgent, nextUserAgent, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Re-read the active account on the UI thread and publish it for the poller's pool-thread read
+    /// (review F1). Called before every poll (re)start and after every store write the poller reads
+    /// back (the ratio measurement, the plan fields a sign-in writes), so the snapshot is current
+    /// whenever a poll can start.
+    /// </summary>
+    private void PublishPolledAccount() => Volatile.Write(ref _polledAccount, _accountStore?.ActiveAccount);
+
+    /// <summary>
+    /// Post <paramref name="action"/> to <paramref name="dispatcher"/> without blocking the caller,
+    /// for a background thread that must reach UI-thread-only state (review F1). Returns false and
+    /// drops the action once the dispatcher is shutting down; the action re-checks on arrival, so
+    /// one posted just before shutdown does not run into a torn-down app.
+    /// </summary>
+    internal static bool PostToUiThread(Dispatcher dispatcher, Action action)
+    {
+        if (dispatcher.HasShutdownStarted)
+        {
+            return false;
+        }
+
+        dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!dispatcher.HasShutdownStarted)
+            {
+                action();
+            }
+        }));
+        return true;
+    }
+
+    /// <summary>
+    /// The poller's persistMeasurement callback (review F1). UsageService invokes it from a pool
+    /// thread, while AccountStore is UI-thread-only: its live list is enumerated by the flyout and
+    /// Settings, so writing <c>_accounts[index]</c> off-thread throws "Collection was modified" on
+    /// the UI thread, and the dispatcher crash hook does not set Handled. The write is posted to the
+    /// dispatcher instead, then <paramref name="afterWrite"/> runs on the UI thread (the app
+    /// re-publishes the polled-account snapshot so the next poll folds into the stored value).
+    /// Internal so the thread hop is tested against a real store.
+    /// </summary>
+    internal static Action<Guid, RatioMeasurement> PersistMeasurementOnUiThread(
+        Dispatcher dispatcher, Func<AccountStore?> store, Action? afterWrite = null)
+        => (id, measurement) => PostToUiThread(dispatcher, () =>
+        {
+            store()?.UpdateRatioMeasurement(id, measurement);
+            afterWrite?.Invoke();
+        });
+
+    /// <summary>
+    /// The User-Agent to seed the cold-start polling transport with: the restored account's captured
+    /// session UA when present (U1/U2), else the frozen <see cref="DefaultUserAgent"/>. Coalesces a
+    /// null/empty stored UA to the default because the <see cref="ClaudeApi"/> ctor rejects an empty
+    /// UA; a pre-fix account (no persisted UA) therefore behaves exactly as today until its next login
+    /// captures a real one (KTD2 - no live-UA harvest at startup). Pure + internal so it is unit-tested
+    /// directly.
+    /// </summary>
+    internal static string ResolveSeedUserAgent(Account? account)
+        => account?.UserAgent is { Length: > 0 } ua ? ua : DefaultUserAgent;
+
+    /// <summary>
+    /// Whether the startup "re-sign-in required (security data could not be read)" surface should be
+    /// flagged: at least one account was dropped at load because its DPAPI blob would not decrypt AND
+    /// there is no active account (a surviving account that loaded fine means the user is signed in,
+    /// so the nudge would be misleading). Pure + internal so the producer -> latch chain is unit-tested
+    /// directly (U6/R4). The latch is additionally retired once any authenticated state is observed
+    /// (see <see cref="SyncViewModelFromServices"/>), so a later deliberate sign-out cannot resurface it.
+    /// </summary>
+    internal static bool ShouldFlagSecurityDataUnreadable(AccountStore? store)
+        => store is not null && store.DroppedAccountIds.Count > 0 && !store.IsAuthenticated;
+
+    /// <summary>
+    /// The retirement rule for the startup DPAPI-drop latch: any authenticated state observed
+    /// retires it permanently (returns false), and a retired latch stays retired - a later
+    /// deliberate sign-out must NOT resurface the "security data could not be read" copy (false in,
+    /// false out). Pure + internal so the promise the inline comment in
+    /// <see cref="SyncViewModelFromServices"/> makes is unit-tested directly (U6/R4), matching the
+    /// <see cref="ResolveSeedUserAgent"/> / <see cref="ShouldFlagSecurityDataUnreadable"/> pattern.
+    /// </summary>
+    internal static bool RetireSecurityDataUnreadable(bool latched, bool isAuthenticated)
+        => !isAuthenticated && latched;
+
+    private IToastSink CreateToastSink()
+    {
+#if WINDOWS10_0_19041_0_OR_GREATER
+        return new WinRtToastSink();
+#else
+        // Author/non-Windows build: a sink that never delivers, so the Notifier never latches a
+        // toast the platform cannot show. Replaced by WinRtToastSink on the Windows-versioned TFM.
+        return new NullToastSink();
+#endif
+    }
+
+    // ============================================================================================
+    // Tray icon
+    // ============================================================================================
+
+    /// <summary>
+    /// Resolve the App.xaml tray icon, give it its identity, and register it with the shell. Returns
+    /// false when the icon could not be created even after a fresh-GUID retry; the app has then
+    /// already requested <see cref="Application.Shutdown()"/> and the caller must stop.
+    ///
+    /// The Id is path-derived (<see cref="TrayIconIdentity"/>) rather than a fixed literal: Windows
+    /// binds an unsigned exe's tray GUID to the path that first registered it, so a fixed GUID makes
+    /// <c>Shell_NotifyIcon(NIM_ADD)</c> fail the moment the same exe runs from another path (a move,
+    /// a rename, a re-download saved as "ClaudeBatteryWin (1).exe"). That failure surfaces here as an
+    /// <see cref="InvalidOperationException"/> from <c>ForceCreate</c>; a stale registration for
+    /// the same path can still trip it, so one retry with a throwaway GUID (pinning lost, icon
+    /// present) precedes giving up. The flyout's <c>Shell_NotifyIconGetRect</c> keys on whichever Id
+    /// finally registered, so <see cref="FlyoutWindow.TrayIconGuid"/> is read back AFTER creation.
+    /// </summary>
+    private bool AcquireTrayIcon()
+    {
+        _trayIcon = (TaskbarIcon)FindResource("TrayIcon");
+        _trayIcon.Id = TrayIconIdentity.Current;
+
+        // Left-click toggles the flyout. Wired in code (App.xaml declares no LeftClickCommand binding,
+        // since the resource has no DataContext) so the shell is self-consistent.
+        _trayIcon.TrayLeftMouseUp += (_, _) => ShowFlyout(fromTrayClick: true);
+
+        _trayIcon.ContextMenu = BuildTrayContextMenu();
+
+        // ForceCreate ensures the Win32 icon exists immediately at startup, with no taskbar window
+        // present (R1). registerAlsoInWow64 = false: this is a 64-bit (win-x64) build.
+        try
+        {
+            _trayIcon.ForceCreate(enablesEfficiencyMode: false);
+        }
+        catch (InvalidOperationException)
+        {
+            // Drop any half-registered icon, then retry once under a GUID no path can be bound to.
+            _trayIcon.TrayIcon.TryRemove();
+            _trayIcon.Id = Guid.NewGuid();
+            try
+            {
+                _trayIcon.ForceCreate(enablesEfficiencyMode: false);
+            }
+            catch (InvalidOperationException ex)
+            {
+                WriteCrashLog("tray-icon", new InvalidOperationException("tray icon could not be created", ex));
+                MessageBox.Show($"Claude Battery could not add its tray icon: {ex.Message}", "Claude Battery");
+                Shutdown();
+                return false;
+            }
+        }
+
+        FlyoutWindow.TrayIconGuid = _trayIcon.Id;
+        return true;
+    }
+
+    /// <summary>What to do about the first-run tray notice (R44, KTD13).</summary>
+    internal enum TrayNotice
+    {
+        /// <summary>Already shown once on this Windows profile: say nothing.</summary>
+        None,
+
+        /// <summary>Windows will deliver toasts: use one.</summary>
+        Toast,
+
+        /// <summary>Windows is blocking toasts, or cannot say: a small dialog instead.</summary>
+        Dialog,
+    }
+
+    /// <summary>
+    /// Which form the first-run notice takes, if any (R44, KTD13).
+    ///
+    /// Pure, so the once-only rule and the fall back to a dialog are tested without a tray, a toast
+    /// platform or a window. A toast is the quieter of the two, so it wins whenever Windows says it
+    /// would actually deliver one; anything else, including a permission read that cannot answer,
+    /// falls back to the dialog, because a notice nobody sees is the same as no notice.
+    /// </summary>
+    internal static TrayNotice DecideTrayNotice(bool alreadyShown, ToastPermission permission)
+    {
+        if (alreadyShown)
+        {
+            return TrayNotice.None;
+        }
+
+        return permission == ToastPermission.Enabled ? TrayNotice.Toast : TrayNotice.Dialog;
+    }
+
+    /// <summary>The title of the first-run notice, shared by both forms.</summary>
+    internal const string TrayNoticeTitle = "Claude Battery is running";
+
+    /// <summary>
+    /// The first-run notice body. Names the chevron and the drag, because "it did not start" is what
+    /// a user concludes when Windows files a new tray icon into the hidden overflow and nothing
+    /// appears on the taskbar.
+    /// </summary>
+    internal const string TrayNoticeBody =
+        "Windows hides new tray icons by default. Click the chevron (^) at the left of the "
+        + "notification area to find the Claude Battery icon, then drag it onto the taskbar to keep "
+        + "it visible.";
+
+    /// <summary>
+    /// Show the first-run notice once per Windows profile, immediately after the tray icon has
+    /// actually registered, and record that it was shown (R44).
+    ///
+    /// The flag is set whichever form was used, including a toast the platform accepted and then
+    /// dropped: the alternative is re-showing it at every launch for anyone whose notifications are
+    /// unreliable, which is the worse failure.
+    ///
+    /// The dialog form is posted to the dispatcher rather than shown here (review F5): a modal
+    /// MessageBox inline held OnStartup until the user dismissed it, so the system-event
+    /// subscriptions, the timers, polling and the update check all waited on a dialog. Posted, it
+    /// opens once startup has finished, and the flag is still set only after it is dismissed, so a
+    /// launch that quits before the user sees it shows it again next time.
+    /// </summary>
+    private void ShowFirstRunTrayNoticeIfDue()
+    {
+        if (_settings is null || _toastSink is null)
+        {
+            return;
+        }
+
+        var settings = _settings;
+        var decision = DecideTrayNotice(settings.HasShownTrayNotice, _toastSink.ReadPermission());
+        switch (decision)
+        {
+            case TrayNotice.None:
+                return;
+
+            case TrayNotice.Toast:
+                _toastSink.TryShow(TrayNoticeTitle, TrayNoticeBody, Guid.Empty);
+                settings.HasShownTrayNotice = true;
+                return;
+
+            case TrayNotice.Dialog:
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+                {
+                    if (Dispatcher.HasShutdownStarted)
+                    {
+                        return;
+                    }
+
+                    MessageBox.Show(TrayNoticeBody, TrayNoticeTitle, MessageBoxButton.OK, MessageBoxImage.Information);
+                    settings.HasShownTrayNotice = true;
+                }));
+                return;
+        }
+    }
+
+    private System.Windows.Controls.ContextMenu BuildTrayContextMenu()
+    {
+        var menu = new System.Windows.Controls.ContextMenu();
+
+        // The running version, first and unclickable. A tester asked which build they were on and had
+        // no way to find out without opening Settings (R54).
+        var version = new System.Windows.Controls.MenuItem
+        {
+            Header = VersionMenuTitle(),
+            IsEnabled = false,
+        };
+        menu.Items.Add(version);
+        menu.Items.Add(new System.Windows.Controls.Separator());
+
+        var settings = new System.Windows.Controls.MenuItem { Header = "Settings…" };
+        settings.Click += (_, _) => OpenSettings();
+        menu.Items.Add(settings);
+
+        var checkUpdates = new System.Windows.Controls.MenuItem { Header = "Check for Updates…" };
+        checkUpdates.Click += async (_, _) =>
+        {
+            if (_updateService?.IsUpdaterInstalled != true)
+            {
+                // Raw exe (not a Velopack install): a check would no-op, so hand the user the
+                // download page instead, matching the Settings update row.
+                OpenReleasesPage();
+                return;
+            }
+
+            await CheckForUpdatesAsync().ConfigureAwait(true);
+        };
+        menu.Items.Add(checkUpdates);
+
+        menu.Items.Add(new System.Windows.Controls.Separator());
+
+        var quit = new System.Windows.Controls.MenuItem { Header = "Quit Claude Battery" };
+        quit.Click += (_, _) => Shutdown();
+        menu.Items.Add(quit);
+
+        return menu;
+    }
+
+    /// <summary>
+    /// Any settings change the tray has to answer for: the countdown toggle re-composes the
+    /// tooltip, and the style picker swaps the renderer before the repaint so the new style is what
+    /// gets drawn (U14).
+    /// </summary>
+    private void OnSettingsChanged(object? sender, EventArgs e)
+    {
+        if (_settings is not null)
+        {
+            _renderer?.SetStyle(_settings.IconStyle);
+        }
+
+        RefreshIcon();
+    }
+
+    /// <summary>
+    /// Repaint the tray icon for the current usage/auth/taskbar-theme state and refresh its tooltip.
+    /// The renderer's signature cache short-circuits a redundant paint (issue #11 port), so calling
+    /// this on every poll, theme flip, and per-minute tick is cheap. A null return means "no
+    /// change"; we keep the current icon. A produced bitmap is converted to a System.Drawing.Icon
+    /// for the tray. The square icon draws no countdown; the numbers live in the tooltip, which is
+    /// set BEFORE the render so it updates even when the signature cache suppresses the repaint.
+    /// The icon is rasterized at the live small-icon cell size (SM_CXSMICON: 16 at 100% scaling,
+    /// 24 at 150%, 32 at 200%) so it is not upscaled by the shell.
+    /// </summary>
+    private void RefreshIcon()
+    {
+        if (_renderer is null || _themeWatcher is null || _trayIcon is null)
+        {
+            return;
+        }
+
+        var state = ResolveTrayState();
+        var theme = _themeWatcher.CurrentTrayBucket;
+        var reading = _usageService?.LatestReading;
+        var countdown = StackedBarsRenderer.CountdownCellText(
+            reading?.Snapshot,
+            _settings?.ShowSessionCountdown ?? false,
+            DateTimeOffset.UtcNow);
+
+        // Write the tooltip through the core TrayIcon, not the ToolTipText dependency property.
+        // (1) TrayIcon.UpdateToolTip throws InvalidOperationException when Shell_NotifyIcon(NIM_MODIFY)
+        //     returns FALSE (Explorer restarting or hung, or the new shell has not yet re-sent
+        //     TaskbarCreated) and nothing above RefreshIcon catches it, so the DP write would end the
+        //     process on an ordinary Explorer restart; the icon write below already tolerates the same
+        //     failure by returning false.
+        // (2) The DP commits its value before its change callback runs, so after a failed write an
+        //     identical next refresh would never retry. TrayIcon.ToolTip only advances on a successful
+        //     write (and is what TaskbarCreated's re-create passes to NIM_ADD), so comparing against it
+        //     retries until the shell accepts the text.
+        var tooltip = BuildTooltip(reading, countdown);
+        if (!string.Equals(_trayIcon.TrayIcon.ToolTip, tooltip, StringComparison.Ordinal))
+        {
+            try
+            {
+                _trayIcon.TrayIcon.UpdateToolTip(tooltip);
+            }
+            catch (InvalidOperationException)
+            {
+                // Shell unavailable (ObjectDisposedException derives from this too, covering a late
+                // refresh after Exit disposal). Retried on the next refresh.
+            }
+        }
+
+        var size = Math.Max(16, GetSystemMetrics(SM_CXSMICON));
+        var bitmap = _renderer.Render(state, theme, countdown, size);
+        if (bitmap is null)
+        {
+            return; // signature matched; keep the current icon
+        }
+
+        using (bitmap)
+        {
+            // GetHicon hands back an unmanaged HICON we own; wrap it, clone into a managed Icon the
+            // TaskbarIcon owns, then destroy the HICON so it is not leaked. The TaskbarIcon disposes
+            // the previously-set Icon automatically when this one replaces it (per H.NotifyIcon).
+            var hicon = bitmap.GetHicon();
+            try
+            {
+                using var icon = Icon.FromHandle(hicon);
+                _trayIcon.Icon = (Icon)icon.Clone();
+            }
+            finally
+            {
+                DestroyIcon(hicon);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The tray tooltip: the app name alone when there is no usage snapshot, else the two remaining
+    /// percentages and, when the countdown toggle yields a value, the session reset countdown that
+    /// the square icon no longer draws. Stays well under the shell's 127-character tooltip limit.
+    /// Pure + internal so it is unit-tested directly.
+    /// </summary>
+    internal static string BuildTooltip(UsageReading? reading, string countdown)
+    {
+        if (reading is null)
+        {
+            return "Claude Battery";
+        }
+
+        // The session figure is the display value, the same one the icon draws and the panel shows.
+        var session = Math.Round(reading.SessionDisplayRemaining);
+        var weekly = Math.Round(reading.Snapshot.WeeklyRemaining);
+        var text = $"Claude Battery - Session {session}% - Weekly {weekly}%";
+        return countdown.Length > 0 ? $"{text} - resets in {countdown}" : text;
+    }
+
+    /// <summary>
+    /// Map the polling/auth state to the tray render branch. The branch logic lives in the pure,
+    /// unit-tested <see cref="TrayRenderState.Resolve"/>: auth-failed -> faded "!"; an account with a
+    /// usable snapshot -> the battery (even when stale, matching the flyout, issue #9); no account ->
+    /// the hollow outline; with no snapshot, repeated hard failures -> "!", a sustained stale window
+    /// -> "...", an in-flight first poll -> a solid "...".
+    /// </summary>
+    private TrayRenderState ResolveTrayState()
+    {
+        var store = _accountStore;
+        var svc = _usageService;
+
+        return TrayRenderState.Resolve(
+            isAuthenticated: store?.IsAuthenticated ?? false,
+            serviceReady: svc is not null,
+            authFailed: svc?.AuthFailed ?? false,
+            latestUsage: svc?.LatestReading,
+            consecutiveFailures: svc?.ConsecutiveFailures ?? 0,
+            isStale: svc?.IsStale ?? true);
+    }
+
+    // ============================================================================================
+    // Flyout
+    // ============================================================================================
+
+    /// <summary>
+    /// Surface the flyout anchored to the tray rect. The second-instance signal and the tray
+    /// left-click both route here. Lazily constructs the window, binds the view-model, applies the
+    /// current app-window theme, and positions it (U10).
+    ///
+    /// A tray click (<paramref name="fromTrayClick"/>) is a toggle: an open flyout closes instead of
+    /// re-showing. Usually the click has ALREADY deactivated and hidden the flyout before the icon's
+    /// mouse-up arrives, so the second guard swallows a show that lands within the flyout's toggle
+    /// window of that deactivation-hide. Neither guard applies while a login is in progress (the
+    /// flyout suppresses its deactivation dismiss then, and a click should bring it back). The
+    /// second-instance signal keeps the unguarded show.
+    /// </summary>
+    private void ShowFlyout(bool fromTrayClick = false)
+    {
+        if (_flyoutViewModel is null)
+        {
+            return;
+        }
+
+        if (_flyout is null)
+        {
+            _flyout = new FlyoutWindow { DataContext = _flyoutViewModel };
+            _flyout.ApplyTheme(_themeWatcher?.CurrentAppBucket ?? ThemeBucket.Light);
+            WireFlyoutInteractions(_flyout);
+        }
+
+        if (fromTrayClick && _flyout.IsVisible && !_flyoutViewModel.SuppressDismissOnDeactivate)
+        {
+            _flyout.Hide();
+            return;
+        }
+
+        if (fromTrayClick && _flyout.ConsumeRecentDeactivationHide(Environment.TickCount64))
+        {
+            return; // the click that just dismissed the flyout; not a request to reopen it
+        }
+
+        SyncViewModelFromServices();
+        _flyout.ApplyTheme(_themeWatcher?.CurrentAppBucket ?? ThemeBucket.Light);
+        _flyout.ShowAtTray();
+    }
+
+    /// <summary>
+    /// Wire the flyout's interactive affordances (the integration glue the view-model deliberately
+    /// does not own). The U10 XAML declares named buttons but no <c>Click</c> handlers; the
+    /// composition root attaches them here, routing into the live services. Account switching and
+    /// account management are owned by the Settings window (the flyout account rows are display-only
+    /// in v1), so they are not wired from the flyout.
+    /// </summary>
+    private void WireFlyoutInteractions(FlyoutWindow flyout)
+    {
+        HookButton(flyout, "SignInButton", BeginLogin);
+        HookButton(flyout, "ReauthButton", BeginLogin);
+        HookButton(flyout, "ReauthSecurityButton", BeginLogin);
+        HookButton(flyout, "AddAccountLinkButton", BeginLogin);
+        HookButton(flyout, "LoginErrorTryAgainButton", () => _authManager?.RetryLogin());
+        HookButton(flyout, "UpdateLinkButton", () => _ = ApplyUpdateAsync());
+        // Error panel: sign in again, or retry now. HandleResume restarts polling with the one-shot
+        // no-network grace and is a no-op when auth has failed or nothing is being polled.
+        HookButton(flyout, "ErrorSignInButton", BeginLogin);
+        HookButton(flyout, "ErrorRetryButton", () => _usageService?.HandleResume());
+    }
+
+    /// <summary>
+    /// Attach a click handler to a named <see cref="System.Windows.Controls.Button"/> in the flyout.
+    /// A missing element is tolerated (the panel for that state may not be realized), so the shell is
+    /// robust to a XAML rename without throwing at startup.
+    /// </summary>
+    private static void HookButton(FlyoutWindow flyout, string name, Action onClick)
+    {
+        if (flyout.FindName(name) is System.Windows.Controls.Button button)
+        {
+            button.Click += (_, _) => onClick();
+        }
+    }
+
+    /// <summary>
+    /// Push the current service state into the flyout view-model. Called on every state change
+    /// (poll result, account switch, login transition) after marshaling onto the UI thread.
+    /// </summary>
+    private void SyncViewModelFromServices()
+    {
+        if (_flyoutViewModel is null)
+        {
+            return;
+        }
+
+        var store = _accountStore;
+        var svc = _usageService;
+
+        // Every UI-thread state change passes through here, so it also keeps the poller's account
+        // snapshot current after store edits that raise no event of their own (review F1).
+        PublishPolledAccount();
+
+        // Batch all input setters so the view-model re-resolves ONCE, not once per property (U16/#26).
+        using (_flyoutViewModel.SuspendRefresh())
+        {
+            _flyoutViewModel.IsAuthenticated = store?.IsAuthenticated ?? false;
+            _flyoutViewModel.Accounts = store?.Accounts ?? Array.Empty<Account>();
+            _flyoutViewModel.ActiveAccountId = store?.ActiveAccountId;
+            _flyoutViewModel.CanAddAccount = store?.CanAddAccount ?? true;
+
+            // Retire the startup DPAPI-drop nudge once any authenticated state is observed: a later
+            // sign-out is then the user's own action, not the unreadable-security-data cause, so it
+            // must not resurface the re-auth copy (review: avoid a stale re-auth surface after a
+            // sign-in / account-removal sequence). The rule lives in the pure
+            // RetireSecurityDataUnreadable so the retire-then-never-relatch promise is unit-tested.
+            _securityDataUnreadable = RetireSecurityDataUnreadable(_securityDataUnreadable, store?.IsAuthenticated == true);
+            _flyoutViewModel.SecurityDataUnreadable = _securityDataUnreadable;
+
+            if (svc is not null)
+            {
+                _flyoutViewModel.LatestReading = svc.LatestReading;
+                _flyoutViewModel.AuthFailed = svc.AuthFailed;
+                _flyoutViewModel.ConsecutiveFailures = svc.ConsecutiveFailures;
+                _flyoutViewModel.LastSuccessfulFetch = svc.LastSuccessfulFetch;
+            }
+
+            if (_authManager is not null)
+            {
+                _flyoutViewModel.LoginState = _authManager.LoginState;
+            }
+
+            _flyoutViewModel.AvailableUpdateVersion = _updateService?.AvailableUpdate?.Version;
+        }
+    }
+
+    // ============================================================================================
+    // Login flow (U6/U7/U8 gate)
+    // ============================================================================================
+
+    /// <summary>
+    /// Begin a sign-in, gated on the WebView2 runtime being present (U8). When it is absent, show
+    /// the separate <see cref="RuntimeMissingWindow"/> and block login until the bootstrap succeeds;
+    /// only then open the WebView2 login flow.
+    /// </summary>
+    private void BeginLogin()
+    {
+        if (_runtime is null || _authManager is null)
+        {
+            return;
+        }
+
+        if (!_runtime.IsAvailable())
+        {
+            if (_runtimeWindowOpen)
+            {
+                return;
+            }
+
+            _runtimeWindowOpen = true;
+            try
+            {
+                var runtimeWindow = new RuntimeMissingWindow(_runtime);
+                runtimeWindow.ShowDialog();
+                if (!runtimeWindow.RuntimeReady)
+                {
+                    return; // user dismissed without installing; login stays blocked
+                }
+            }
+            finally
+            {
+                _runtimeWindowOpen = false;
+            }
+        }
+
+        _authManager.PresentLogin();
+    }
+
+    /// <summary>
+    /// Build and wire a real login window each attempt (the production <see cref="ILoginWebView"/>).
+    /// Hooks the "Try again" / "Sign in manually" affordances back to the manager and reflects the
+    /// login state onto the window's overlays.
+    /// </summary>
+    private LoginWindow WireLoginWindow()
+    {
+        var window = new LoginWindow();
+        window.RetryRequested += () => _authManager?.RetryLogin();
+        window.ManualSignInRequested += () => _authManager?.RequestManualSignIn();
+        return window;
+    }
+
+    private void OnLoginStateChanged(LoginState state)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            // Reflect the state onto the live login window's overlays. Key the signing-in overlay on
+            // the shared LoginState.IsLoginInProgress predicate (signing-in / capturing / org-discovery
+            // / picker) so the four in-progress kinds cannot drift from the flyout's panel + dismiss
+            // logic, which key on the same predicate (U3).
+            if (_loginWebViewFactory?.CurrentWindow is { } window)
+            {
+                if (state.IsLoginInProgress)
+                {
+                    window.ShowSigningInOverlay();
+                }
+                else if (state.Kind == LoginStateKind.Error)
+                {
+                    window.ShowError(state.Message ?? "Sign-in failed. Please try again.");
+                }
+                else
+                {
+                    window.HideOverlays();
+                }
+            }
+
+            SyncViewModelFromServices();
+        }));
+    }
+
+    private void OnAuthSuccess()
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            // Repoint the transport at the WebView2-captured UA (necessary for Cloudflare), then
+            // poll the newly active account and refresh the UI.
+            if (_authManager?.CapturedUserAgent is { Length: > 0 } ua)
+            {
+                RebuildApiWithUserAgent(ua);
+            }
+
+            // The sign-in may have written the plan fields; publish before the first poll reads them.
+            PublishPolledAccount();
+            if (_accountStore?.ActiveAccount is { } active)
+            {
+                _usageService?.StartPolling(active.OrganizationId);
+            }
+
+            SyncViewModelFromServices();
+            RefreshIcon();
+            // An open Settings window shows the new account without a reopen.
+            _settingsWindow?.RefreshAccounts();
+        }));
+    }
+
+    // ============================================================================================
+    // Settings
+    // ============================================================================================
+
+    private void OpenSettings() => OpenSettingsInternal(focusManualSignIn: false);
+
+    private void OpenSettingsAtManualSignIn()
+        => Dispatcher.BeginInvoke(new Action(() => OpenSettingsInternal(focusManualSignIn: true)));
+
+    private void OpenSettingsInternal(bool focusManualSignIn)
+    {
+        if (_accountStore is null || _manualSignIn is null || _autostart is null
+            || _settings is null || _updateService is null)
+        {
+            return;
+        }
+
+        if (_settingsWindow is null)
+        {
+            // The test-toast button goes through the SAME sink the Notifier delivers with, so a
+            // tester confirms the real path. A null sender hides the button.
+            var toastSink = _toastSink;
+            Func<bool>? sendTestToast = toastSink is null
+                ? null
+                : () => toastSink.TryShow("Claude Battery", "Notifications are working.", Guid.Empty);
+
+            // The same sink answers whether Windows would deliver a toast at all, so Settings can
+            // say so rather than leaving the toggle looking healthy (R45).
+            Func<ToastPermission>? readPermission = toastSink is null ? null : toastSink.ReadPermission;
+            _settingsWindow = new SettingsWindow(
+                _accountStore, _manualSignIn, _autostart, _settings, _updateService, sendTestToast,
+                readPermission);
+            _settingsWindow.AddAccountRequested += (_, _) => BeginLogin();
+            _settingsWindow.Closed += (_, _) => _settingsWindow = null;
+        }
+
+        _settingsWindow.Show();
+        _settingsWindow.Activate();
+
+        // When invoked from the login error surface's "Sign in manually" affordance, land the user
+        // directly on the manual cookie-paste box rather than just opening Settings (U4).
+        if (focusManualSignIn)
+        {
+            _settingsWindow.FocusManualSignIn();
+        }
+    }
+
+    // ============================================================================================
+    // Updates (U12)
+    // ============================================================================================
+
+    private async Task CheckForUpdatesAsync()
+    {
+        if (_updateService is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _updateService.CheckForUpdatesAsync().ConfigureAwait(true);
+        }
+        catch (Exception)
+        {
+            // A failed check is a no-op (parity with the Mac swallow); nothing to surface.
+            return;
+        }
+
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            SyncViewModelFromServices();
+            // An open Settings window repaints its About row with the result.
+            _settingsWindow?.RefreshUpdateRow();
+        }));
+    }
+
+    /// <summary>
+    /// Open the GitHub Releases page in the default browser: the raw-exe build cannot self-update,
+    /// so "Check for Updates" hands the user the download page instead. A missing browser handler
+    /// (<see cref="Win32Exception"/>) is ignored; there is no surface on the tray menu to report it.
+    /// </summary>
+    private static void OpenReleasesPage()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(ReleasesPageUrl) { UseShellExecute = true });
+        }
+        catch (Win32Exception)
+        {
+            // No handler for https URLs; nothing to do from a tray menu.
+        }
+    }
+
+    private async Task ApplyUpdateAsync()
+    {
+        if (_updateService is null)
+        {
+            return;
+        }
+
+        // The flyout "Update" link wires this as a fire-and-forget discard (() => _ = ApplyUpdateAsync()),
+        // so a throw here would otherwise become an unobserved faulted task. Guard the boundary,
+        // matching SettingsWindow.OnUpdateActionClicked (which catches + surfaces a failure message).
+        // ApplyUpdateAsync runs the clean teardown (AppUpdateTeardown below) then relaunches and never
+        // returns on a real install; a false return (dev/test/no update) leaves us running, and the
+        // catch covers a transient download/disk failure.
+        try
+        {
+            await _updateService.ApplyUpdateAsync().ConfigureAwait(true);
+        }
+        catch (Exception)
+        {
+            // A failed apply must not crash the tray; refresh the flyout so its update row reflects
+            // that the update did not complete (parity with the SettingsWindow update path).
+            SyncViewModelFromServices();
+        }
+    }
+
+    // ============================================================================================
+    // Service callbacks
+    // ============================================================================================
+
+    private void OnUsageStateChanged(object? sender, EventArgs e)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            // Evaluate the weekly-low toast ONLY on a genuine poll success - when LastSuccessfulFetch
+            // has advanced since the last evaluation. StateChanged also fires on hard-failure and
+            // auth-failure ticks (where LatestUsage is the unchanged prior snapshot); re-evaluating
+            // the Notifier there is spurious (issue #19). The Notifier still owns its own dedup latch.
+            var svc = _usageService;
+            if (svc?.LatestUsage is { } usage && _accountStore?.ActiveAccount is { } active
+                && svc.LastSuccessfulFetch is { } fetched && fetched != _lastNotifiedFetch)
+            {
+                _lastNotifiedFetch = fetched;
+                // Pass the session reset so the Notifier can clear its latch on a window rollover (U13).
+                _notifier?.Evaluate(active, usage.WeeklyRemaining, usage.SessionResetDate);
+            }
+
+            RefreshIcon();
+            SyncViewModelFromServices();
+        }));
+    }
+
+    private void OnAuthFailureDetected(object? sender, EventArgs e)
+    {
+        // A 401/403 stopped polling and nulled usage. Surface the auth-failed icon + flyout; the
+        // user re-authenticates via the flyout sign-in or Settings manual paste.
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            RefreshIcon();
+            SyncViewModelFromServices();
+        }));
+    }
+
+    private void OnActiveAccountChanged()
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            // Publish the new active account before SwitchAccount arms the next poll (review F1).
+            PublishPolledAccount();
+            if (_accountStore?.ActiveAccount is { } active)
+            {
+                // Re-seed the transport with the activated account's persisted UA (review F2): the
+                // U2 cold-start seed alone left an in-session switch polling the target account's
+                // cookies under the PREVIOUS account's UA (a Cloudflare mismatch when their captured
+                // UAs differ). Same swap plumbing as the login path; also keeps the fallback-UA
+                // escalation flag honest for accounts with no persisted UA.
+                RebuildApiWithUserAgent(ResolveSeedUserAgent(active));
+                _usageService?.SwitchAccount(active.OrganizationId);
+            }
+            else
+            {
+                // The last account was removed: forget its org and numbers too, so the tooltip
+                // stops showing them and a resume or reconnect cannot poll the deleted org (A2).
+                _usageService?.ClearAccount();
+            }
+
+            RefreshIcon();
+            SyncViewModelFromServices();
+        }));
+    }
+
+    // ============================================================================================
+    // Theme (U9)
+    // ============================================================================================
+
+    private void OnThemeBucketsChanged(object? sender, ThemeBuckets buckets)
+    {
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            // A real light/dark flip of either bucket: re-paint the tray for the taskbar bucket (the
+            // renderer's signature cache makes an unchanged tray bucket a free no-op) and re-theme
+            // the open flyout for the app bucket live without close/reopen (DynamicResource swap).
+            RefreshIcon();
+            _flyout?.ApplyTheme(buckets.App);
+        }));
+    }
+
+    /// <summary>
+    /// The debounce scheduler the <see cref="ThemeWatcher"/> uses: coalesce a burst of General
+    /// broadcasts during a theme swap onto a SINGLE re-read after a short window. Uses ONE reusable
+    /// <see cref="DispatcherTimer"/> restarted on each broadcast, not a fresh timer per broadcast -
+    /// the latter was a fan-out (N broadcasts -> N timers -> N re-reads) that also leaked timers
+    /// because none was ever stopped on shutdown (U11/#16).
+    /// </summary>
+    private void ScheduleThemeDebounced(Action reevaluate)
+    {
+        _themeReevaluate = reevaluate;
+        if (_themeDebounceTimer is null)
+        {
+            _themeDebounceTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+            {
+                Interval = TimeSpan.FromMilliseconds(250),
+            };
+            _themeDebounceTimer.Tick += OnThemeDebounceTick;
+        }
+
+        // Restart the single timer so a burst collapses to one fire (only the last broadcast wins).
+        _themeDebounceTimer.Stop();
+        _themeDebounceTimer.Start();
+    }
+
+    private void OnThemeDebounceTick(object? sender, EventArgs e)
+    {
+        _themeDebounceTimer?.Stop(); // one-shot: stop before re-evaluating so it does not repeat
+        _themeReevaluate?.Invoke();
+    }
+
+    // ============================================================================================
+    // Timers (per-minute countdown re-render; mirrors the Mac MenuBarController)
+    // ============================================================================================
+
+    private void StartTimers()
+    {
+        // Per-minute tick: re-compose the countdown so the tray tooltip's "Nh+"/"Nm" tag stays
+        // current. The countdown is not part of the drawn icon, so the renderer's signature cache
+        // makes the tick a no-op render and this never churns CPU (issue #11 port).
+        _countdownTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        {
+            Interval = TimeSpan.FromSeconds(60),
+        };
+        _countdownTimer.Tick += (_, _) =>
+        {
+            RefreshIcon();
+            // The flyout's "Updated N minutes ago" + countdowns also drift with wall-clock time.
+            if (_flyout is { IsVisible: true })
+            {
+                _flyoutViewModel?.Refresh();
+            }
+        };
+        _countdownTimer.Start();
+    }
+
+    // ============================================================================================
+    // System events
+    // ============================================================================================
+
+    private void SubscribeSystemEvents()
+    {
+        // NOTE: A windowless WPF app may not pump the hidden message loop PowerModeChanged needs. If
+        // it is NOT observed to fire windowless (verify by suspending the machine), the fallback is a
+        // hidden message-only window handling WM_POWERBROADCAST on its WndProc (U10, field-gated). The
+        // theme path (UserPreferenceChanged) is owned entirely by the ThemeWatcher, which
+        // self-subscribes; App does not duplicate that subscription (U23/#21).
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
+    }
+
+    private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode == PowerModes.Resume)
+        {
+            // Re-poll on wake; the first post-resume poll tolerates no-network without penalty
+            // (UsageService.HandleResume). The signature cache keeps the subsequent repaint cheap.
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                // After a display reconfiguration the cached tray image may no longer be on screen,
+                // so invalidate the signature before the next paint (Mac wake reset).
+                _renderer?.ResetSignature();
+                _usageService?.HandleResume();
+                RefreshIcon();
+
+                // A machine that slept through the daily tick gets its check on waking, and the
+                // next twenty-four hours are counted from the wake moment (R47, KTD15).
+                _updateSchedule?.HandleResume();
+            }));
+        }
+    }
+
+    // ============================================================================================
+    // Exit teardown
+    // ============================================================================================
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        ReleaseForShutdown();
+        base.OnExit(e);
+    }
+
+    /// <summary>
+    /// Ordered teardown shared by normal exit and the update-relaunch path: stop the poller, dispose
+    /// WebView2 environments (the open login window), dispose services, then release the
+    /// single-instance mutex LAST so a relaunch (incl. an update restart, U12) can re-acquire it
+    /// without bouncing off our predecessor.
+    /// </summary>
+    private void ReleaseForShutdown()
+    {
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+
+        // Close the diagnostics file with a session-end record before anything else stops.
+        _diagnostics?.Flush();
+        _diagnostics?.Dispose();
+        _diagnostics = null;
+
+        _countdownTimer?.Stop();
+        _countdownTimer = null;
+
+        _updateSchedule?.Dispose();
+        _updateSchedule = null;
+
+        // Stop the single theme-debounce timer so no post-shutdown tick fires (U11).
+        _themeDebounceTimer?.Stop();
+        _themeDebounceTimer = null;
+        _themeReevaluate = null;
+
+        // Stop polling and tear down any in-flight login (disposes its WebView2 environment + UDF).
+        _usageService?.StopPolling();
+        _authManager?.StopLoginWindow();
+
+        _showFlyoutWaitRegistration?.Unregister(waitObject: null);
+        _showFlyoutWaitRegistration = null;
+
+        _flyout?.Close();
+        _flyout = null;
+        _settingsWindow?.Close();
+        _settingsWindow = null;
+
+        _trayIcon?.Icon?.Dispose();
+        _trayIcon?.Dispose();
+        _trayIcon = null;
+
+        if (_themeWatcher is not null)
+        {
+            _themeWatcher.BucketsChanged -= OnThemeBucketsChanged;
+        }
+        _themeWatcher?.Dispose();
+        _renderer?.Dispose();
+        _usageService?.Dispose();
+        _network?.Dispose();
+        _clock?.Dispose();
+        (_api as IDisposable)?.Dispose();
+
+        _showFlyoutEvent?.Dispose();
+        _showFlyoutEvent = null;
+
+        // Release the single-instance lock LAST so a relaunch (incl. an update restart, U12) can
+        // re-acquire it without bouncing off our predecessor. Disposing the FileStream frees the OS
+        // lock from ANY thread (no Mutex thread-affinity), so this cannot throw or leave it held.
+        ReleaseSingleInstanceLock();
+    }
+
+    /// <summary>
+    /// The clean-teardown contract the <see cref="UpdateService"/> runs immediately before
+    /// <c>ApplyUpdatesAndRestart</c> (U12): stop the poller, dispose WebView2 environments, then
+    /// release the mutex LAST. Routes through the same <see cref="ReleaseForShutdown"/> so the
+    /// relaunched instance re-acquires the mutex in <see cref="OnStartup"/>.
+    /// </summary>
+    private sealed class AppUpdateTeardown : IUpdateTeardown
+    {
+        private readonly App _app;
+
+        public AppUpdateTeardown(App app) => _app = app;
+
+        public void PrepareForRelaunch()
+        {
+            try
+            {
+                _app.Dispatcher.Invoke(_app.ReleaseForShutdown);
+            }
+            catch (Exception)
+            {
+                // The dispatcher is unreachable (already shutting down). Still free the single-instance
+                // lock directly so the relaunched instance becomes primary - the FileStream lock is not
+                // thread-affine, so releasing it off the UI thread is safe (unlike Mutex.ReleaseMutex).
+                _app.ReleaseSingleInstanceLock();
+            }
+        }
+
+        public void ExitAfterFailedRelaunch(Exception error)
+        {
+            // The teardown already ran (no tray icon, no polling, lock released), so staying alive
+            // would leave an invisible process that cannot be quit and lets the next launch become
+            // a second instance. Record why in the crash log (the diagnostics logger was closed by
+            // the teardown), then leave through the normal Shutdown -> OnExit path. OnExit runs
+            // ReleaseForShutdown a second time, which only repeats disposals that tolerate it.
+            WriteCrashLog("update-apply", error);
+            try
+            {
+                _app.Dispatcher.Invoke(() => _app.Shutdown(1));
+            }
+            catch (Exception)
+            {
+                // The dispatcher is unreachable, so Shutdown cannot run. Exit outright rather than
+                // linger; the lock is already free and the OS reclaims the rest.
+                Environment.Exit(1);
+            }
+        }
+    }
+
+    // ============================================================================================
+    // Constants + interop
+    // ============================================================================================
+
+    /// <summary>
+    /// The fallback outbound User-Agent used only before a WebView2 login captures the real session
+    /// UA this run. It matches a current Chromium-Edge WebView2 UA shape so a restored-account first
+    /// poll is plausible; the captured UA replaces it on the first successful login
+    /// (<see cref="RebuildApiWithUserAgent"/>). UA match is necessary, not sufficient, for Cloudflare
+    /// (the U2 spike resolves whether the SocketsHttpHandler poll clears it at all).
+    /// </summary>
+    private const string DefaultUserAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+        + "Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0";
+
+    /// The GitHub Releases page the raw-exe build points at, since it cannot self-update.
+    private const string ReleasesPageUrl = "https://github.com/Reebz/claude-battery/releases";
+
+    /// <summary>
+    /// The shipped version for the crash log header. Assembly version, not Assembly.Location /
+    /// FileVersionInfo: those are empty or throw under PublishSingleFile (the shipped raw exe).
+    /// </summary>
+    private static string AppVersion => AppVersionInfo.Version;
+
+    /// <summary>
+    /// Append one entry to <c>%LocalAppData%\ClaudeBatteryWin\crash.log</c>. Swallows everything: a
+    /// crash logger that throws while the process is already dying only hides the original fault.
+    /// Every line written stays free of session cookies and keys (only the exception text lands
+    /// here), so the redaction gate has nothing to flag.
+    /// </summary>
+    private static void WriteCrashLog(string source, Exception? ex)
+    {
+        try
+        {
+            var dir = CrashLogDirectory();
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, "crash.log");
+            File.AppendAllText(path, FormatCrashEntry(DateTimeOffset.Now, AppVersion, source, ex));
+            TrimCrashLog(path);
+        }
+        catch
+        {
+            // Never throw from the crash logger.
+        }
+    }
+
+    /// <summary>The tray menu's first row. Internal so the exact text is pinned by a test.</summary>
+    internal static string VersionMenuTitle() => $"Claude Battery v{AppVersionInfo.Version}";
+
+    private static string CrashLogDirectory() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "ClaudeBatteryWin");
+
+    /// <summary>How many crash blocks the file keeps. Older ones are dropped, so a machine that
+    /// crash-loops cannot grow an unbounded file a tester is then asked to attach.</summary>
+    internal const int MaxCrashEntries = 20;
+
+    /// <summary>
+    /// Drops all but the most recent <see cref="MaxCrashEntries"/> blocks. Pure enough to test:
+    /// <see cref="TrimCrashEntries"/> does the work on the text.
+    /// </summary>
+    private static void TrimCrashLog(string path)
+    {
+        try
+        {
+            var text = File.ReadAllText(path);
+            var trimmed = TrimCrashEntries(text, MaxCrashEntries);
+            if (!string.Equals(trimmed, text, StringComparison.Ordinal))
+            {
+                File.WriteAllText(path, trimmed);
+            }
+        }
+        catch
+        {
+            // A trim that fails leaves a longer file, which is harmless.
+        }
+    }
+
+    /// <summary>Keeps the last <paramref name="keep"/> "====" blocks of a crash log.</summary>
+    internal static string TrimCrashEntries(string text, int keep)
+    {
+        const string marker = "==== ";
+        var starts = new List<int>();
+        for (var i = 0; i < text.Length; i++)
+        {
+            var isLineStart = i == 0 || text[i - 1] == '\n';
+            if (isLineStart && string.CompareOrdinal(text, i, marker, 0, marker.Length) == 0)
+            {
+                starts.Add(i);
+            }
+        }
+
+        if (starts.Count <= keep)
+        {
+            return text;
+        }
+        return text[starts[starts.Count - keep]..];
+    }
+
+    /// <summary>The previous version's crash log, kept across one update (review F3).</summary>
+    internal const string PreviousCrashLogFileName = "crash.previous.log";
+
+    /// <summary>
+    /// Runs <see cref="PrepareCrashLog"/> on the real crash-log directory. Swallows everything.
+    /// </summary>
+    private static void PrepareCrashLogForThisVersion()
+    {
+        try
+        {
+            PrepareCrashLog(CrashLogDirectory(), AppVersion);
+        }
+        catch
+        {
+            // Never throw from the crash-log path.
+        }
+    }
+
+    /// <summary>
+    /// Runs once per version, on its first launch: a marker file beside the log records which
+    /// version last did it.
+    ///
+    /// No marker means the log was written by a beta from before the marker existed, and those
+    /// betas did not redact their entries, so the log is cleared (U2). A marker naming another
+    /// version means the log is kept: redacted again and written to
+    /// <see cref="PreviousCrashLogFileName"/>, replacing the one kept before it, so a crash from
+    /// before an update is still there to attach (review F3). It is redacted again because the
+    /// marker only says a redacting build ran last, not that every block came from one: an older
+    /// pre-redaction beta launched in between appends raw text and never touches the marker
+    /// (review F2). Redaction is idempotent, so blocks already redacted come through unchanged. Each
+    /// file is trimmed to <see cref="MaxCrashEntries"/> blocks, so the pair stays bounded. An empty
+    /// log is not moved, so a version that never crashed does not replace the last useful one.
+    /// Internal so it is tested against a temp directory.
+    /// </summary>
+    internal static void PrepareCrashLog(string dir, string version)
+    {
+        var marker = Path.Combine(dir, "crash-log-redacted.marker");
+        var markerVersion = File.Exists(marker) ? File.ReadAllText(marker).Trim() : null;
+        if (string.Equals(markerVersion, version, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(dir);
+        var log = Path.Combine(dir, "crash.log");
+        if (File.Exists(log))
+        {
+            if (markerVersion is null)
+            {
+                File.WriteAllText(log, string.Empty);
+            }
+            else if (new FileInfo(log).Length > 0)
+            {
+                // No total cap here: the file is already bounded by TrimCrashEntries, and the
+                // per-block cap would cut a full log short.
+                var kept = RedactCrashTextInChunks(File.ReadAllText(log), int.MaxValue);
+                File.WriteAllText(Path.Combine(dir, PreviousCrashLogFileName), kept);
+                File.Delete(log);
+            }
+        }
+        File.WriteAllText(marker, version);
+    }
+
+    /// <summary>
+    /// One crash-log block: a header line with the ISO-8601 timestamp, the app version and the
+    /// source tag, then the exception's text (type, message, inner exceptions, stack frames) run
+    /// through the redactor, then a blank separator line. .NET exception messages embed the user's
+    /// profile path, which names the Windows account, so this file goes through the same rules as
+    /// the diagnostics log even though it is never exportable. Pure + internal so it is unit-tested
+    /// directly.
+    /// </summary>
+    internal static string FormatCrashEntry(DateTimeOffset now, string version, string source, Exception? ex)
+        => $"==== {now:O} ClaudeBatteryWin v{version} [{source}] ===={Environment.NewLine}"
+            + RedactCrashText(ex?.ToString() ?? "(null exception)") + Environment.NewLine
+            + Environment.NewLine;
+
+    /// <summary>
+    /// The most exception text one crash block keeps, in characters. Well above a deep stack trace
+    /// with inner exceptions, and with <see cref="MaxCrashEntries"/> blocks per file it keeps the
+    /// log bounded (review F4).
+    /// </summary>
+    internal const int MaxCrashTextLength = 32 * 1024;
+
+    /// <summary>The marker appended when <see cref="MaxCrashTextLength"/> cuts the text short.</summary>
+    internal const string CrashTextTruncatedMarker = "…[TRUNCATED]";
+
+    /// <summary>
+    /// Redacts exception text in chunks of whole lines (reviews F4, F3). <see cref="SecretRedactor"/>
+    /// cuts each input at <see cref="SecretRedactor.MaxRedactInputLength"/> characters to bound its
+    /// regex cost, and a whole stack trace in one call lost most of its frames to that cut, so each
+    /// chunk stays under the cap. Chunks and not single lines, because several patterns match across
+    /// a line break: a credential key and its value ("password:" then the value on the next line),
+    /// "Bearer", and "Authorization:". A key and its value on neighbouring lines must reach the
+    /// redactor in the same call, so a chunk whose last line ends on a delimiter or a scheme word
+    /// hands that line on to the next chunk. The profile-path rewrite runs over the whole text first,
+    /// so the length measured is the length the redactor cuts at (a single line longer than the cap
+    /// is still cut, as before). The total is bounded by <see cref="MaxCrashTextLength"/>: chunks past
+    /// it are dropped, never written unredacted.
+    /// </summary>
+    internal static string RedactCrashText(string text) => RedactCrashTextInChunks(text, MaxCrashTextLength);
+
+    /// <summary>A line that ends where a value is still to come: after ":" or "=" (and an optional
+    /// opening quote), or after "Bearer", "Basic" or "Authorization" (review F3).</summary>
+    private static readonly System.Text.RegularExpressions.Regex DanglingCrashKeyRegex = new(
+        @"(?i)([:=：＝]\s*[""']?|\b(?:bearer|basic|authorization))\s*$",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// <see cref="RedactCrashText"/> with the total cap as a parameter, so the kept previous log is
+    /// redacted again without being cut short (review F2). Chunks past <paramref name="maxLength"/>
+    /// are replaced by <see cref="CrashTextTruncatedMarker"/>.
+    /// </summary>
+    internal static string RedactCrashTextInChunks(string text, int maxLength)
+    {
+        text = SecretRedactor.RedactUserPaths(text);
+        var builder = new System.Text.StringBuilder(Math.Min(text.Length, maxLength) + 64);
+        var chunk = new System.Text.StringBuilder();
+        var lastLineStart = 0;
+        var position = 0;
+
+        // False once the total cap is reached, after the marker has been written.
+        bool Flush()
+        {
+            if (chunk.Length == 0)
+            {
+                return true;
+            }
+            if (builder.Length >= maxLength)
+            {
+                builder.Append(CrashTextTruncatedMarker);
+                return false;
+            }
+            builder.Append(SecretRedactor.Redact(chunk.ToString()));
+            chunk.Clear();
+            return true;
+        }
+
+        while (position < text.Length)
+        {
+            var newline = text.IndexOf('\n', position);
+            var end = newline < 0 ? text.Length : newline + 1;
+            var lineLength = end - position;
+            if (chunk.Length > 0 && chunk.Length + lineLength > SecretRedactor.MaxRedactInputLength)
+            {
+                // A key waiting for its value goes with the value. If the pair is longer than the
+                // cap the redactor cuts the tail off, which drops text but never leaks it.
+                var lastLine = chunk.ToString(lastLineStart, chunk.Length - lastLineStart);
+                var carry = DanglingCrashKeyRegex.IsMatch(lastLine) ? lastLine : string.Empty;
+                chunk.Length -= carry.Length;
+                if (!Flush())
+                {
+                    return builder.ToString();
+                }
+                chunk.Clear().Append(carry);
+            }
+
+            lastLineStart = chunk.Length;
+            chunk.Append(text, position, lineLength);
+            position = end;
+        }
+
+        Flush();
+        return builder.ToString();
+    }
+
+    // The shell's small-icon cell size (GetSystemMetrics(SM_CXSMICON)): 16 at 100% scaling, 24 at
+    // 150%, 32 at 200%. Rendering at this size keeps the tray icon crisp instead of shell-upscaled.
+    private const int SM_CXSMICON = 49;
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DestroyIcon(IntPtr handle);
+}
+
+/// <summary>
+/// Adapts the <see cref="AccountStore"/> to the <see cref="INotifyLatch"/> the <see cref="Notifier"/>
+/// consumes for the dedup latch (set on confirmed delivery, reset on recovery, U11). Keeps the
+/// Notifier decoupled from the concrete store.
+/// </summary>
+internal sealed class AccountStoreNotifyLatch : INotifyLatch
+{
+    private readonly AccountStore _store;
+
+    public AccountStoreNotifyLatch(AccountStore store) => _store = store;
+
+    public void SetDidNotify(Guid accountId, bool value) => _store.UpdateDidNotify(accountId, value);
+}
+
+/// <summary>
+/// The production <see cref="ILoginWebViewFactory"/>: builds a fresh ephemeral
+/// <see cref="LoginWindow"/> per sign-in attempt (isolated InPrivate UDF, deleted on Dispose) and
+/// tracks the live instance so the org picker can center over it and the login-state overlays can
+/// be driven. The supplied <paramref name="build"/> delegate wires the window's affordances back to
+/// the <see cref="AuthManager"/>.
+/// </summary>
+internal sealed class LoginWebViewFactory : ILoginWebViewFactory
+{
+    private readonly Func<LoginWindow> _build;
+
+    public LoginWebViewFactory(Func<LoginWindow> build) => _build = build;
+
+    /// The most recently created login window, while it is open; null once disposed/closed. The
+    /// org picker centers over it; the login-state overlays are driven through it.
+    public LoginWindow? CurrentWindow { get; private set; }
+
+    public ILoginWebView Create()
+    {
+        var window = _build();
+        CurrentWindow = window;
+        window.Closed += () => CurrentWindow = null;
+        return window;
+    }
+}
+
+#if !WINDOWS10_0_19041_0_OR_GREATER
+/// <summary>
+/// A no-op toast sink for the non-Windows author/test build (the WinRT sink compiles only on the
+/// Windows-versioned TFM). It always reports not-delivered, so the <see cref="Notifier"/> never
+/// latches a toast the platform cannot show. Never used in a real Windows build.
+/// </summary>
+internal sealed class NullToastSink : IToastSink
+{
+    public bool TryShow(string title, string body, Guid tag) => false;
+
+    public ToastPermission ReadPermission() => ToastPermission.Unknown;
+}
+#endif
