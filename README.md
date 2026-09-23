@@ -78,7 +78,7 @@ The Models card shows your combined weekly limit and any weekly limit your accou
 - Switch between accounts instantly from the popover
 - Custom nicknames per account
 
-<img src="https://github.com/user-attachments/assets/cd6b6446-320b-43ed-a77e-a9b3053d4d4f" />
+<img src="https://claudebattery.com/images/popover-screenshot.png" alt="Claude Battery popover. The Session and Weekly dials show how much usage and time is left, each with a pace label, a reset countdown, and a run-out estimate under it. Below them are the Credits card with the Extra Usage status and balance, the Models card with an All Models bar plus a bar for each model that has its own weekly limit, and the account switcher." />
 <br>
 <div class="styles-grid">
         <div class="style-item">

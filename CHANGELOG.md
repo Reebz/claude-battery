@@ -18,6 +18,7 @@
 
 **Documentation**
 - The README now says why the Models card shows the bars it does. Under All Models the card draws one bar for each model that has its own weekly limit in your account's usage data, so a model without one gets no bar and counts only toward the combined total (issue #42).
+- The popover screenshot in the README and on the website now shows the current popover. The old one predated the v1.60 concentric arcs and still showed the Claude Design row, which the popover no longer draws.
 
 ### v1.72
 

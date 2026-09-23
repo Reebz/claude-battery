@@ -625,10 +625,14 @@
     <div class="container">
       <h2>Everything you need, nothing you don't</h2>
       <p class="subtitle">Left-click for details. Right-click for settings. That's it.</p>
-      <!-- Needs recapturing before the next site deploy: this shot predates the v1.60 concentric
-           arcs and still shows the Claude Design row, which the popover no longer draws. Take the
-           new one with no update pending, so the top update banner is correctly absent. -->
-      <img src="images/popover-screenshot.png" alt="Claude Battery popover showing session and weekly usage gauges, a Models card with the weekly quota remaining per model, and account switcher" class="screenshot-img">
+      <!-- Recaptured 2026-09-23 with no update pending, so the top update banner is correctly
+           absent. The accounts had temporary nicknames, because an account with no nickname shows
+           its email address. It is a ScreenCaptureKit capture that includes only the desktop
+           wallpaper window and the popover window, so the popover's see-through background picks up
+           the wallpaper tint as it does on screen and nothing else on the desktop shows. Retake it
+           the same way whenever the popover layout changes, and update this alt text and the
+           identical one in README.md, which loads this same file from claudebattery.com. -->
+      <img src="images/popover-screenshot.png" alt="Claude Battery popover. The Session and Weekly dials show how much usage and time is left, each with a pace label, a reset countdown, and a run-out estimate under it. Below them are the Credits card with the Extra Usage status and balance, the Models card with an All Models bar plus a bar for each model that has its own weekly limit, and the account switcher." class="screenshot-img">
     </div>
   </section>
 
