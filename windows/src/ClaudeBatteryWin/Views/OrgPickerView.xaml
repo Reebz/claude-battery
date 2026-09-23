@@ -1,0 +1,53 @@
+<Window x:Class="ClaudeBatteryWin.Views.OrgPickerView"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Choose Organization"
+        Width="380"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Background="{DynamicResource OrgPickerBackgroundBrush}">
+    <!-- Multi-org picker (U7). Shown only when org discovery returns multiple orgs with no existing
+         account to auto-match. Selecting persists exactly the chosen org; the WebWiew login window
+         stays open behind it until a choice is made or the picker is cancelled (cancel resumes the
+         awaiting discovery task with null, which surfaces a recoverable error - never a leaked task). -->
+    <Window.Resources>
+        <SolidColorBrush x:Key="OrgPickerBackgroundBrush" Color="#FF202020" />
+        <SolidColorBrush x:Key="OrgPickerForegroundBrush" Color="#FFF3F3F3" />
+        <SolidColorBrush x:Key="OrgPickerMutedBrush" Color="#FFA0A0A0" />
+    </Window.Resources>
+
+    <StackPanel Margin="24">
+        <TextBlock Text="Choose Organization"
+                   FontSize="16"
+                   FontWeight="SemiBold"
+                   Foreground="{DynamicResource OrgPickerForegroundBrush}" />
+        <TextBlock Text="Multiple organizations were found. Select which one to monitor."
+                   Margin="0,8,0,0"
+                   TextWrapping="Wrap"
+                   Foreground="{DynamicResource OrgPickerMutedBrush}" />
+
+        <ComboBox x:Name="OrgCombo"
+                  Margin="0,16,0,0"
+                  AutomationProperties.Name="Organization" />
+
+        <StackPanel Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Margin="0,20,0,0">
+            <Button x:Name="CancelButton"
+                    Content="Cancel"
+                    MinWidth="88"
+                    Margin="0,0,8,0"
+                    Padding="12,6"
+                    IsCancel="True"
+                    Click="OnCancelClicked" />
+            <Button x:Name="SelectButton"
+                    Content="Select"
+                    MinWidth="88"
+                    Padding="12,6"
+                    IsDefault="True"
+                    Click="OnSelectClicked" />
+        </StackPanel>
+    </StackPanel>
+</Window>

@@ -1,0 +1,281 @@
+<Window x:Class="ClaudeBatteryWin.Views.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Claude Battery Settings"
+        Width="380"
+        Height="640"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="CanResizeWithGrip"
+        MinWidth="360"
+        MinHeight="420"
+        ShowInTaskbar="True"
+        Background="{DynamicResource SettingsBackgroundBrush}"
+        Foreground="{DynamicResource SettingsForegroundBrush}">
+    <!-- Settings surface (U11), the Windows port of the Mac SettingsView. Theme-sensitive neutrals
+         bind as DynamicResource against the light/dark token table (U9/U10 merge the real
+         dictionaries; the fallbacks below keep the window self-consistent standalone). The single
+         icon style is fixed for v1, so there is no icon picker (the other styles + picker are
+         deferred). All interactive controls carry AutomationProperties for Narrator. -->
+    <Window.Resources>
+        <!-- Directional fallbacks; the merged light/dark token dictionaries override these. -->
+        <SolidColorBrush x:Key="SettingsBackgroundBrush" Color="#FF202020" />
+        <SolidColorBrush x:Key="SettingsForegroundBrush" Color="#FFF3F3F3" />
+        <SolidColorBrush x:Key="SettingsMutedBrush" Color="#FFA0A0A0" />
+        <SolidColorBrush x:Key="SettingsCardBrush" Color="#FF2A2A2A" />
+        <SolidColorBrush x:Key="SettingsDividerBrush" Color="#33FFFFFF" />
+        <SolidColorBrush x:Key="SettingsDangerBrush" Color="#FFE74C3C" />
+        <SolidColorBrush x:Key="SettingsAccentBrush" Color="{x:Static SystemColors.HighlightColor}" />
+        <SolidColorBrush x:Key="SettingsErrorTextBrush" Color="#FFE74C3C" />
+        <SolidColorBrush x:Key="SettingsSuccessTextBrush" Color="#FF4CAF50" />
+
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Margin" Value="0,16,0,6" />
+            <Setter Property="Foreground" Value="{DynamicResource SettingsMutedBrush}" />
+        </Style>
+
+        <Style x:Key="Caption" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="TextWrapping" Value="Wrap" />
+            <Setter Property="Foreground" Value="{DynamicResource SettingsMutedBrush}" />
+        </Style>
+
+        <Style x:Key="Card" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource SettingsCardBrush}" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="Padding" Value="12" />
+        </Style>
+    </Window.Resources>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="20,16,20,16">
+        <StackPanel>
+
+            <!-- General toggles -->
+            <CheckBox x:Name="LaunchAtLoginToggle"
+                      Content="Launch at login"
+                      Margin="0,4,0,0"
+                      Checked="OnLaunchAtLoginToggled"
+                      Unchecked="OnLaunchAtLoginToggled"
+                      AutomationProperties.Name="Launch at login" />
+
+            <CheckBox x:Name="NotificationsToggle"
+                      Content="Low usage notifications"
+                      Margin="0,12,0,0"
+                      Checked="OnNotificationsToggled"
+                      Unchecked="OnNotificationsToggled"
+                      AutomationProperties.Name="Low usage notifications" />
+            <!-- Test toast: shown only when the host supplies a sender (the real WinRT sink), so a
+                 tester can prove Windows accepts the app's toasts without waiting for a low-usage
+                 poll. Collapsed on the author/non-Windows build. -->
+            <Button x:Name="TestNotificationButton"
+                    Content="Send test notification"
+                    Margin="24,6,0,0"
+                    HorizontalAlignment="Left"
+                    Padding="12,4"
+                    Visibility="Collapsed"
+                    Click="OnTestNotificationClicked"
+                    AutomationProperties.Name="Send a test notification" />
+            <TextBlock x:Name="TestNotificationStatus"
+                       Style="{StaticResource Caption}"
+                       Margin="24,4,0,0"
+                       Visibility="Collapsed" />
+
+            <!-- R45: Windows is blocking our toasts. Shown only when the platform actually says so,
+                 never on an unreadable answer, with a link straight to the Windows setting. -->
+            <TextBlock x:Name="NotificationsBlockedLine"
+                       Style="{StaticResource Caption}"
+                       Margin="24,6,0,0"
+                       TextWrapping="Wrap"
+                       Visibility="Collapsed">
+                <Run x:Name="NotificationsBlockedText" />
+                <Hyperlink Click="OnNotificationSettingsLinkClicked"
+                           AutomationProperties.Name="Open Windows notification settings">Open Windows notification settings</Hyperlink>
+            </TextBlock>
+
+            <CheckBox x:Name="CountdownToggle"
+                      Content="Show session countdown in the tray tooltip"
+                      Margin="0,12,0,0"
+                      Checked="OnCountdownToggled"
+                      Unchecked="OnCountdownToggled"
+                      AutomationProperties.Name="Show session countdown in the tray tooltip" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Margin="24,2,0,0"
+                       Text="Adds a compact session countdown (e.g. &quot;4h+&quot;, &quot;32m&quot;) to the tooltip shown when you hover the tray icon. Hidden when there is no active session." />
+
+            <!-- Tray icon style (U14): two square styles, same data, different picture. -->
+            <TextBlock Text="Tray icon style"
+                       Margin="0,12,0,0" />
+            <ComboBox x:Name="IconStylePicker"
+                      Margin="0,4,0,0"
+                      Width="200"
+                      HorizontalAlignment="Left"
+                      SelectionChanged="OnIconStyleChanged"
+                      AutomationProperties.Name="Tray icon style" />
+            <TextBlock Style="{StaticResource Caption}"
+                       Margin="0,2,0,0"
+                       Text="Stacked Bars draws two thin bars, session above weekly. Dual Arc Gauge draws two rings, matching the dials in the panel." />
+
+            <!-- R44: the first-run notice shows once. A user who dismissed it, or who never saw it
+                 because Windows dropped the toast, can read the same instructions here. -->
+            <TextBlock x:Name="TrayPinHelp"
+                       Style="{StaticResource Caption}"
+                       Margin="0,10,0,0"
+                       TextWrapping="Wrap" />
+
+            <!-- Accounts -->
+            <TextBlock Style="{StaticResource SectionHeader}" Text="ACCOUNTS" />
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <ItemsControl x:Name="AccountList" />
+
+                    <TextBlock x:Name="NoAccountsLabel"
+                               Style="{StaticResource Caption}"
+                               HorizontalAlignment="Center"
+                               Visibility="Collapsed"
+                               Text="No accounts" />
+
+                    <Button x:Name="AddAccountButton"
+                            Content="Add Account"
+                            Margin="0,10,0,0"
+                            HorizontalAlignment="Left"
+                            Padding="12,6"
+                            Click="OnAddAccountClicked"
+                            AutomationProperties.Name="Add account" />
+                </StackPanel>
+            </Border>
+
+            <!-- Manual sign-in -->
+            <TextBlock Style="{StaticResource SectionHeader}" Text="MANUAL SIGN-IN" />
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource Caption}"
+                               Text="Stuck on the sign-in window? Paste your claude.ai cookie header to sign in manually. This works for every account, including Google and passkey." />
+
+                    <!-- The steps, so a user who has never opened developer tools can still do this.
+                         Ported from the Mac verbatim, with the Windows shortcut in place of the Mac one. -->
+                    <TextBlock x:Name="CookieHeaderHelp"
+                               Style="{StaticResource Caption}"
+                               Margin="0,8,0,0" />
+
+                    <PasswordBox x:Name="CookieHeaderBox"
+                                 Margin="0,10,0,0"
+                                 AutomationProperties.Name="Cookie header" />
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <Button x:Name="ValidateAddButton"
+                                Content="Validate &amp; Add"
+                                Padding="12,6"
+                                Click="OnValidateAddClicked"
+                                AutomationProperties.Name="Validate and add the pasted cookie" />
+                        <ProgressBar x:Name="ManualSpinner"
+                                     Width="80"
+                                     Height="4"
+                                     Margin="10,0,0,0"
+                                     IsIndeterminate="True"
+                                     VerticalAlignment="Center"
+                                     Visibility="Collapsed" />
+                    </StackPanel>
+
+                    <TextBlock x:Name="ManualStatus"
+                               Style="{StaticResource Caption}"
+                               Margin="0,10,0,0"
+                               Visibility="Collapsed" />
+
+                    <!-- Org picker, shown only when a paste resolves to multiple orgs (no match). -->
+                    <StackPanel x:Name="OrgPickerPanel" Margin="0,10,0,0" Visibility="Collapsed">
+                        <ComboBox x:Name="OrgPicker"
+                                  DisplayMemberPath="DisplayName"
+                                  AutomationProperties.Name="Choose an organization" />
+                        <Button x:Name="UseOrgButton"
+                                Content="Use this organization"
+                                Margin="0,8,0,0"
+                                HorizontalAlignment="Left"
+                                Padding="12,6"
+                                Click="OnUseOrgClicked"
+                                AutomationProperties.Name="Use the selected organization" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Diagnostics (U2): opt-in redacted logging plus the export a bug report attaches. -->
+            <TextBlock Style="{StaticResource SectionHeader}" Text="DIAGNOSTICS" />
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource Caption}"
+                               Text="Records sign-in events, which plan your account is on, and how much of your session and weekly limits is left, to help diagnose problems. Hosts the sign-in window blocked, including a company identity provider, are recorded by name. No passwords, tokens, emails, or account names are saved." />
+
+                    <CheckBox x:Name="DiagnosticsToggle"
+                              Content="Enable diagnostic logging"
+                              Margin="0,10,0,0"
+                              Checked="OnDiagnosticsToggled"
+                              Unchecked="OnDiagnosticsToggled"
+                              AutomationProperties.Name="Enable diagnostic logging" />
+
+                    <Button x:Name="ExportLogsButton"
+                            Content="Export Diagnostic Logs&#x2026;"
+                            Margin="0,10,0,0"
+                            HorizontalAlignment="Left"
+                            Padding="12,6"
+                            Click="OnExportLogsClicked"
+                            AutomationProperties.Name="Export diagnostic logs" />
+
+                    <TextBlock x:Name="DiagnosticsStatus"
+                               Style="{StaticResource Caption}"
+                               Margin="0,8,0,0"
+                               Visibility="Collapsed" />
+
+                    <TextBlock x:Name="DiagnosticsIssuesLink"
+                               Margin="0,6,0,0"
+                               FontSize="11"
+                               Visibility="Collapsed">
+                        <Hyperlink Click="OnIssuesLinkClicked"
+                                   AutomationProperties.Name="Report on GitHub Issues">Report on GitHub Issues</Hyperlink>
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+
+            <!-- Version / update row (bound to the U12 UpdateService). On a build the updater
+                 cannot manage (the raw exe) the row says so and the button opens the releases page. -->
+            <TextBlock Style="{StaticResource SectionHeader}" Text="ABOUT" />
+            <Border Style="{StaticResource Card}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0">
+                        <TextBlock x:Name="VersionLabel" Text="Claude Battery" />
+                        <TextBlock x:Name="UpdateStatus"
+                                   Style="{StaticResource Caption}"
+                                   Margin="0,2,0,0" />
+                    </StackPanel>
+                    <Button x:Name="UpdateActionButton"
+                            Grid.Column="1"
+                            VerticalAlignment="Center"
+                            Padding="12,6"
+                            Visibility="Collapsed"
+                            Click="OnUpdateActionClicked"
+                            AutomationProperties.Name="Update action" />
+                </Grid>
+            </Border>
+
+            <!-- R48: the same support link the Mac carries. The Mac's decorative "Cookie" typeface is
+                 not bundled here, so the Windows button uses Segoe Script over the same yellow. -->
+            <Button x:Name="SupportButton"
+                    Margin="0,16,0,0"
+                    HorizontalAlignment="Center"
+                    Padding="18,8"
+                    Background="#FFDD00"
+                    Foreground="Black"
+                    BorderBrush="Black"
+                    BorderThickness="1"
+                    FontFamily="Segoe Script, Segoe UI"
+                    FontSize="18"
+                    Content="Buy me a coffee!"
+                    Click="OnSupportClicked"
+                    AutomationProperties.Name="Buy me a coffee" />
+
+        </StackPanel>
+    </ScrollViewer>
+</Window>

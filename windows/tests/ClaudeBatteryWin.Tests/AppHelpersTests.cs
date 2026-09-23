@@ -1,0 +1,175 @@
+using System.IO;
+using ClaudeBatteryWin.Services;
+using ClaudeBatteryWin.Models;
+using Xunit;
+
+namespace ClaudeBatteryWin.Tests;
+
+/// <summary>
+/// The pure helpers on the composition root: the tray tooltip text (the square icon no longer
+/// draws the countdown, so the tooltip is where the numbers live) and the crash-log entry format
+/// (the CI smoke job and testers read crash.log, so its shape is pinned here).
+/// </summary>
+public class AppHelpersTests
+{
+    private const int ShellTooltipLimit = 127;
+
+    private static UsageSnapshot Snapshot(double session, double weekly) =>
+        new() { SessionRemaining = session, WeeklyRemaining = weekly };
+
+    /// A reading with no plan conversion: the tooltip's raw-value cases.
+    private static UsageReading Reading(double session, double weekly) =>
+        new(Snapshot(session, weekly), null);
+
+    [Fact]
+    public void BuildTooltip_NoUsage_IsAppNameOnly()
+    {
+        Assert.Equal("Claude Battery", App.BuildTooltip(null, ""));
+    }
+
+    [Fact]
+    public void BuildTooltip_WithUsage_RoundsBothPercentages()
+    {
+        Assert.Equal(
+            "Claude Battery - Session 75% - Weekly 44%",
+            App.BuildTooltip(Reading(75.4, 43.6), ""));
+    }
+
+    [Fact]
+    public void BuildTooltip_WithCountdown_AppendsResetsIn()
+    {
+        Assert.Equal(
+            "Claude Battery - Session 75% - Weekly 44% - resets in 3h+",
+            App.BuildTooltip(Reading(75.4, 43.6), "3h+"));
+    }
+
+    [Fact]
+    public void BuildTooltip_NoUsageIgnoresCountdown()
+    {
+        // With no snapshot there is no reset to count down to, whatever the caller passed.
+        Assert.Equal("Claude Battery", App.BuildTooltip(null, "3h+"));
+    }
+
+    [Theory]
+    [InlineData(0, 0, "")]
+    [InlineData(100, 100, "")]
+    [InlineData(100, 100, "59m")]
+    [InlineData(99.5, 99.5, "23h+")]
+    [InlineData(75.4, 43.6, "3h+")]
+    public void BuildTooltip_StaysUnderTheShellLimit(double session, double weekly, string countdown)
+    {
+        var text = App.BuildTooltip(Reading(session, weekly), countdown);
+        Assert.True(text.Length < ShellTooltipLimit, $"{text.Length} chars: {text}");
+        Assert.True(App.BuildTooltip(null, countdown).Length < ShellTooltipLimit);
+    }
+
+    [Fact]
+    public void FormatCrashEntry_ThrownException_CarriesHeaderTypeMessageAndFrames()
+    {
+        Exception thrown;
+        try
+        {
+            throw new InvalidOperationException("tray icon could not be created");
+        }
+        catch (InvalidOperationException ex)
+        {
+            thrown = ex;
+        }
+
+        var now = new DateTimeOffset(2026, 9, 3, 10, 30, 15, TimeSpan.FromHours(10));
+        var entry = App.FormatCrashEntry(now, "1.50.3", "dispatcher", thrown);
+
+        Assert.Contains("==== 2026-09-03T10:30:15.0000000+10:00 ClaudeBatteryWin v1.50.3 [dispatcher] ====", entry);
+        Assert.Contains("InvalidOperationException", entry);
+        Assert.Contains("tray icon could not be created", entry);
+        Assert.Contains("at ", entry); // a stack frame from the throw above
+        Assert.EndsWith(Environment.NewLine + Environment.NewLine, entry); // blank separator line
+    }
+
+    [Fact]
+    public void FormatCrashEntry_NullException_WritesPlaceholder()
+    {
+        var now = new DateTimeOffset(2026, 9, 3, 0, 0, 0, TimeSpan.Zero);
+        var entry = App.FormatCrashEntry(now, "unknown", "appdomain", null);
+
+        Assert.Contains("2026-09-03T00:00:00.0000000+00:00", entry);
+        Assert.Contains("vunknown", entry);
+        Assert.Contains("[appdomain]", entry);
+        Assert.Contains("(null exception)", entry);
+    }
+
+    [Fact]
+    public void FormatCrashEntry_HeaderIsTheFirstLine()
+    {
+        var entry = App.FormatCrashEntry(DateTimeOffset.UnixEpoch, "1.0.0", "unobserved-task", null);
+        var firstLine = entry.Split(Environment.NewLine)[0];
+
+        Assert.StartsWith("==== ", firstLine);
+        Assert.EndsWith(" [unobserved-task] ====", firstLine);
+    }
+
+    // --- The first-run tray notice (U15, R44) ---------------------------------------------------
+
+    [Fact]
+    public void OnAFreshProfile_WithNotificationsWorking_TheNoticeIsAToast() =>
+        Assert.Equal(
+            ClaudeBatteryWin.App.TrayNotice.Toast,
+            ClaudeBatteryWin.App.DecideTrayNotice(alreadyShown: false, ToastPermission.Enabled));
+
+    [Theory]
+    [InlineData(ToastPermission.DisabledForApplication)]
+    [InlineData(ToastPermission.DisabledForUser)]
+    [InlineData(ToastPermission.DisabledByGroupPolicy)]
+    [InlineData(ToastPermission.DisabledByManifest)]
+    [InlineData(ToastPermission.Unknown)]
+    public void WithToastsBlockedOrUnreadable_TheNoticeIsADialog(ToastPermission permission) =>
+        Assert.Equal(
+            ClaudeBatteryWin.App.TrayNotice.Dialog,
+            ClaudeBatteryWin.App.DecideTrayNotice(alreadyShown: false, permission));
+
+    [Theory]
+    [InlineData(ToastPermission.Enabled)]
+    [InlineData(ToastPermission.DisabledForUser)]
+    [InlineData(ToastPermission.Unknown)]
+    public void OnceShown_TheNoticeNeverComesBack(ToastPermission permission) =>
+        Assert.Equal(
+            ClaudeBatteryWin.App.TrayNotice.None,
+            ClaudeBatteryWin.App.DecideTrayNotice(alreadyShown: true, permission));
+
+    [Fact]
+    public void SettingsRepeatsThePinInstructions()
+    {
+        // The notice fires once. Anyone who dismissed it, or whose toast Windows dropped, can read
+        // the same words in Settings rather than being told once and never again.
+        var xaml = File.ReadAllText(Path.Combine(SourceDir(), "Views", "SettingsWindow.xaml"));
+        Assert.Contains("x:Name=\"TrayPinHelp\"", xaml, StringComparison.Ordinal);
+
+        var code = File.ReadAllText(Path.Combine(SourceDir(), "Views", "SettingsWindow.xaml.cs"));
+        Assert.Contains("TrayPinHelp.Text = ClaudeBatteryWin.App.TrayNoticeBody", code, StringComparison.Ordinal);
+    }
+
+    /// <summary>Locate <c>src/ClaudeBatteryWin</c> by walking up from the test output directory.</summary>
+    private static string SourceDir()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            var candidate = Path.Combine(dir.FullName, "src", "ClaudeBatteryWin");
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+            dir = dir.Parent;
+        }
+        throw new DirectoryNotFoundException("could not find src/ClaudeBatteryWin above the test output");
+    }
+
+    [Fact]
+    public void TheNoticeNamesTheChevronAndTheDrag()
+    {
+        Assert.Contains("chevron", ClaudeBatteryWin.App.TrayNoticeBody, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("drag", ClaudeBatteryWin.App.TrayNoticeBody, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("taskbar", ClaudeBatteryWin.App.TrayNoticeBody, StringComparison.OrdinalIgnoreCase);
+        Assert.NotEqual(string.Empty, ClaudeBatteryWin.App.TrayNoticeTitle);
+    }
+}

@@ -1,0 +1,41 @@
+{
+  "_comment": "Numbers the macOS app and the Windows app must agree on. Each side compiles in its own copy; a test on each side asserts that copy equals this file, so changing one without the other fails a build instead of drifting silently. Windows reads this file today (ParityConstantsTests); wiring the macOS test to it is follow-up work.",
+
+  "planRatios": {
+    "default_claude_pro": 0.11,
+    "default_claude_max_5x": 0.0792,
+    "default_claude_max_20x": 0.132
+  },
+
+  "agreementFactor": 2,
+
+  "ratioMeasurement": {
+    "confidenceBar": 30,
+    "plausibleMin": 0.01,
+    "plausibleMax": 0.5,
+    "sameWindowToleranceSeconds": 1
+  },
+
+  "windowSeconds": {
+    "session": 18000,
+    "weekly": 604800
+  },
+
+  "tickCounts": {
+    "session": 5,
+    "weekly": 7
+  },
+
+  "lowRemainingThreshold": 20,
+
+  "paceDeltas": {
+    "caution": 10,
+    "danger": 25
+  },
+
+  "runOut": {
+    "minElapsedFraction": 0.1,
+    "sessionQuantumSeconds": 300,
+    "weeklyQuantumSeconds": 3600
+  }
+}

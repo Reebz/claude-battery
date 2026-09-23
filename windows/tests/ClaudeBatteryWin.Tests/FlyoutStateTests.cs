@@ -1,0 +1,1158 @@
+using System.IO;
+using ClaudeBatteryWin.Models;
+using ClaudeBatteryWin.ViewModels;
+using ClaudeBatteryWin.Views;
+using Xunit;
+
+namespace ClaudeBatteryWin.Tests;
+
+/// <summary>
+/// Behavioral tests for U10 <see cref="FlyoutViewModel"/> and the pure placement math
+/// <see cref="FlyoutPlacement"/>. These are state-machine/arithmetic tests against the view-model
+/// and the placement function, NOT rendered-visual assertions: the eight content states resolve for
+/// their inputs, the Models card is omitted (and Resets spans full width) with no per-model limits,
+/// the credits row colors by the spend scale with a right-pinned balance, and a secondary-monitor /
+/// different-DPI placement lands inside that monitor's work area. The live DynamicResource re-theme
+/// and the Escape-to-close are visual/UI-thread behaviors verified manually (see the dedicated
+/// facts below that document the contract the code-behind enforces).
+///
+/// Mirrors the Mac <c>UsagePopoverView</c> state order, color scales, and gauge/bar geometry
+/// (Views/UsagePopoverView.swift).
+/// </summary>
+public class FlyoutStateTests
+{
+    private static readonly DateTimeOffset Now = new(2026, 6, 19, 12, 0, 0, TimeSpan.Zero);
+
+    private static UsageSnapshot UsageWithModels(params ModelUsage[] models) => new()
+    {
+        SessionRemaining = 60,
+        WeeklyRemaining = 70,
+        SessionResetDate = Now.AddHours(3),
+        WeeklyResetDate = Now.AddDays(4),
+        ModelUsages = models,
+    };
+
+    // MARK: - The eight content states resolve in the Mac cascade order
+
+    [Theory]
+    [InlineData(LoginStateKind.SigningIn)]
+    [InlineData(LoginStateKind.Capturing)]
+    [InlineData(LoginStateKind.OrgDiscovery)]
+    [InlineData(LoginStateKind.Picker)]
+    public void State_SigningIn_ForEveryLoginInProgressKind(LoginStateKind kind)
+    {
+        // ResolveState must show the signing-in panel for ALL four login-in-progress kinds, matching
+        // SuppressDismissOnDeactivate - otherwise the flyout suppresses its deactivate-dismissal during
+        // org-discovery/picker while rendering a non-signing-in panel (the review-caught drift fix).
+        // Inputs are deliberately authenticated-with-snapshot + authFailed so a regression to the old
+        // SigningIn-only mapping falls through to Authenticated and fails this for the other three kinds.
+        Assert.Equal(FlyoutContentState.SigningIn,
+            FlyoutViewModel.ResolveState(new LoginState(kind), isAuthenticated: true, latestUsage: UsageWithModels(), authFailed: true, consecutiveFailures: 99));
+    }
+
+    [Fact]
+    public void State_LoginError_WhenLoginStateIsError()
+    {
+        Assert.Equal(FlyoutContentState.LoginError,
+            FlyoutViewModel.ResolveState(LoginState.ErrorWith("nope"), isAuthenticated: true, latestUsage: UsageWithModels(), authFailed: false, consecutiveFailures: 0));
+    }
+
+    [Fact]
+    public void State_Unauthenticated_WhenNoActiveAccount()
+    {
+        Assert.Equal(FlyoutContentState.Unauthenticated,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: false, latestUsage: null, authFailed: false, consecutiveFailures: 0));
+    }
+
+    // MARK: - ReauthRequired (DPAPI drop) is distinct from a plain signed-out user (U6/R4)
+
+    [Fact]
+    public void State_ReauthRequired_WhenSecurityDataUnreadableAndNoActiveAccount()
+    {
+        Assert.Equal(FlyoutContentState.ReauthRequired,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: false, latestUsage: null,
+                authFailed: false, consecutiveFailures: 0, securityDataUnreadable: true));
+    }
+
+    [Fact]
+    public void State_Unauthenticated_NotReauthRequired_WhenSecurityDataReadable()
+    {
+        // The plain signed-out surface and the DPAPI-drop surface are provably distinct: same inputs,
+        // only the securityDataUnreadable flag differs.
+        Assert.Equal(FlyoutContentState.Unauthenticated,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: false, latestUsage: null,
+                authFailed: false, consecutiveFailures: 0, securityDataUnreadable: false));
+    }
+
+    [Fact]
+    public void State_NotReauthRequired_WhenAnAccountSurvived()
+    {
+        // One blob dropped but another account loaded fine -> isAuthenticated true -> the user is
+        // signed in normally; the ReauthRequired surface must NOT show (the guard is !isAuthenticated).
+        Assert.Equal(FlyoutContentState.Authenticated,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: true, latestUsage: UsageWithModels(),
+                authFailed: false, consecutiveFailures: 0, securityDataUnreadable: true));
+    }
+
+    [Fact]
+    public void ViewModel_SecurityDataUnreadable_NoActiveAccount_ResolvesReauthRequired_WithCopy()
+    {
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = false,
+            SecurityDataUnreadable = true,
+        };
+        Assert.Equal(FlyoutContentState.ReauthRequired, vm.State);
+        // The rendered re-auth copy (the flyout panel binds this const via x:Static) names the
+        // security-data cause, so a DPAPI drop is not mistaken for the session-restore bug (R4).
+        Assert.Contains("security data could not be read", FlyoutViewModel.ReauthRequiredHint,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void State_Authenticated_WhenSnapshotPresent()
+    {
+        Assert.Equal(FlyoutContentState.Authenticated,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: true, latestUsage: UsageWithModels(), authFailed: false, consecutiveFailures: 0));
+    }
+
+    [Fact]
+    public void State_Authenticated_WinsOverAuthFailed_WhenBothSet()
+    {
+        // The Mac shows the last good usage even if a later poll set authFailed but usage is non-null.
+        Assert.Equal(FlyoutContentState.Authenticated,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: true, latestUsage: UsageWithModels(), authFailed: true, consecutiveFailures: 20));
+    }
+
+    [Fact]
+    public void State_AuthFailed_WhenAuthFailedAndNoSnapshot()
+    {
+        Assert.Equal(FlyoutContentState.AuthFailed,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: true, latestUsage: null, authFailed: true, consecutiveFailures: 1));
+    }
+
+    [Fact]
+    public void State_Error_WhenTenFailuresAndNoSnapshot()
+    {
+        Assert.Equal(FlyoutContentState.Error,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: true, latestUsage: null, authFailed: false, consecutiveFailures: 10));
+    }
+
+    [Fact]
+    public void State_Loading_WhenAuthedNoSnapshotFewFailures()
+    {
+        Assert.Equal(FlyoutContentState.Loading,
+            FlyoutViewModel.ResolveState(LoginState.Idle, isAuthenticated: true, latestUsage: null, authFailed: false, consecutiveFailures: 3));
+    }
+
+    [Fact]
+    public void ViewModel_Refresh_PublishesResolvedState()
+    {
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = true,
+            LatestReading = new UsageReading(UsageWithModels(), null),
+        };
+        Assert.Equal(FlyoutContentState.Authenticated, vm.State);
+
+        vm.LoginState = LoginState.SigningIn;
+        Assert.Equal(FlyoutContentState.SigningIn, vm.State);
+    }
+
+    // MARK: - Models card omitted + Resets full width when no per-model limits
+
+    [Fact]
+    public void Authenticated_NoModels_OmitsModelsCard_AndResetsSpansFull()
+    {
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = true,
+            LatestReading = new UsageReading(UsageWithModels(), null), // no model usages
+        };
+
+        Assert.False(vm.HasModelBars);
+        Assert.Empty(vm.ModelBars);
+    }
+
+    [Fact]
+    public void Authenticated_WithModels_ShowsModelsCard_WithAllModelsRowFirst()
+    {
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = true,
+            LatestReading = new UsageReading(UsageWithModels(
+                new ModelUsage { DisplayName = "Opus", RemainingPercent = 30, ModelId = "claude-opus" },
+                new ModelUsage { DisplayName = "Sonnet", RemainingPercent = 80, ModelId = "claude-sonnet" }), null),
+        };
+
+        Assert.True(vm.HasModelBars);
+        // 1 synthetic "All Models" + 2 per-model rows.
+        Assert.Equal(3, vm.ModelBars.Count);
+        Assert.Equal("__all_models__", vm.ModelBars[0].Id);
+        Assert.Equal("All Models", vm.ModelBars[0].Name);
+        // The All Models bar carries the REAL weekly aggregate (70), never fabricated.
+        Assert.Equal(70, vm.ModelBars[0].RemainingPercent);
+        Assert.Equal("Opus", vm.ModelBars[1].Name);
+        Assert.Equal("Sonnet", vm.ModelBars[2].Name);
+    }
+
+    [Fact]
+    public void ModelBarRows_KeepDistinctIds_ForModelsSharingADisplayName()
+    {
+        var usage = UsageWithModels(
+            new ModelUsage { DisplayName = "Claude", RemainingPercent = 10, ModelId = "id-a" },
+            new ModelUsage { DisplayName = "Claude", RemainingPercent = 90, ModelId = "id-b" });
+
+        var rows = FlyoutViewModel.ModelBarRows(usage);
+        var ids = rows.Select(r => r.Id).ToList();
+        Assert.Equal(ids.Count, ids.Distinct().Count());
+    }
+
+    // MARK: - Color scales (remaining vs spend) at the documented boundaries
+
+    [Theory]
+    [InlineData(0, UsageColor.Red)]
+    [InlineData(19.9, UsageColor.Red)]
+    [InlineData(20, UsageColor.Orange)]   // boundary: < 20 red, so 20 is orange
+    [InlineData(44.9, UsageColor.Orange)]
+    [InlineData(45, UsageColor.Green)]    // boundary: < 45 orange, so 45 is green
+    [InlineData(100, UsageColor.Green)]
+    public void RemainingColor_MatchesMacBatteryScale(double percent, UsageColor expected)
+    {
+        Assert.Equal(expected, FlyoutViewModel.RemainingColor(percent));
+    }
+
+    [Theory]
+    [InlineData(0, SpendColor.Cyan)]
+    [InlineData(49.9, SpendColor.Cyan)]
+    [InlineData(50, SpendColor.Orange)]   // boundary: >= 50 orange
+    [InlineData(79.9, SpendColor.Orange)]
+    [InlineData(80, SpendColor.Red)]      // boundary: >= 80 red
+    [InlineData(150, SpendColor.Red)]     // uncapped: over-limit is red (KTD7)
+    public void SpendColor_MatchesMacSpendScale(double percent, SpendColor expected)
+    {
+        Assert.Equal(expected, FlyoutViewModel.SpendColorFor(percent));
+    }
+
+    // MARK: - Credits row: spend scale color + right-pinned balance
+
+    [Fact]
+    public void CreditsRow_Enabled_ColorsBySpendScale_AndPinsBalance()
+    {
+        var credits = new UsageCredits
+        {
+            StateKind = CreditsStateKind.Enabled,
+            Spent = 12.0,
+            SpendLimit = 20.0,
+            SpendPercent = 60, // -> orange on the spend scale
+            SpendCurrency = "USD",
+            BalanceMajor = 5.0,
+            BalanceCurrency = "USD",
+        };
+
+        var row = FlyoutViewModel.MakeCreditsRow(credits, Now);
+
+        Assert.True(row.HasCredits);
+        Assert.Equal(CreditsStateKind.Enabled, row.StateKind);
+        Assert.Equal(SpendColor.Orange, row.StatusColor);
+        Assert.Equal(SpendColor.Orange, row.BarColor);
+        Assert.Equal(60, row.BarPercent);
+        Assert.Equal("$12.00 spent · 60% used", row.StatusText);
+        // The balance is present (right-pinned in XAML, never truncates) and currency-formatted.
+        Assert.NotNull(row.BalanceText);
+        Assert.Contains("5.00", row.BalanceText!);
+        Assert.NotNull(row.MonthlySpendLimitText);
+    }
+
+    [Fact]
+    public void CreditsRow_OverLimit_BarClampsButColorIsRed()
+    {
+        var credits = new UsageCredits
+        {
+            StateKind = CreditsStateKind.Enabled,
+            Spent = 25.0,
+            SpendLimit = 20.0,
+            SpendPercent = 125, // over limit
+            SpendCurrency = "USD",
+        };
+
+        var row = FlyoutViewModel.MakeCreditsRow(credits, Now);
+        Assert.Equal(SpendColor.Red, row.BarColor);
+        Assert.Equal(100, row.BarPercent); // bar fill clamps at display
+        Assert.Equal("$25.00 spent · 125% used", row.StatusText);
+    }
+
+    [Fact]
+    public void CreditsRow_Disabled_ShowsPausedReason_EmptyTrack()
+    {
+        var credits = new UsageCredits
+        {
+            StateKind = CreditsStateKind.Disabled,
+            DisabledReason = "org_level_disabled_until",
+            BalanceMajor = 3.0,
+            BalanceCurrency = "USD",
+        };
+
+        var row = FlyoutViewModel.MakeCreditsRow(credits, Now);
+        Assert.True(row.HasCredits);
+        Assert.Null(row.BarPercent); // empty track in the disabled state
+        Assert.Equal("Paused - monthly limit reached", row.StatusText);
+        Assert.NotNull(row.BalanceText);
+    }
+
+    [Fact]
+    public void CreditsRow_DisabledByAdmin_ShowsPlainPaused_WithResetDate_NotMonthlyLimitCopy()
+    {
+        // A disabled reason OTHER than org_level_disabled_until (here paused_by_admin) renders the
+        // plain "Paused" copy, never the "monthly limit reached" wording; a non-null StateResetDate
+        // appends ", resets ...". Covers the non-org-level disabled branch + the reset-date append
+        // that the existing org_level test does not exercise (U12).
+        var credits = new UsageCredits
+        {
+            StateKind = CreditsStateKind.Disabled,
+            DisabledReason = "paused_by_admin",
+            StateResetDate = Now.AddDays(3),
+        };
+
+        var row = FlyoutViewModel.MakeCreditsRow(credits, Now);
+
+        Assert.True(row.HasCredits);
+        Assert.Null(row.BarPercent);                              // disabled -> empty track
+        Assert.StartsWith("Paused", row.StatusText);
+        Assert.DoesNotContain("monthly limit reached", row.StatusText); // the org_level copy is NOT used
+        Assert.Contains(", resets ", row.StatusText);             // a non-null reset date is appended
+    }
+
+    [Fact]
+    public void CreditsRow_DisabledByAdmin_NoResetDate_IsBarePaused()
+    {
+        var credits = new UsageCredits
+        {
+            StateKind = CreditsStateKind.Disabled,
+            DisabledReason = "paused_by_admin",
+            StateResetDate = null,
+        };
+
+        var row = FlyoutViewModel.MakeCreditsRow(credits, Now);
+        Assert.Equal("Paused", row.StatusText); // no reset date -> no ", resets ..." suffix
+    }
+
+    [Fact]
+    public void CreditsRow_Null_HasNoCredits()
+    {
+        Assert.False(FlyoutViewModel.MakeCreditsRow(null, Now).HasCredits);
+    }
+
+    [Fact]
+    public void CreditsRow_BalanceOnly_ShowsBalanceNoSpendBar()
+    {
+        var credits = new UsageCredits
+        {
+            StateKind = CreditsStateKind.None,
+            BalanceMajor = 8.5,
+            BalanceCurrency = "USD",
+        };
+        var row = FlyoutViewModel.MakeCreditsRow(credits, Now);
+        Assert.True(row.HasCredits);
+        Assert.Null(row.BarPercent);
+        Assert.Equal(string.Empty, row.StatusText);
+        Assert.NotNull(row.BalanceText);
+    }
+
+    // MARK: - Time remaining in the window, which is what the inner ring draws
+
+    [Fact]
+    public void TimeRemaining_FullWindow_IsHundredPercent()
+    {
+        var percent = DialForecast.TimeRemainingPercent(
+            Now.AddSeconds(DialForecast.SessionWindowSeconds), DialForecast.SessionWindowSeconds, Now);
+        Assert.Equal(100, percent!.Value, 3);
+    }
+
+    [Fact]
+    public void TimeRemaining_HalfWindow_IsFiftyPercent()
+    {
+        var percent = DialForecast.TimeRemainingPercent(
+            Now.AddSeconds(DialForecast.WeeklyWindowSeconds / 2), DialForecast.WeeklyWindowSeconds, Now);
+        Assert.Equal(50, percent!.Value, 3);
+    }
+
+    [Fact]
+    public void TimeRemaining_NoResetDate_IsUnknown() =>
+        Assert.Null(DialForecast.TimeRemainingPercent(null, DialForecast.SessionWindowSeconds, Now));
+
+    [Fact]
+    public void TimeRemaining_PastResetDate_IsUnknown() =>
+        Assert.Null(DialForecast.TimeRemainingPercent(Now.AddHours(-1), DialForecast.SessionWindowSeconds, Now));
+
+    // MARK: - Long-form countdown format (Mac formatCountdown parity)
+
+    [Fact]
+    public void FormatCountdown_Days_UsesDdHhForm()
+    {
+        Assert.Equal("2d 03h", FlyoutViewModel.FormatCountdown(Now.AddDays(2).AddHours(3).AddMinutes(10), Now));
+    }
+
+    [Fact]
+    public void FormatCountdown_Hours_UsesHhMmForm()
+    {
+        Assert.Equal("4h 05m", FlyoutViewModel.FormatCountdown(Now.AddHours(4).AddMinutes(5).AddSeconds(30), Now));
+    }
+
+    [Fact]
+    public void FormatCountdown_Minutes_UsesMmSsForm()
+    {
+        Assert.Equal("12m 30s", FlyoutViewModel.FormatCountdown(Now.AddMinutes(12).AddSeconds(30), Now));
+    }
+
+    [Fact]
+    public void FormatCountdown_PastDate_FallsBackToZero()
+    {
+        Assert.Equal("00m 00s", FlyoutViewModel.FormatCountdown(Now.AddHours(-1), Now));
+    }
+
+    // MARK: - signing-in dismissal suppression flag
+
+    [Theory]
+    [InlineData(LoginStateKind.SigningIn, true)]
+    [InlineData(LoginStateKind.Capturing, true)]
+    [InlineData(LoginStateKind.OrgDiscovery, true)]
+    [InlineData(LoginStateKind.Picker, true)]
+    [InlineData(LoginStateKind.Idle, false)]
+    [InlineData(LoginStateKind.Active, false)]
+    [InlineData(LoginStateKind.Error, false)]
+    public void SuppressDismiss_OnlyWhileLoginInProgress(LoginStateKind kind, bool expected)
+    {
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            LoginState = new LoginState(kind, kind == LoginStateKind.Error ? "msg" : null),
+        };
+        Assert.Equal(expected, vm.SuppressDismissOnDeactivate);
+    }
+
+    // MARK: - Account list visibility
+
+    [Fact]
+    public void AccountList_HiddenWithOneAccount_LinkShownIfSlotFree()
+    {
+        var account = new Account { Email = "a@x.com", SessionKey = "k", OrganizationId = "o1" };
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = true,
+            LatestReading = new UsageReading(UsageWithModels(), null),
+            Accounts = new[] { account },
+            ActiveAccountId = account.Id,
+            CanAddAccount = true,
+        };
+        Assert.False(vm.ShowAccountList);
+        Assert.True(vm.ShowAddAccountLink);
+        Assert.Empty(vm.AccountRows);
+    }
+
+    [Fact]
+    public void AccountList_ShownWithTwoAccounts_MarksActive()
+    {
+        var a = new Account { Email = "a@x.com", SessionKey = "k", OrganizationId = "o1" };
+        var b = new Account { Email = "b@x.com", SessionKey = "k", OrganizationId = "o2" };
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = true,
+            LatestReading = new UsageReading(UsageWithModels(), null),
+            Accounts = new[] { a, b },
+            ActiveAccountId = b.Id,
+        };
+        Assert.True(vm.ShowAccountList);
+        Assert.False(vm.ShowAddAccountLink);
+        Assert.Equal(2, vm.AccountRows.Count);
+        Assert.True(vm.AccountRows.Single(r => r.Id == b.Id).IsActive);
+        Assert.False(vm.AccountRows.Single(r => r.Id == a.Id).IsActive);
+    }
+
+    // MARK: - Version / update row
+
+    [Fact]
+    public void UpdateRow_NoUpdate_ShowsLastUpdatedText()
+    {
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = true,
+            LatestReading = new UsageReading(UsageWithModels(), null),
+            LastSuccessfulFetch = Now.AddSeconds(-30),
+        };
+        Assert.False(vm.HasUpdate);
+        Assert.Equal("Updated just now", vm.LastUpdatedText);
+    }
+
+    [Fact]
+    public void UpdateRow_UpdateAvailable_ShowsDownloadLink()
+    {
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = true,
+            LatestReading = new UsageReading(UsageWithModels(), null),
+            AvailableUpdateVersion = "1.51",
+        };
+        Assert.True(vm.HasUpdate);
+        Assert.Equal("v1.51 available - Download", vm.UpdateLinkText);
+    }
+
+    [Fact]
+    public void LastUpdatedText_NeverFetched_IsNotYetUpdated()
+    {
+        var vm = new FlyoutViewModel(() => Now);
+        Assert.Equal("Not yet updated", vm.LastUpdatedText);
+    }
+
+    [Fact]
+    public void LastUpdatedText_MinutesAgo_PluralizesCorrectly()
+    {
+        var vm = new FlyoutViewModel(() => Now) { LastSuccessfulFetch = Now.AddMinutes(-1) };
+        Assert.Equal("Updated 1 minute ago", vm.LastUpdatedText);
+
+        vm.LastSuccessfulFetch = Now.AddMinutes(-5);
+        Assert.Equal("Updated 5 minutes ago", vm.LastUpdatedText);
+    }
+
+    // MARK: - Placement on a secondary monitor at a different DPI
+
+    [Fact]
+    public void Placement_SecondaryMonitor_LandsWithinThatMonitorsWorkArea()
+    {
+        // A secondary monitor to the right of the primary, at a different scale. The work area is
+        // given in DEVICE PIXELS (the caller resolves it for the monitor under the anchor and feeds
+        // it in already DPI-correct), so the placement function only has to clamp inside it. The tray
+        // rect sits near that monitor's bottom-right (a bottom taskbar).
+        var workArea = new PlacementRect(2560, 0, 2560 + 3840, 2160); // a 4K panel offset to the right
+        var trayRect = new PlacementRect(6300, 2080, 6340, 2120);     // near its bottom-right
+        var cursor = new PlacementPoint(6310, 2100);
+        var size = new PlacementSize(300, 520);
+
+        var p = FlyoutPlacement.Compute(trayRect, cursor, workArea, size);
+
+        AssertWithinWorkArea(p, size, workArea);
+        // It should land on the SECONDARY monitor (x within its bounds), not bleed onto the primary.
+        Assert.True(p.X >= workArea.Left, $"X {p.X} should be >= work-area left {workArea.Left}");
+    }
+
+    [Fact]
+    public void Placement_OverflowFallback_UsesCursor_ClampsToWorkArea()
+    {
+        // No tray rect (icon is in the overflow flyout): anchor to the cursor and clamp.
+        var workArea = new PlacementRect(0, 0, 1920, 1040); // primary minus a bottom taskbar
+        var cursor = new PlacementPoint(1900, 1030);        // near bottom-right
+        var size = new PlacementSize(300, 520);
+
+        var p = FlyoutPlacement.Compute(trayRect: null, cursor, workArea, size);
+
+        AssertWithinWorkArea(p, size, workArea);
+    }
+
+    [Fact]
+    public void Placement_AnchorNearTop_FlipsBelow_StillClamped()
+    {
+        // A tray rect near the TOP of the work area (a top taskbar): placing above would spill off the
+        // top, so the function flips below the anchor and clamps.
+        var workArea = new PlacementRect(0, 40, 1920, 1080);
+        var trayRect = new PlacementRect(1860, 45, 1900, 85);
+        var cursor = new PlacementPoint(1880, 65);
+        var size = new PlacementSize(300, 520);
+
+        var p = FlyoutPlacement.Compute(trayRect, cursor, workArea, size);
+
+        AssertWithinWorkArea(p, size, workArea);
+        Assert.True(p.Y >= workArea.Top, "flyout top must not spill above the work area");
+    }
+
+    [Fact]
+    public void Placement_FlyoutTallerThanWorkArea_PinsToTop()
+    {
+        // A pathological tiny work area: the flyout cannot fit, so it pins to the top edge (header
+        // stays visible) rather than going negative.
+        var workArea = new PlacementRect(0, 0, 1920, 300);
+        var trayRect = new PlacementRect(1860, 270, 1900, 295);
+        var cursor = new PlacementPoint(1880, 285);
+        var size = new PlacementSize(300, 520);
+
+        var p = FlyoutPlacement.Compute(trayRect, cursor, workArea, size);
+
+        Assert.Equal(workArea.Top, p.Y);
+        Assert.True(p.X >= workArea.Left && p.X + size.Width <= workArea.Right + 0.001);
+    }
+
+    private static void AssertWithinWorkArea(PlacementPoint p, PlacementSize size, PlacementRect workArea)
+    {
+        const double tol = 0.001;
+        Assert.True(p.X >= workArea.Left - tol, $"left {p.X} < work-area left {workArea.Left}");
+        Assert.True(p.Y >= workArea.Top - tol, $"top {p.Y} < work-area top {workArea.Top}");
+        Assert.True(p.X + size.Width <= workArea.Right + tol, $"right {p.X + size.Width} > work-area right {workArea.Right}");
+        Assert.True(p.Y + size.Height <= workArea.Bottom + tol, $"bottom {p.Y + size.Height} > work-area bottom {workArea.Bottom}");
+    }
+
+    // MARK: - DIP / device-pixel boundary (system-DPI-aware process, scaling above 100%)
+
+    // A 1920x1080 primary at a bottom taskbar: the physical work area, the tray icon's physical rect
+    // inside the taskbar, and the flyout's size in DIPs (WPF ActualWidth/ActualHeight).
+    private static readonly PlacementRect DpiWorkArea = new(0, 0, 1920, 1000);
+    private static readonly PlacementRect DpiTrayRect = new(1784, 1045, 1824, 1080);
+    private static readonly PlacementPoint DpiCursor = new(1800, 1060);
+    private static readonly PlacementSize DpiSizeDips = new(300, 420);
+
+    [Theory]
+    [InlineData(1.0)]
+    [InlineData(1.25)]
+    [InlineData(1.5)]
+    [InlineData(2.0)]
+    public void Placement_AtAnyScale_ConvertedBackToDevice_LiesInsidePhysicalWorkArea(double scale)
+    {
+        // The window converts its DIP size to device pixels, computes in device pixels, and converts
+        // the result to DIPs for Left/Top. Scaling that DIP result back by the same factor must land
+        // the physical window inside the physical work area; the old code fed DIPs into device math
+        // and assigned device pixels to Left/Top, which WPF scaled AGAIN (off-screen above 100%).
+        var deviceSize = FlyoutPlacement.ToDevice(DpiSizeDips, scale, scale);
+        var placedDevice = FlyoutPlacement.Compute(DpiTrayRect, DpiCursor, DpiWorkArea, deviceSize);
+        var dip = FlyoutPlacement.ToDips(placedDevice, scale, scale);
+
+        var backToDevice = new PlacementPoint(dip.X * scale, dip.Y * scale);
+        AssertWithinWorkArea(backToDevice, deviceSize, DpiWorkArea);
+    }
+
+    [Fact]
+    public void Placement_1920x1080_At125Percent_LeftIsUnitCorrect_NotTheMixedUnitValue()
+    {
+        // Explicit numbers so a regression to mixed units fails loudly. Device: the flyout is 375 px
+        // wide and right-aligns to the tray's right edge 1824 -> device Left 1449 -> DIP Left 1159.2.
+        // The mixed-unit code produced 1524 (1824 - 300 DIP width, then assigned as DIPs and scaled to
+        // 1905 px: a 15 px sliver at the screen edge).
+        const double scale = 1.25;
+        var placedDevice = FlyoutPlacement.Compute(
+            DpiTrayRect, DpiCursor, DpiWorkArea, FlyoutPlacement.ToDevice(DpiSizeDips, scale, scale));
+        var dip = FlyoutPlacement.ToDips(placedDevice, scale, scale);
+
+        Assert.Equal((1824 - 300 * scale) / scale, dip.X, 3);
+        Assert.Equal(1159.2, dip.X, 1);
+        Assert.NotEqual(1524.0, dip.X, 0);
+        // Sanity on the helpers themselves.
+        Assert.Equal(new PlacementSize(375, 525), FlyoutPlacement.ToDevice(DpiSizeDips, scale, scale));
+        Assert.Equal(new PlacementPoint(100, 200), FlyoutPlacement.ToDips(new PlacementPoint(125, 250), scale, scale));
+    }
+
+    [Theory]
+    [InlineData(70)]
+    [InlineData(450)]
+    public void Placement_BottomEdgeStaysAboveTray_ForAnyHeight(double height)
+    {
+        // The invariant OnRenderSizeChanged -> Reposition relies on: re-running Compute with the new
+        // height keeps the flyout's BOTTOM edge 8 px above the tray rect, so a SizeToContent regrowth
+        // (Loading ~70 -> Authenticated ~450) grows upward instead of down over the taskbar. The work
+        // area bottom is the taskbar top here (a real layout), so nothing clamps.
+        var workArea = new PlacementRect(0, 0, 1920, 1040);
+        var size = new PlacementSize(300, height);
+
+        var p = FlyoutPlacement.Compute(DpiTrayRect, DpiCursor, workArea, size);
+
+        Assert.Equal(DpiTrayRect.Top - 8, p.Y + size.Height, 3);
+        AssertWithinWorkArea(p, size, workArea);
+    }
+
+    // MARK: - Tray-click toggle decision (pure)
+
+    [Theory]
+    [InlineData(null, 1000L, false)]   // never hidden by a deactivation -> plain show
+    [InlineData(900L, 1000L, true)]    // hidden 100 ms ago -> the click is the toggle-close
+    [InlineData(0L, 2000L, false)]     // hidden 2 s ago -> a fresh open
+    [InlineData(1500L, 1000L, false)]  // negative delta (clock oddity) -> never a toggle
+    public void ShouldTreatAsToggleClose_MatchesTheWindow(long? hiddenAtMs, long nowMs, bool expected)
+    {
+        Assert.Equal(expected, FlyoutWindow.ShouldTreatAsToggleClose(hiddenAtMs, nowMs));
+    }
+
+    [Fact]
+    public void ShouldTreatAsToggleClose_WindowEdgeIsExclusive()
+    {
+        Assert.True(FlyoutWindow.ShouldTreatAsToggleClose(0, FlyoutWindow.ToggleCloseWindowMs - 1));
+        Assert.False(FlyoutWindow.ShouldTreatAsToggleClose(0, FlyoutWindow.ToggleCloseWindowMs));
+    }
+
+    // MARK: - Source-scan contracts for the flyout XAML / code-behind (no WPF host needed)
+
+    [Fact]
+    public void FlyoutXaml_ErrorPanel_HasSignInAndRetryButtons()
+    {
+        // The error card must not be a dead end: App.WireFlyoutInteractions hooks these by x:Name.
+        var xaml = File.ReadAllText(Path.Combine(FindSourceDir(), "Views", "FlyoutWindow.xaml"));
+        Assert.Contains("x:Name=\"ErrorSignInButton\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"ErrorRetryButton\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FlyoutXaml_BarFills_DoNotUseHardCodedTrackWidths()
+    {
+        // Every fill is a fraction of its track's ActualWidth (PercentOfWidth MultiBinding); a literal
+        // track width drifts from the layout and overstates the bar.
+        //
+        // The pace bar this test also used to pin is gone: U11 replaced it with the two-ring dial and
+        // a pace word underneath, so there is no PaceTrack left to measure against.
+        var xaml = File.ReadAllText(Path.Combine(FindSourceDir(), "Views", "FlyoutWindow.xaml"));
+        Assert.DoesNotContain("ConverterParameter=110", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ConverterParameter=120", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ConverterParameter=270", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("ElementName=\"PaceTrack\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("ElementName=\"ModelTrack\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("ElementName=\"SpendTrack\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FlyoutCodeBehind_DoesNotHardCodeTheTrayIconGuid()
+    {
+        // The tray GUID is path-bound by Windows; the flyout must consume the live icon Id assigned
+        // by the composition root, never a literal that can diverge from the created icon.
+        var cs = File.ReadAllText(Path.Combine(FindSourceDir(), "Views", "FlyoutWindow.xaml.cs"));
+        Assert.DoesNotContain("7E2C1B44", cs, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void FlyoutXaml_DefinesNoThemeTokenInItsBaseDictionary()
+    {
+        // A theme token in the window's own dictionary shadows the merged theme dictionary and makes
+        // ApplyTheme a no-op (base entries win over merged ones). Tokens live only in Themes/*.xaml.
+        var xaml = File.ReadAllText(Path.Combine(FindSourceDir(), "Views", "FlyoutWindow.xaml"));
+        Assert.DoesNotContain("<SolidColorBrush x:Key=", xaml, StringComparison.Ordinal);
+        Assert.Contains(
+            "Source=\"pack://application:,,,/ClaudeBatteryWin;component/Themes/DarkTokens.xaml\"",
+            xaml,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EveryResourceKeyAWindowUses_IsDefinedWhereThatWindowCanReachIt()
+    {
+        // A missing StaticResource throws when the window loads; a missing DynamicResource fails
+        // silently and falls back to the default, which is how the sign-in confirmation ended up in
+        // black text on the dark panel (it asked for "MutedBrush", a key nothing defines). Each view
+        // can reach the keys in its own XAML and in App.xaml. A view that merges a theme dictionary
+        // can also reach the theme keys, but only those defined in EVERY theme dictionary: ApplyTheme
+        // swaps one for another, so a key only the dark one defines disappears on a flip to light.
+        // Code-behind FindResource("...") literals are held to the same rule, since they throw too.
+        var src = FindSourceDir();
+        var keyDef = new System.Text.RegularExpressions.Regex("x:Key=\"([^\"]+)\"");
+        var keyRef = new System.Text.RegularExpressions.Regex(@"\{(?:Dynamic|Static)Resource ([A-Za-z0-9_.]+)\}");
+        var findResource = new System.Text.RegularExpressions.Regex(@"FindResource\(([^)]*)\)");
+        var literal = new System.Text.RegularExpressions.Regex("\"([^\"]+)\"");
+
+        HashSet<string> Defined(string path) =>
+            keyDef.Matches(File.ReadAllText(path)).Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+
+        var themeFiles = Directory.GetFiles(Path.Combine(src, "Themes"), "*.xaml");
+        Assert.NotEmpty(themeFiles);
+        var themeKeys = themeFiles.Select(Defined).Aggregate((a, b) => a.Intersect(b, StringComparer.Ordinal).ToHashSet(StringComparer.Ordinal));
+        var appKeys = Defined(Path.Combine(src, "App.xaml"));
+
+        var views = Directory.GetFiles(Path.Combine(src, "Views"), "*.xaml").Append(Path.Combine(src, "App.xaml"));
+        var missing = new List<string>();
+        foreach (var view in views)
+        {
+            var xaml = File.ReadAllText(view);
+            var reachable = Defined(view);
+            reachable.UnionWith(appKeys);
+            if (xaml.Contains("component/Themes/", StringComparison.Ordinal))
+            {
+                reachable.UnionWith(themeKeys);
+            }
+
+            var used = keyRef.Matches(xaml).Select(m => m.Groups[1].Value).ToList();
+            var codeBehind = view + ".cs";
+            if (File.Exists(codeBehind))
+            {
+                used.AddRange(findResource.Matches(File.ReadAllText(codeBehind))
+                    .SelectMany(m => literal.Matches(m.Groups[1].Value))
+                    .Select(m => m.Groups[1].Value));
+            }
+
+            missing.AddRange(used.Where(k => !reachable.Contains(k)).Distinct().Select(k => $"{Path.GetFileName(view)}: {k}"));
+        }
+
+        Assert.True(missing.Count == 0, "Resource keys nothing reachable defines:\n" + string.Join("\n", missing));
+    }
+
+    [Fact]
+    public void ThemeDictionaries_DefineTheSameKeys()
+    {
+        // The flyout swaps one theme dictionary for the other live. A key present in only one of them
+        // resolves in that theme and silently falls back to the default in the other.
+        var keyDef = new System.Text.RegularExpressions.Regex("x:Key=\"([^\"]+)\"");
+        var themes = Path.Combine(FindSourceDir(), "Themes");
+        var dark = keyDef.Matches(File.ReadAllText(Path.Combine(themes, "DarkTokens.xaml"))).Select(m => m.Groups[1].Value).OrderBy(k => k, StringComparer.Ordinal);
+        var light = keyDef.Matches(File.ReadAllText(Path.Combine(themes, "LightTokens.xaml"))).Select(m => m.Groups[1].Value).OrderBy(k => k, StringComparer.Ordinal);
+        Assert.Equal(dark, light);
+    }
+
+    /// <summary>
+    /// Locate <c>src/ClaudeBatteryWin</c> by walking up from the test output directory (the
+    /// NoSecretsGateTests pattern). Works on the CI runner and a dev box.
+    /// </summary>
+    private static string FindSourceDir()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            var candidate = Path.Combine(dir.FullName, "src", "ClaudeBatteryWin");
+            if (Directory.Exists(candidate))
+            {
+                return candidate;
+            }
+            dir = dir.Parent;
+        }
+
+        throw new DirectoryNotFoundException(
+            "Could not locate src/ClaudeBatteryWin from " + AppContext.BaseDirectory);
+    }
+
+    // MARK: - Account-row switch command (U15 / issue #15)
+
+    [Fact]
+    public void SwitchAccountCommand_RaisesSwitchRequest_WithTheRowId()
+    {
+        var vm = new FlyoutViewModel(() => Now);
+        Guid? requested = null;
+        vm.SwitchAccountRequested += id => requested = id;
+
+        var id = Guid.NewGuid();
+        vm.SwitchAccountCommand.Execute(id);
+
+        Assert.Equal(id, requested); // tapping a row raises a switch for that account id
+    }
+
+    [Fact]
+    public void SwitchAccountCommand_NonGuidParameter_DoesNotRaise()
+    {
+        var vm = new FlyoutViewModel(() => Now);
+        var raised = false;
+        vm.SwitchAccountRequested += _ => raised = true;
+
+        vm.SwitchAccountCommand.Execute("not-a-guid");
+
+        Assert.False(raised);
+    }
+
+    // MARK: - Refresh batching (U16 / issue #26)
+
+    [Fact]
+    public void SuspendRefresh_CollapsesABatchToOneReevaluation()
+    {
+        var vm = new FlyoutViewModel(() => Now);
+        var reevaluations = 0;
+        vm.PropertyChanged += (_, e) => { if (string.IsNullOrEmpty(e.PropertyName)) reevaluations++; };
+
+        using (vm.SuspendRefresh())
+        {
+            vm.IsAuthenticated = true;
+            vm.ConsecutiveFailures = 4;
+            vm.CanAddAccount = false;
+            vm.AvailableUpdateVersion = "1.51";
+        }
+
+        Assert.Equal(1, reevaluations); // one re-eval for the whole batch, not one per setter
+    }
+
+    [Fact]
+    public void WithoutSuspend_EachChangingSetterReevaluates()
+    {
+        var vm = new FlyoutViewModel(() => Now);
+        var reevaluations = 0;
+        vm.PropertyChanged += (_, e) => { if (string.IsNullOrEmpty(e.PropertyName)) reevaluations++; };
+
+        vm.IsAuthenticated = true;
+        vm.ConsecutiveFailures = 4;
+        vm.CanAddAccount = false;
+
+        Assert.Equal(3, reevaluations); // baseline contrast: three changing setters -> three re-evals
+    }
+
+    // MARK: - Sign-in confirmation lifetime (R16)
+
+    private const string Confirmation = "Refreshed 2 organizations.";
+
+    /// Two accounts and a reading: the panel is Authenticated and the account list shows.
+    private static (FlyoutViewModel Vm, Account A, Account B) SignedInWithTwoAccounts()
+    {
+        var a = new Account { Email = "a@x.com", SessionKey = "k", OrganizationId = "o1" };
+        var b = new Account { Email = "b@x.com", SessionKey = "k", OrganizationId = "o2" };
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = true,
+            LatestReading = new UsageReading(UsageWithModels(), null),
+            Accounts = new[] { a, b },
+            ActiveAccountId = a.Id,
+        };
+        return (vm, a, b);
+    }
+
+    [Fact]
+    public void SignInConfirmation_IsClearedWhenThePanelIsHiddenAfterShowingIt()
+    {
+        var (vm, _, _) = SignedInWithTwoAccounts();
+        vm.OnPanelVisibilityChanged(true);
+        vm.SignInConfirmation = Confirmation;
+        Assert.True(vm.HasSignInConfirmation);
+
+        vm.OnPanelVisibilityChanged(false);
+
+        Assert.False(vm.HasSignInConfirmation);
+        Assert.Equal(string.Empty, vm.SignInConfirmation);
+    }
+
+    [Fact]
+    public void SignInConfirmation_SurvivesPollsAndTheMinuteTickWhileThePanelIsOpen()
+    {
+        var (vm, a, b) = SignedInWithTwoAccounts();
+        vm.OnPanelVisibilityChanged(true);
+        vm.SignInConfirmation = Confirmation;
+
+        vm.LatestReading = new UsageReading(UsageWithModels(), null); // a poll lands
+        vm.Accounts = new[] { a, b };
+        vm.ActiveAccountId = a.Id; // the sync re-sets the active id every time, unchanged
+        vm.Refresh(); // the minute tick
+
+        Assert.Equal(Confirmation, vm.SignInConfirmation);
+    }
+
+    [Fact]
+    public void SignInConfirmation_ThatArrivedWhileHidden_WaitsToBeShownBeforeItIsCleared()
+    {
+        var (vm, _, _) = SignedInWithTwoAccounts();
+        vm.SignInConfirmation = Confirmation; // panel never opened
+
+        vm.OnPanelVisibilityChanged(false);
+        Assert.Equal(Confirmation, vm.SignInConfirmation); // nobody has read it yet
+
+        vm.OnPanelVisibilityChanged(true);
+        vm.OnPanelVisibilityChanged(false);
+        Assert.False(vm.HasSignInConfirmation);
+    }
+
+    [Fact]
+    public void SignInConfirmation_SetWhileTheSigningInPanelShows_IsNotTreatedAsRead()
+    {
+        // The confirmation only renders in the Authenticated panel. Arriving while the panel still
+        // shows the spinner, then closing, must not throw it away unread.
+        var (vm, _, _) = SignedInWithTwoAccounts();
+        vm.LoginState = new LoginState(LoginStateKind.SigningIn);
+        vm.OnPanelVisibilityChanged(true);
+        vm.SignInConfirmation = Confirmation;
+        vm.OnPanelVisibilityChanged(false);
+        Assert.Equal(Confirmation, vm.SignInConfirmation);
+
+        vm.LoginState = LoginState.Idle;
+        vm.OnPanelVisibilityChanged(true);
+        vm.OnPanelVisibilityChanged(false);
+        Assert.False(vm.HasSignInConfirmation);
+    }
+
+    [Fact]
+    public void SignInConfirmation_IsClearedBySwitchingAccountFromThePanel()
+    {
+        var (vm, _, b) = SignedInWithTwoAccounts();
+        vm.OnPanelVisibilityChanged(true);
+        vm.SignInConfirmation = Confirmation;
+
+        vm.SwitchAccountCommand.Execute(b.Id);
+
+        Assert.False(vm.HasSignInConfirmation);
+    }
+
+    [Fact]
+    public void SignInConfirmation_ANewMessageAfterAReadOne_IsUnreadAgain()
+    {
+        var (vm, _, _) = SignedInWithTwoAccounts();
+        vm.OnPanelVisibilityChanged(true);
+        vm.SignInConfirmation = Confirmation;
+        vm.OnPanelVisibilityChanged(false);
+
+        vm.SignInConfirmation = "Refreshed 3 organizations."; // arrives while hidden
+        vm.OnPanelVisibilityChanged(false);
+
+        Assert.Equal("Refreshed 3 organizations.", vm.SignInConfirmation);
+    }
+
+    // MARK: - An in-progress rename survives rebuilds (R36)
+
+    [Fact]
+    public void Rename_TypedTextAndRowSurviveAPollAndTheMinuteTick()
+    {
+        var (vm, a, b) = SignedInWithTwoAccounts();
+        vm.BeginRename(a.Id);
+        vm.RenameText = "Wor";
+        var editingRow = vm.AccountRows.Single(r => r.Id == a.Id);
+        var otherRow = vm.AccountRows.Single(r => r.Id == b.Id);
+
+        vm.LatestReading = new UsageReading(UsageWithModels(), null); // a poll lands
+        vm.Accounts = new[] { a, b }; // the sync hands over a fresh list of the same accounts
+        vm.Refresh(); // the minute tick
+
+        Assert.Equal("Wor", vm.RenameText);
+        Assert.Equal(a.Id, vm.EditingAccountId);
+        // Same row instances, so the ItemsControl keeps the containers and the focused edit field.
+        Assert.Same(editingRow, vm.AccountRows.Single(r => r.Id == a.Id));
+        Assert.Same(otherRow, vm.AccountRows.Single(r => r.Id == b.Id));
+        Assert.True(editingRow.IsEditing);
+    }
+
+    [Fact]
+    public void Rename_OnlyTheChangedRowIsReplaced()
+    {
+        var (vm, a, b) = SignedInWithTwoAccounts();
+        var rowA = vm.AccountRows.Single(r => r.Id == a.Id);
+        var rowB = vm.AccountRows.Single(r => r.Id == b.Id);
+
+        vm.ActiveAccountId = b.Id;
+
+        Assert.NotSame(rowA, vm.AccountRows.Single(r => r.Id == a.Id));
+        Assert.NotSame(rowB, vm.AccountRows.Single(r => r.Id == b.Id));
+        Assert.True(vm.AccountRows.Single(r => r.Id == b.Id).IsActive);
+
+        var rowsNow = vm.AccountRows.ToList();
+        vm.BeginRename(a.Id);
+        Assert.NotSame(rowsNow[0], vm.AccountRows[0]); // a's row flipped into edit mode
+        Assert.Same(rowsNow[1], vm.AccountRows[1]); // b's row did not change
+    }
+
+    [Fact]
+    public void Rename_SeedsTheFieldWithTheNicknameElseTheEmail_LikeTheMacEditRow()
+    {
+        // Two organizations of one login share an address, so their rows read "me@x.com (Org)". The
+        // field still starts from the email: the suffix is a display aid, not part of a name.
+        var one = new Account { Email = "me@x.com", SessionKey = "k", OrganizationId = "o1", OrganizationName = "Acme" };
+        var two = new Account { Email = "me@x.com", SessionKey = "k", OrganizationId = "o2", OrganizationName = "Beta", Nickname = "Home" };
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = true,
+            LatestReading = new UsageReading(UsageWithModels(), null),
+            Accounts = new[] { one, two },
+        };
+
+        vm.BeginRename(one.Id);
+        Assert.Equal("me@x.com", vm.RenameText);
+
+        vm.BeginRename(two.Id);
+        Assert.Equal("Home", vm.RenameText);
+    }
+
+    [Fact]
+    public void Rename_HidingThePanelSavesAChangedName()
+    {
+        var (vm, a, _) = SignedInWithTwoAccounts();
+        (Guid Id, string Name)? renamed = null;
+        vm.RenameAccountRequested += (id, name) => renamed = (id, name);
+        vm.OnPanelVisibilityChanged(true);
+        vm.BeginRename(a.Id);
+        vm.RenameText = "Work";
+
+        vm.OnPanelVisibilityChanged(false);
+
+        Assert.Equal((a.Id, "Work"), renamed);
+        Assert.Null(vm.EditingAccountId);
+        Assert.False(vm.AccountRows.Single(r => r.Id == a.Id).IsEditing);
+    }
+
+    [Theory]
+    [InlineData("a@x.com")] // untouched: saving it would pin the email as a nickname
+    [InlineData("  a@x.com ")] // only whitespace changed
+    [InlineData("")] // cleared: removing a nickname takes a deliberate Enter
+    [InlineData("   ")]
+    public void Rename_HidingThePanelAbandonsAnUnchangedOrEmptyName(string typed)
+    {
+        var (vm, a, _) = SignedInWithTwoAccounts();
+        var raised = false;
+        vm.RenameAccountRequested += (_, _) => raised = true;
+        vm.OnPanelVisibilityChanged(true);
+        vm.BeginRename(a.Id);
+        vm.RenameText = typed;
+
+        vm.OnPanelVisibilityChanged(false);
+
+        Assert.False(raised);
+        Assert.Null(vm.EditingAccountId);
+        Assert.False(vm.AccountRows.Single(r => r.Id == a.Id).IsEditing);
+    }
+
+    [Theory]
+    [InlineData("a@x.com")] // untouched: the seeded email must not become a nickname (review F6)
+    [InlineData("  a@x.com ")]
+    [InlineData("")] // cleared: removing a nickname takes a deliberate Enter
+    [InlineData("   ")]
+    public void Rename_ClickingAwayAbandonsAnUnchangedOrEmptyName(string typed)
+    {
+        // The field's LostFocus settles the edit by the same rule as closing the panel.
+        var (vm, a, _) = SignedInWithTwoAccounts();
+        var raised = false;
+        vm.RenameAccountRequested += (_, _) => raised = true;
+        vm.BeginRename(a.Id);
+        vm.RenameText = typed;
+
+        vm.SettleRename(a.Id);
+
+        Assert.False(raised);
+        Assert.Null(vm.EditingAccountId);
+        Assert.False(vm.AccountRows.Single(r => r.Id == a.Id).IsEditing);
+    }
+
+    [Fact]
+    public void Rename_ClickingAwaySavesAChangedNameOnce()
+    {
+        var (vm, a, _) = SignedInWithTwoAccounts();
+        var commits = new List<(Guid Id, string Name)>();
+        vm.RenameAccountRequested += (id, name) => commits.Add((id, name));
+        vm.BeginRename(a.Id);
+        vm.RenameText = "Work";
+
+        vm.SettleRename(a.Id);
+        vm.SettleRename(a.Id); // LostFocus again as the row is torn down
+
+        Assert.Equal(new[] { (a.Id, "Work") }, commits);
+        Assert.Null(vm.EditingAccountId);
+    }
+
+    [Fact]
+    public void Rename_ASecondCommitForTheSameEdit_IsIgnored()
+    {
+        // Enter commits, then the field's LostFocus fires as its row leaves edit mode. The second
+        // commit must not write the name again.
+        var (vm, a, _) = SignedInWithTwoAccounts();
+        var commits = 0;
+        vm.RenameAccountRequested += (_, _) => commits++;
+        vm.BeginRename(a.Id);
+
+        vm.CommitRename(a.Id, "Work");
+        vm.CommitRename(a.Id, "Work");
+
+        Assert.Equal(1, commits);
+    }
+
+    [Fact]
+    public void Rename_EndsWhenTheAccountBeingRenamedIsRemoved()
+    {
+        var (vm, a, b) = SignedInWithTwoAccounts();
+        var c = new Account { Email = "c@x.com", SessionKey = "k", OrganizationId = "o3" };
+        vm.Accounts = new[] { a, b, c };
+        vm.BeginRename(c.Id);
+        vm.RenameText = "Gone soon";
+
+        vm.Accounts = new[] { a, b };
+
+        Assert.Null(vm.EditingAccountId);
+        Assert.Equal(string.Empty, vm.RenameText);
+    }
+
+    // MARK: - Manual/visual contracts (no headless assertion possible)
+    //
+    // Two behaviors are verified by manual QA, not unit tests, because they need a real Window with a
+    // Dispatcher and input/focus events:
+    //   - Live re-theme: FlyoutWindow.ApplyTheme(bucket) swaps the merged token dictionary so every
+    //     DynamicResource consumer re-resolves without close/reopen. The testable half (semantic colors
+    //     are theme-invariant buckets) is covered by the color-scale tests above.
+    //   - Escape-to-close and Deactivated-dismissal live in the code-behind (OnKeyDown / OnDeactivated);
+    //     the testable half (the suppression predicate) is covered by SuppressDismiss_OnlyWhileLoginInProgress.
+    // The previous Assert.True(true) placeholder tests were removed (issue #24) so they no longer
+    // inflate the test count with false coverage. The gauge interior ticks (issue #25) are likewise a
+    // visual check; the converter renders TickCount notches and is verified by manual QA.
+}
