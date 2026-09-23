@@ -1,6 +1,6 @@
 # Change Log
 
-### Unreleased
+### v1.73
 
 **Session and Weekly Dials**
 - The lines under each dial now read pace word, then the reset countdown, then the run-out estimate at the bottom only when there is one, so the countdown keeps the same slot either way. The countdown and the run-out are now white, medium weight, and 11pt, up from 10pt regular in grey. Nothing had shrunk in v1.72. The grey on the dark card had cut the contrast from about 15:1 to about 5.3:1 (issue #53).
