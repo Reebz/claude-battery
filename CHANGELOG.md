@@ -10,8 +10,14 @@
 **Settings**
 - A new "Text size" slider in Settings moves every text size in the usage popover together, six steps from 3 points smaller to 2 points larger, with the default in the middle. The caption above it reports the resulting size of the countdown line, such as "Text size: 11pt". Only the popover changes, so the menu bar icon and the Settings window stay as they are. The slider stops at 2 points larger because the popover is a fixed 300pt panel, and at that step the longest countdown just fits its card.
 
+**Popover**
+- The footer now reads "Usage updated just now", with the version after it. v1.72 put the version first ("v1.72 · Updated just now"), and read that way it looked like a check for app updates. The line shows how long ago the app last fetched your usage numbers from claude.ai, which it does about every 2 minutes (issue #48).
+
 **Sign-In**
 - The sign-in window now allows hCaptcha, both `hcaptcha.com` and every `*.hcaptcha.com` host, following hCaptcha's own Content Security Policy guidance. The login page's hidden hCaptcha frame was blocked on every load before this, so if claude.ai ever shows a visible "verify you are human" box on the email-code path, it can now draw. The session cookie is still only accepted from claude.ai (issue #52).
+
+**Documentation**
+- The README now says why the Models card shows the bars it does. Under All Models the card draws one bar for each model that has its own weekly limit in your account's usage data, so a model without one gets no bar and counts only toward the combined total (issue #42).
 
 ### v1.72
 

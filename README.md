@@ -62,12 +62,12 @@ Right-click the menu bar icon for Settings, Notification customization, and to Q
 **Popover (left-click)**
 - Session and Weekly usage arc gauges with colour-coded fill
 - Extra Usage spend tracking bar -- see how much you've spent against your monthly limit (only shows when Extra Usage is enabled on your account)
-- Models card -- an All Models bar plus one bar per model, each showing how much of your weekly limit is left
+- Models card -- an All Models bar plus one bar for each model that has its own weekly limit, each showing how much of its weekly limit is left
 - Reset countdown under each Session and Weekly dial, with a run-out estimate when usage is running ahead of the clock
 - Popover text size adjustable in six steps in Settings, from 3 points smaller to 2 points larger
 - Account switcher with inline nickname editing (multi-account)
 
-The Models card breaks your weekly quota down by model. Each bar shows how much of your weekly limit is left for that model, so 97% means 97% left. All Models is your combined weekly total, the same number as the Weekly gauge. Under All Models, the card draws one bar for each model that has its own weekly limit in your account's usage data, so a model without one gets no bar and counts only toward the combined total. The names come from your account's usage data, so which models you see depends on your plan and can change over time. If your account has no per-model data, the card is hidden rather than showing empty or full bars.
+The Models card shows the weekly limits your account reports. Each bar shows how much of your weekly limit is left for that model, so 97% means 97% left. All Models is your combined weekly total, the same number as the Weekly gauge. Under All Models, the card draws one bar for each model that has its own weekly limit in your account's usage data, so a model without one gets no bar and counts only toward the combined total. The names come from your account's usage data, so which models you see depends on your plan and can change over time. If your account has no per-model data, the card is hidden rather than showing empty or full bars.
 
 **Notifications**
 - Low usage alert when your weekly quota drops below a configurable threshold
