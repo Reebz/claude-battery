@@ -491,14 +491,9 @@ public sealed class AuthManager
 
         foreach (var sibling in siblings)
         {
-            _accountStore.UpdateSession(sibling.Id, sessionKey, _pendingCookieHeader);
-            var org = orgs.FirstOrDefault(o => o.Uuid == sibling.OrganizationId);
-            if (org is not null)
-            {
-                _accountStore.UpdatePlan(sibling.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
-                _accountStore.UpdateOrganizationName(sibling.Id, org.DisplayName);
-            }
-            RepairPlaceholderEmail(sibling, resolvedEmail);
+            // The captured WebView2 UA rides with the fresh cookies it was issued under, so the next
+            // launch or switch to this sibling does not poll them with a stale UA (U1/U2).
+            _accountStore.RepairFromSignIn(sibling, orgs, sessionKey, _pendingCookieHeader, CapturedUserAgent, resolvedEmail);
         }
 
         return siblings.Count;
@@ -528,14 +523,10 @@ public sealed class AuthManager
         var repaired = MatchedAccounts(orgs, _accountStore.Accounts);
         foreach (var account in repaired)
         {
-            _accountStore.UpdateSession(account.Id, sessionKey, _pendingCookieHeader);
-            var org = orgs.FirstOrDefault(o => o.Uuid == account.OrganizationId);
-            if (org is not null)
-            {
-                _accountStore.UpdatePlan(account.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
-                _accountStore.UpdateOrganizationName(account.Id, org.DisplayName);
-            }
-            RepairPlaceholderEmail(account, resolvedEmail);
+            // Persist the captured WebView2 UA with the fresh cookies (U1/U2). OnAuthSuccess swaps it
+            // into the live transport, but the activation re-seed and every later launch read the
+            // STORED UA: leaving it stale polled the new cf_clearance under the old UA and got a 403.
+            _accountStore.RepairFromSignIn(account, orgs, sessionKey, _pendingCookieHeader, CapturedUserAgent, resolvedEmail);
         }
 
         if (target.Id != _accountStore.ActiveAccountId)
@@ -891,6 +882,113 @@ public sealed class AuthManager
         _ => "main"
     };
 
+    /// <summary>
+    /// Which kind a refused new-window request is: <see cref="NavigationBlockKind.Popup"/> (a sign-in
+    /// attempt, which shows the SSO card) or <see cref="NavigationBlockKind.Link"/> (an ordinary page,
+    /// recorded only). Either way the window is refused, as on the Mac.
+    ///
+    /// The Mac splits these on the navigation type: a clicked link (<c>.linkActivated</c>) is a link,
+    /// anything else is a popup. WebView2's <c>NewWindowRequested</c> carries no navigation type, and
+    /// <c>IsUserInitiated</c> cannot stand in for it: a "Continue with SSO" button is a user gesture
+    /// too. So the split is made on what the request asks for instead. Before this, every refused new
+    /// window counted as a popup, so a help or terms link opening in a new tab to a host outside the
+    /// allowlist (claude.com, say) showed the SSO error and blocked capture of a sign-in completed
+    /// behind it until "Try again".
+    ///
+    /// A request counts as a sign-in attempt when its host is a well-known identity provider, its
+    /// first host label names a sign-in service (a company's own "sso.acme.com" or "login.acme.com"),
+    /// its query carries an OAuth/OIDC/SAML/WS-Fed request parameter, or a path segment names a
+    /// sign-in endpoint. Anything else, including a URL that does not parse or is not http(s), is a
+    /// link.
+    /// </summary>
+    public static NavigationBlockKind ClassifyBlockedNewWindow(string url)
+    {
+        if (!Uri.TryCreate(url?.Trim(), UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
+        {
+            return NavigationBlockKind.Link;
+        }
+
+        return IsIdentityProviderHost(uri.Host)
+            || HasSignInHostLabel(uri.Host)
+            || HasSignInQueryParameter(uri.Query)
+            || HasSignInPathSegment(uri.AbsolutePath)
+            ? NavigationBlockKind.Popup
+            : NavigationBlockKind.Link;
+    }
+
+    /// Hosted identity providers a company SSO popup commonly lands on. Exact apex or leading-dot
+    /// subdomain only (the same never-a-bare-suffix rule as <see cref="IsAllowedHost"/>).
+    private static readonly string[] IdentityProviderDomains =
+    {
+        "okta.com", "oktapreview.com", "okta-emea.com", "microsoftonline.com", "login.microsoft.com",
+        "login.live.com", "onelogin.com", "auth0.com", "workos.com", "pingone.com", "pingidentity.com",
+        "duosecurity.com", "jumpcloud.com",
+    };
+
+    /// Query parameter names that only an OAuth/OIDC, SAML, or WS-Federation request carries.
+    private static readonly HashSet<string> SignInQueryParameters = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "client_id", "redirect_uri", "response_type", "code_challenge", "SAMLRequest", "RelayState", "wtrealm",
+    };
+
+    /// Path segments (and first host labels) that name a sign-in endpoint. Whole segments only, so
+    /// "/legal/authors" is not read as "auth".
+    private static readonly HashSet<string> SignInPathSegments = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "oauth", "oauth2", "authorize", "auth", "sso", "saml", "saml2", "adfs", "idp", "oidc",
+        "openid-connect", "login", "signin", "sign-in",
+    };
+
+    private static bool IsIdentityProviderHost(string host)
+    {
+        var h = host.TrimEnd('.').ToLowerInvariant();
+        foreach (var domain in IdentityProviderDomains)
+        {
+            if (h == domain || h.EndsWith("." + domain, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// The first label only, and only when there is a registered domain under it, so a company IdP
+    /// on its own subdomain ("sso.acme.com") counts but a bare "login.com" does not.
+    private static bool HasSignInHostLabel(string host)
+    {
+        var labels = host.TrimEnd('.').Split('.');
+        return labels.Length >= 3 && SignInPathSegments.Contains(labels[0]);
+    }
+
+    private static bool HasSignInQueryParameter(string query)
+    {
+        foreach (var pair in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var name = pair.Split('=', 2)[0];
+            if (SignInQueryParameters.Contains(Uri.UnescapeDataString(name)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasSignInPathSegment(string path)
+    {
+        foreach (var segment in path.Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (SignInPathSegments.Contains(Uri.UnescapeDataString(segment)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // ---- Timeout ------------------------------------------------------------------------------
 
     /// <summary>
@@ -990,7 +1088,8 @@ public sealed class AuthManager
     {
         if (!AllowsOAuthPopup(url))
         {
-            RecordBlockedNavigation(HostOf(url), NavigationBlockKind.Popup);
+            // Still refused either way; the classification only decides whether the SSO card shows.
+            RecordBlockedNavigation(HostOf(url), ClassifyBlockedNewWindow(url));
             return NewWindowDecision.Block;
         }
 
@@ -1168,10 +1267,15 @@ public sealed class AuthManager
             orgs = await _api.GetOrganizationsAsync(token).ConfigureAwait(true);
             EmitOrgDiscoveryStatus(200, "webview");
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
             // Window closed / timed out / superseded mid-request: the teardown owns state. Do not
             // fight it by re-driving login state here.
+            // Filtered on OUR token: an HTTP request timeout (ClaudeApi's own 30s deadline) also
+            // throws TaskCanceledException, but with this token un-cancelled and no teardown coming.
+            // Swallowing that left the spinner up until the inactivity timer, the capture guard set,
+            // and the shared jar primed with the new identity while polling resumed. It falls to the
+            // generic catch below instead, which restores the active account's cookies.
             return;
         }
         catch (ClaudeAuthException authEx)
@@ -1232,7 +1336,7 @@ public sealed class AuthManager
                     {
                         picked = await _orgPicker.PickAsync(choice.Orgs!, token).ConfigureAwait(true);
                     }
-                    catch (OperationCanceledException)
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
                     {
                         return; // Teardown resumed the picker; do not re-drive state.
                     }
@@ -1348,9 +1452,11 @@ public sealed class AuthManager
             StopLoginWindow();
             OnAuthSuccess?.Invoke();
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
-            // Teardown owns state after a cancel; never re-drive it from here.
+            // Teardown owns state after a cancel; never re-drive it from here. Only a cancel of OUR
+            // token means a teardown is coming; any other cancellation (a request timeout) is a
+            // failure and lands in the generic catch below.
             return;
         }
         catch (AccountPersistenceException)
@@ -1491,10 +1597,12 @@ public enum NavigationBlockKind
     /// A page inside the hosted sign-in popup tried to go somewhere it is not allowed.
     PopupMain,
 
-    /// A new window was requested for a host that is not allowed.
+    /// A new window that looks like a sign-in attempt was requested for a host that is not allowed.
     Popup,
 
-    /// A link the user clicked asked for a new window. Recorded, never shown.
+    /// A new window for an ordinary page (a help or terms link) was requested for a host that is not
+    /// allowed. Recorded, never shown. WebView2 gives no navigation type for a new window, so the
+    /// split from <see cref="Popup"/> is made by <see cref="AuthManager.ClassifyBlockedNewWindow"/>.
     Link,
 }
 

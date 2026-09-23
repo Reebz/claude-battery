@@ -568,6 +568,43 @@ public class IconRenderTests
     }
 
     [Theory]
+    [InlineData(16, ThemeBucket.Dark)]
+    [InlineData(16, ThemeBucket.Light)]
+    [InlineData(24, ThemeBucket.Dark)]
+    [InlineData(32, ThemeBucket.Light)]
+    public void DualArcGauge_StatusStatesAreToldApart(int size, ThemeBucket theme)
+    {
+        // Every status state used to draw the same two faint rings, so an expired session gave no
+        // cue in the tray. They now carry the Mac's glyphs: "!" faded for auth failed and error,
+        // "..." faded for stale, "..." solid for loading, none for signed out.
+        string Hash(TrayRenderState state)
+        {
+            using var renderer = new DualArcGaugeRenderer(); // fresh: the signature cache must not suppress
+            using Bitmap? bitmap = renderer.Render(state, theme, "", size);
+            Assert.NotNull(bitmap);
+            return PixelHash(bitmap!);
+        }
+
+        string unauth = Hash(new TrayRenderState.Unauthenticated());
+        string authFailed = Hash(new TrayRenderState.AuthFailed());
+        string error = Hash(new TrayRenderState.StatusError());
+        string stale = Hash(new TrayRenderState.StatusStale());
+        string loading = Hash(new TrayRenderState.StatusLoading());
+
+        // The ones that need the user's attention differ from the ones that do not.
+        Assert.NotEqual(unauth, authFailed);
+        Assert.NotEqual(loading, authFailed);
+        Assert.NotEqual(unauth, error);
+        Assert.NotEqual(loading, error);
+
+        // Stale and loading differ from each other and from signed out.
+        Assert.NotEqual(stale, loading);
+        Assert.NotEqual(unauth, stale);
+        Assert.NotEqual(unauth, loading);
+        Assert.NotEqual(stale, authFailed);
+    }
+
+    [Theory]
     [MemberData(nameof(BothStyles))]
     public void EveryStyle_SuppressesAnIdenticalRenderAndRedrawsAfterAResetSignature(TrayIconStyle style)
     {

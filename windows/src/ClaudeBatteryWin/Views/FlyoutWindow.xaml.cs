@@ -80,13 +80,14 @@ public partial class FlyoutWindow : Window
         }
     }
 
-    /// <summary>Clicking away commits too: an edit field left open over a panel that can close is a
-    /// change the user thinks they made.</summary>
+    /// <summary>Clicking away saves a changed name too: an edit field left open over a panel that can
+    /// close is a change the user thinks they made. An untouched or emptied field is abandoned, the
+    /// same rule as closing the panel (review F6); only Enter commits it as typed.</summary>
     private void OnRenameLostFocus(object sender, RoutedEventArgs e)
     {
-        if (sender is TextBox box)
+        if (sender is TextBox box && ViewModel is not null && box.Tag is Guid id)
         {
-            CommitRename(box);
+            ViewModel.SettleRename(id);
         }
     }
 
@@ -111,6 +112,12 @@ public partial class FlyoutWindow : Window
     public FlyoutWindow()
     {
         InitializeComponent();
+
+        // Every way the panel closes (deactivation, Escape, a second tray click from App) ends in
+        // Hide(), so visibility is the one signal that covers them all. The view-model uses it to
+        // retire a sign-in confirmation that has been read (R16) and to settle an open rename, whose
+        // LostFocus commit never fires when the window itself goes away (R36).
+        IsVisibleChanged += (_, e) => ViewModel?.OnPanelVisibilityChanged(e.NewValue is true);
     }
 
     // MARK: - Theme

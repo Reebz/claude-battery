@@ -136,10 +136,16 @@ public sealed class Notifier
         // shown" signal. If that toast latched the dedup flag, the user would be suppressed until the
         // next WEEKLY reset. Bound it: when the session window rolls over (a new ~5h window), clear
         // the latch so a still-below reading re-attempts delivery (U13/#14).
+        //
+        // The rollover test uses the same one-second tolerance as RatioMeasurement.SameWindow, not
+        // exact equality: the same reset instant arrives in different shapes (limits[] whole seconds
+        // vs five_hour.resets_at with microseconds) and the resolver can fall back between them from
+        // one poll to the next. An exact compare would read that flip as a rollover, clear the latch
+        // and repeat the weekly-low toast. A real rollover moves the reset by hours.
         var alreadyNotified = account.DidNotifyBelowThreshold;
         if (sessionResetDate is not null
             && _lastSessionReset.TryGetValue(account.Id, out var prior)
-            && prior != sessionResetDate
+            && !RatioMeasurement.SameWindow(prior, sessionResetDate)
             && alreadyNotified)
         {
             _latch.SetDidNotify(account.Id, false);

@@ -285,6 +285,11 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         {
             if (p is Guid id)
             {
+                // A switch from the panel is the user moving on from the sign-in the confirmation
+                // described. Cleared here, not in the ActiveAccountId setter: the sign-in's own switch
+                // reaches that setter on a later dispatcher turn than the confirmation, and would wipe
+                // it before it was ever read.
+                SignInConfirmation = string.Empty;
                 SwitchAccountRequested?.Invoke(id);
             }
         });
@@ -302,6 +307,15 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
 
     private Guid? _editingAccountId;
 
+    // The typed text lives here, not in the row's TextBox: the rows are rebuilt on every poll and on
+    // the minute tick, and a row whose contents change gets a fresh TextBox. Keeping the text on the
+    // view-model means a rebuild can never throw away what the user has typed (R36).
+    private string _renameText = string.Empty;
+
+    // What the edit field started with, so closing the panel can tell a real change from an
+    // untouched field (committing an untouched email would pin it as a nickname).
+    private string _renameOriginal = string.Empty;
+
     /// <summary>
     /// Raised when a rename is committed from the panel. The integration layer calls
     /// <c>AccountStore.UpdateNickname</c>; the panel never owns the store.
@@ -311,18 +325,54 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     /// <summary>The command the rename affordance on a row binds to; its parameter is the row id.</summary>
     public ICommand BeginRenameCommand { get; }
 
+    /// <summary>The account whose row is in edit mode, or null when none is.</summary>
+    public Guid? EditingAccountId => _editingAccountId;
+
+    /// <summary>
+    /// The in-progress name in the edit field. The row's TextBox binds two-way to this, so the text
+    /// survives the row being rebuilt underneath it. Setting it does not re-resolve the panel.
+    /// </summary>
+    public string RenameText
+    {
+        get => _renameText;
+        set
+        {
+            var text = value ?? string.Empty;
+            if (_renameText != text)
+            {
+                _renameText = text;
+                RaiseChanged();
+            }
+        }
+    }
+
     /// <summary>Puts one row into edit mode. Renaming from Settings alone meant leaving the panel to
     /// fix a label the panel is where you read it (R36).</summary>
     public void BeginRename(Guid id)
     {
         _editingAccountId = id;
+        // Seed the field the way the Mac editRow does: the nickname, else the email. Not the row's
+        // disambiguated label: "me@x.com (Org)" is a display aid, and an Enter on it unchanged would
+        // save the organization suffix as a nickname.
+        var account = _accounts.FirstOrDefault(a => a.Id == id);
+        _renameOriginal = account?.DisplayName ?? string.Empty;
+        _renameText = _renameOriginal;
         MaybeRefresh();
     }
 
-    /// <summary>Applies a rename and leaves edit mode.</summary>
+    /// <summary>
+    /// Applies a rename and leaves edit mode. Ignored unless <paramref name="id"/> is the row being
+    /// edited: the field's LostFocus can fire again as its row is torn down after an Enter or a
+    /// panel-close commit, and a second commit must not write the field's text a second time.
+    /// </summary>
     public void CommitRename(Guid id, string name)
     {
-        _editingAccountId = null;
+        if (_editingAccountId != id)
+        {
+            return;
+        }
+
+        EndRename();
         RenameAccountRequested?.Invoke(id, name);
         MaybeRefresh();
     }
@@ -330,8 +380,94 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
     /// <summary>Leaves edit mode without changing anything.</summary>
     public void CancelRename()
     {
-        _editingAccountId = null;
+        EndRename();
         MaybeRefresh();
+    }
+
+    private void EndRename()
+    {
+        _editingAccountId = null;
+        _renameText = string.Empty;
+        _renameOriginal = string.Empty;
+    }
+
+    /// <summary>
+    /// What closing the panel does to an open rename. Hiding the window does not move logical focus,
+    /// so the field's LostFocus never runs and the typed name would be dropped silently. Settled by
+    /// the same rule as clicking away (<see cref="SettleRename"/>).
+    /// </summary>
+    private void CommitOrCancelRenameOnClose()
+    {
+        if (_editingAccountId is { } id)
+        {
+            SettleRename(id);
+        }
+    }
+
+    /// <summary>
+    /// Ends an edit the user left without Enter or Escape: the field lost focus, or the panel closed.
+    /// The Mac has no rule for this (its edit row only commits on the checkmark or Enter), so: a
+    /// non-empty name that differs from what the field started with is saved, anything else is
+    /// abandoned. Either way the row leaves edit mode, so the panel never reopens on a half-finished
+    /// edit. An untouched field is abandoned so the seeded email is never saved as a nickname, and an
+    /// empty one because clearing a nickname should be a deliberate Enter, not a side effect of
+    /// clicking away (review F6). Ignored unless <paramref name="id"/> is the row being edited, for the
+    /// same reason as <see cref="CommitRename"/>.
+    /// </summary>
+    public void SettleRename(Guid id)
+    {
+        if (_editingAccountId != id)
+        {
+            return;
+        }
+
+        var trimmed = _renameText.Trim();
+        if (trimmed.Length > 0 && !string.Equals(trimmed, _renameOriginal.Trim(), StringComparison.Ordinal))
+        {
+            CommitRename(id, _renameText);
+        }
+        else
+        {
+            CancelRename();
+        }
+    }
+
+    // MARK: - Panel visibility
+
+    private bool _panelVisible;
+
+    // True once the confirmation has actually been on screen: the panel visible and showing the
+    // Authenticated state, which is the only one that renders it.
+    private bool _signInConfirmationSeen;
+
+    /// <summary>
+    /// The window reports every show and hide here. A hide clears a sign-in confirmation that has
+    /// been read (the Mac shows it once, as a modal alert the user dismisses, so it must not sit at
+    /// the top of the panel until restart) and settles any rename still open.
+    /// </summary>
+    public void OnPanelVisibilityChanged(bool isVisible)
+    {
+        _panelVisible = isVisible;
+        if (isVisible)
+        {
+            NoteConfirmationSeen();
+            return;
+        }
+
+        CommitOrCancelRenameOnClose();
+
+        if (_signInConfirmationSeen)
+        {
+            SignInConfirmation = string.Empty;
+        }
+    }
+
+    private void NoteConfirmationSeen()
+    {
+        if (_panelVisible && State == FlyoutContentState.Authenticated && _signInConfirmation.Length > 0)
+        {
+            _signInConfirmationSeen = true;
+        }
     }
 
     // MARK: - Account switching (U15)
@@ -491,16 +627,21 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
 
     /// <summary>
     /// What the last sign-in repaired, when it repaired more than the account it signed in to (R16).
-    /// Empty the rest of the time, which hides the line.
+    /// Empty the rest of the time, which hides the line. It stays until the panel is hidden after
+    /// showing it, or until an account is switched from the panel (see
+    /// <see cref="OnPanelVisibilityChanged"/>).
     /// </summary>
     public string SignInConfirmation
     {
         get => _signInConfirmation;
         set
         {
-            if (_signInConfirmation != value)
+            var text = value ?? string.Empty;
+            if (_signInConfirmation != text)
             {
-                _signInConfirmation = value;
+                _signInConfirmation = text;
+                // A new message has not been read yet, even if an older one had been.
+                _signInConfirmationSeen = false;
                 MaybeRefresh();
             }
         }
@@ -605,6 +746,12 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         State = ResolveState(_loginState, _isAuthenticated, _latestReading?.Snapshot, _authFailed, _consecutiveFailures, _securityDataUnreadable);
         LoginErrorMessage = _loginState.Kind == LoginStateKind.Error ? _loginState.Message ?? string.Empty : string.Empty;
 
+        // An edit whose account has gone (removed, or signed out) has nothing left to rename.
+        if (_editingAccountId is { } editing && !_accounts.Any(a => a.Id == editing))
+        {
+            EndRename();
+        }
+
         if (State == FlyoutContentState.Authenticated && _latestReading is { } reading)
         {
             BuildAuthenticatedSections(reading);
@@ -613,6 +760,8 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         {
             ClearAuthenticatedSections();
         }
+
+        NoteConfirmationSeen();
 
         RaiseChanged(null); // null property name => "all properties changed", per WPF convention.
     }
@@ -668,12 +817,12 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
         // shows with exactly 1 account and a free slot.
         ShowAccountList = _accounts.Count > 1;
         ShowAddAccountLink = _accounts.Count == 1 && _canAddAccount;
-        AccountRows.Clear();
+        var rows = new List<AccountRow>(ShowAccountList ? _accounts.Count : 0);
         if (ShowAccountList)
         {
             foreach (var account in _accounts)
             {
-                AccountRows.Add(new AccountRow
+                rows.Add(new AccountRow
                 {
                     Id = account.Id,
                     // Two organizations of one login share an address, so the rows would otherwise
@@ -682,6 +831,42 @@ public sealed class FlyoutViewModel : INotifyPropertyChanged
                     IsActive = account.Id == _activeAccountId,
                     IsEditing = account.Id == _editingAccountId,
                 });
+            }
+        }
+        SyncAccountRows(rows);
+    }
+
+    /// <summary>
+    /// Brings <see cref="AccountRows"/> in line with <paramref name="rows"/> while leaving every row
+    /// whose contents did not change as the same instance. Refresh runs on every poll and on the
+    /// minute tick; clearing and re-adding each time gave every row, the one being renamed included,
+    /// a new container and a new edit field, which dropped focus and the caret mid-word (R36). The
+    /// rows are records, so an unchanged row compares equal and is not touched. A change to the set
+    /// or order of accounts rebuilds the list, which is rare and never happens mid-keystroke.
+    /// </summary>
+    private void SyncAccountRows(IReadOnlyList<AccountRow> rows)
+    {
+        var sameShape = AccountRows.Count == rows.Count;
+        for (var i = 0; sameShape && i < rows.Count; i++)
+        {
+            sameShape = AccountRows[i].Id == rows[i].Id;
+        }
+
+        if (!sameShape)
+        {
+            AccountRows.Clear();
+            foreach (var row in rows)
+            {
+                AccountRows.Add(row);
+            }
+            return;
+        }
+
+        for (var i = 0; i < rows.Count; i++)
+        {
+            if (!AccountRows[i].Equals(rows[i]))
+            {
+                AccountRows[i] = rows[i];
             }
         }
     }

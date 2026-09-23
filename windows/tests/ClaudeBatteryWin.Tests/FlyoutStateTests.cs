@@ -723,6 +723,69 @@ public class FlyoutStateTests
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void EveryResourceKeyAWindowUses_IsDefinedWhereThatWindowCanReachIt()
+    {
+        // A missing StaticResource throws when the window loads; a missing DynamicResource fails
+        // silently and falls back to the default, which is how the sign-in confirmation ended up in
+        // black text on the dark panel (it asked for "MutedBrush", a key nothing defines). Each view
+        // can reach the keys in its own XAML and in App.xaml. A view that merges a theme dictionary
+        // can also reach the theme keys, but only those defined in EVERY theme dictionary: ApplyTheme
+        // swaps one for another, so a key only the dark one defines disappears on a flip to light.
+        // Code-behind FindResource("...") literals are held to the same rule, since they throw too.
+        var src = FindSourceDir();
+        var keyDef = new System.Text.RegularExpressions.Regex("x:Key=\"([^\"]+)\"");
+        var keyRef = new System.Text.RegularExpressions.Regex(@"\{(?:Dynamic|Static)Resource ([A-Za-z0-9_.]+)\}");
+        var findResource = new System.Text.RegularExpressions.Regex(@"FindResource\(([^)]*)\)");
+        var literal = new System.Text.RegularExpressions.Regex("\"([^\"]+)\"");
+
+        HashSet<string> Defined(string path) =>
+            keyDef.Matches(File.ReadAllText(path)).Select(m => m.Groups[1].Value).ToHashSet(StringComparer.Ordinal);
+
+        var themeFiles = Directory.GetFiles(Path.Combine(src, "Themes"), "*.xaml");
+        Assert.NotEmpty(themeFiles);
+        var themeKeys = themeFiles.Select(Defined).Aggregate((a, b) => a.Intersect(b, StringComparer.Ordinal).ToHashSet(StringComparer.Ordinal));
+        var appKeys = Defined(Path.Combine(src, "App.xaml"));
+
+        var views = Directory.GetFiles(Path.Combine(src, "Views"), "*.xaml").Append(Path.Combine(src, "App.xaml"));
+        var missing = new List<string>();
+        foreach (var view in views)
+        {
+            var xaml = File.ReadAllText(view);
+            var reachable = Defined(view);
+            reachable.UnionWith(appKeys);
+            if (xaml.Contains("component/Themes/", StringComparison.Ordinal))
+            {
+                reachable.UnionWith(themeKeys);
+            }
+
+            var used = keyRef.Matches(xaml).Select(m => m.Groups[1].Value).ToList();
+            var codeBehind = view + ".cs";
+            if (File.Exists(codeBehind))
+            {
+                used.AddRange(findResource.Matches(File.ReadAllText(codeBehind))
+                    .SelectMany(m => literal.Matches(m.Groups[1].Value))
+                    .Select(m => m.Groups[1].Value));
+            }
+
+            missing.AddRange(used.Where(k => !reachable.Contains(k)).Distinct().Select(k => $"{Path.GetFileName(view)}: {k}"));
+        }
+
+        Assert.True(missing.Count == 0, "Resource keys nothing reachable defines:\n" + string.Join("\n", missing));
+    }
+
+    [Fact]
+    public void ThemeDictionaries_DefineTheSameKeys()
+    {
+        // The flyout swaps one theme dictionary for the other live. A key present in only one of them
+        // resolves in that theme and silently falls back to the default in the other.
+        var keyDef = new System.Text.RegularExpressions.Regex("x:Key=\"([^\"]+)\"");
+        var themes = Path.Combine(FindSourceDir(), "Themes");
+        var dark = keyDef.Matches(File.ReadAllText(Path.Combine(themes, "DarkTokens.xaml"))).Select(m => m.Groups[1].Value).OrderBy(k => k, StringComparer.Ordinal);
+        var light = keyDef.Matches(File.ReadAllText(Path.Combine(themes, "LightTokens.xaml"))).Select(m => m.Groups[1].Value).OrderBy(k => k, StringComparer.Ordinal);
+        Assert.Equal(dark, light);
+    }
+
     /// <summary>
     /// Locate <c>src/ClaudeBatteryWin</c> by walking up from the test output directory (the
     /// NoSecretsGateTests pattern). Works on the CI runner and a dev box.
@@ -803,6 +866,281 @@ public class FlyoutStateTests
         vm.CanAddAccount = false;
 
         Assert.Equal(3, reevaluations); // baseline contrast: three changing setters -> three re-evals
+    }
+
+    // MARK: - Sign-in confirmation lifetime (R16)
+
+    private const string Confirmation = "Refreshed 2 organizations.";
+
+    /// Two accounts and a reading: the panel is Authenticated and the account list shows.
+    private static (FlyoutViewModel Vm, Account A, Account B) SignedInWithTwoAccounts()
+    {
+        var a = new Account { Email = "a@x.com", SessionKey = "k", OrganizationId = "o1" };
+        var b = new Account { Email = "b@x.com", SessionKey = "k", OrganizationId = "o2" };
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = true,
+            LatestReading = new UsageReading(UsageWithModels(), null),
+            Accounts = new[] { a, b },
+            ActiveAccountId = a.Id,
+        };
+        return (vm, a, b);
+    }
+
+    [Fact]
+    public void SignInConfirmation_IsClearedWhenThePanelIsHiddenAfterShowingIt()
+    {
+        var (vm, _, _) = SignedInWithTwoAccounts();
+        vm.OnPanelVisibilityChanged(true);
+        vm.SignInConfirmation = Confirmation;
+        Assert.True(vm.HasSignInConfirmation);
+
+        vm.OnPanelVisibilityChanged(false);
+
+        Assert.False(vm.HasSignInConfirmation);
+        Assert.Equal(string.Empty, vm.SignInConfirmation);
+    }
+
+    [Fact]
+    public void SignInConfirmation_SurvivesPollsAndTheMinuteTickWhileThePanelIsOpen()
+    {
+        var (vm, a, b) = SignedInWithTwoAccounts();
+        vm.OnPanelVisibilityChanged(true);
+        vm.SignInConfirmation = Confirmation;
+
+        vm.LatestReading = new UsageReading(UsageWithModels(), null); // a poll lands
+        vm.Accounts = new[] { a, b };
+        vm.ActiveAccountId = a.Id; // the sync re-sets the active id every time, unchanged
+        vm.Refresh(); // the minute tick
+
+        Assert.Equal(Confirmation, vm.SignInConfirmation);
+    }
+
+    [Fact]
+    public void SignInConfirmation_ThatArrivedWhileHidden_WaitsToBeShownBeforeItIsCleared()
+    {
+        var (vm, _, _) = SignedInWithTwoAccounts();
+        vm.SignInConfirmation = Confirmation; // panel never opened
+
+        vm.OnPanelVisibilityChanged(false);
+        Assert.Equal(Confirmation, vm.SignInConfirmation); // nobody has read it yet
+
+        vm.OnPanelVisibilityChanged(true);
+        vm.OnPanelVisibilityChanged(false);
+        Assert.False(vm.HasSignInConfirmation);
+    }
+
+    [Fact]
+    public void SignInConfirmation_SetWhileTheSigningInPanelShows_IsNotTreatedAsRead()
+    {
+        // The confirmation only renders in the Authenticated panel. Arriving while the panel still
+        // shows the spinner, then closing, must not throw it away unread.
+        var (vm, _, _) = SignedInWithTwoAccounts();
+        vm.LoginState = new LoginState(LoginStateKind.SigningIn);
+        vm.OnPanelVisibilityChanged(true);
+        vm.SignInConfirmation = Confirmation;
+        vm.OnPanelVisibilityChanged(false);
+        Assert.Equal(Confirmation, vm.SignInConfirmation);
+
+        vm.LoginState = LoginState.Idle;
+        vm.OnPanelVisibilityChanged(true);
+        vm.OnPanelVisibilityChanged(false);
+        Assert.False(vm.HasSignInConfirmation);
+    }
+
+    [Fact]
+    public void SignInConfirmation_IsClearedBySwitchingAccountFromThePanel()
+    {
+        var (vm, _, b) = SignedInWithTwoAccounts();
+        vm.OnPanelVisibilityChanged(true);
+        vm.SignInConfirmation = Confirmation;
+
+        vm.SwitchAccountCommand.Execute(b.Id);
+
+        Assert.False(vm.HasSignInConfirmation);
+    }
+
+    [Fact]
+    public void SignInConfirmation_ANewMessageAfterAReadOne_IsUnreadAgain()
+    {
+        var (vm, _, _) = SignedInWithTwoAccounts();
+        vm.OnPanelVisibilityChanged(true);
+        vm.SignInConfirmation = Confirmation;
+        vm.OnPanelVisibilityChanged(false);
+
+        vm.SignInConfirmation = "Refreshed 3 organizations."; // arrives while hidden
+        vm.OnPanelVisibilityChanged(false);
+
+        Assert.Equal("Refreshed 3 organizations.", vm.SignInConfirmation);
+    }
+
+    // MARK: - An in-progress rename survives rebuilds (R36)
+
+    [Fact]
+    public void Rename_TypedTextAndRowSurviveAPollAndTheMinuteTick()
+    {
+        var (vm, a, b) = SignedInWithTwoAccounts();
+        vm.BeginRename(a.Id);
+        vm.RenameText = "Wor";
+        var editingRow = vm.AccountRows.Single(r => r.Id == a.Id);
+        var otherRow = vm.AccountRows.Single(r => r.Id == b.Id);
+
+        vm.LatestReading = new UsageReading(UsageWithModels(), null); // a poll lands
+        vm.Accounts = new[] { a, b }; // the sync hands over a fresh list of the same accounts
+        vm.Refresh(); // the minute tick
+
+        Assert.Equal("Wor", vm.RenameText);
+        Assert.Equal(a.Id, vm.EditingAccountId);
+        // Same row instances, so the ItemsControl keeps the containers and the focused edit field.
+        Assert.Same(editingRow, vm.AccountRows.Single(r => r.Id == a.Id));
+        Assert.Same(otherRow, vm.AccountRows.Single(r => r.Id == b.Id));
+        Assert.True(editingRow.IsEditing);
+    }
+
+    [Fact]
+    public void Rename_OnlyTheChangedRowIsReplaced()
+    {
+        var (vm, a, b) = SignedInWithTwoAccounts();
+        var rowA = vm.AccountRows.Single(r => r.Id == a.Id);
+        var rowB = vm.AccountRows.Single(r => r.Id == b.Id);
+
+        vm.ActiveAccountId = b.Id;
+
+        Assert.NotSame(rowA, vm.AccountRows.Single(r => r.Id == a.Id));
+        Assert.NotSame(rowB, vm.AccountRows.Single(r => r.Id == b.Id));
+        Assert.True(vm.AccountRows.Single(r => r.Id == b.Id).IsActive);
+
+        var rowsNow = vm.AccountRows.ToList();
+        vm.BeginRename(a.Id);
+        Assert.NotSame(rowsNow[0], vm.AccountRows[0]); // a's row flipped into edit mode
+        Assert.Same(rowsNow[1], vm.AccountRows[1]); // b's row did not change
+    }
+
+    [Fact]
+    public void Rename_SeedsTheFieldWithTheNicknameElseTheEmail_LikeTheMacEditRow()
+    {
+        // Two organizations of one login share an address, so their rows read "me@x.com (Org)". The
+        // field still starts from the email: the suffix is a display aid, not part of a name.
+        var one = new Account { Email = "me@x.com", SessionKey = "k", OrganizationId = "o1", OrganizationName = "Acme" };
+        var two = new Account { Email = "me@x.com", SessionKey = "k", OrganizationId = "o2", OrganizationName = "Beta", Nickname = "Home" };
+        var vm = new FlyoutViewModel(() => Now)
+        {
+            IsAuthenticated = true,
+            LatestReading = new UsageReading(UsageWithModels(), null),
+            Accounts = new[] { one, two },
+        };
+
+        vm.BeginRename(one.Id);
+        Assert.Equal("me@x.com", vm.RenameText);
+
+        vm.BeginRename(two.Id);
+        Assert.Equal("Home", vm.RenameText);
+    }
+
+    [Fact]
+    public void Rename_HidingThePanelSavesAChangedName()
+    {
+        var (vm, a, _) = SignedInWithTwoAccounts();
+        (Guid Id, string Name)? renamed = null;
+        vm.RenameAccountRequested += (id, name) => renamed = (id, name);
+        vm.OnPanelVisibilityChanged(true);
+        vm.BeginRename(a.Id);
+        vm.RenameText = "Work";
+
+        vm.OnPanelVisibilityChanged(false);
+
+        Assert.Equal((a.Id, "Work"), renamed);
+        Assert.Null(vm.EditingAccountId);
+        Assert.False(vm.AccountRows.Single(r => r.Id == a.Id).IsEditing);
+    }
+
+    [Theory]
+    [InlineData("a@x.com")] // untouched: saving it would pin the email as a nickname
+    [InlineData("  a@x.com ")] // only whitespace changed
+    [InlineData("")] // cleared: removing a nickname takes a deliberate Enter
+    [InlineData("   ")]
+    public void Rename_HidingThePanelAbandonsAnUnchangedOrEmptyName(string typed)
+    {
+        var (vm, a, _) = SignedInWithTwoAccounts();
+        var raised = false;
+        vm.RenameAccountRequested += (_, _) => raised = true;
+        vm.OnPanelVisibilityChanged(true);
+        vm.BeginRename(a.Id);
+        vm.RenameText = typed;
+
+        vm.OnPanelVisibilityChanged(false);
+
+        Assert.False(raised);
+        Assert.Null(vm.EditingAccountId);
+        Assert.False(vm.AccountRows.Single(r => r.Id == a.Id).IsEditing);
+    }
+
+    [Theory]
+    [InlineData("a@x.com")] // untouched: the seeded email must not become a nickname (review F6)
+    [InlineData("  a@x.com ")]
+    [InlineData("")] // cleared: removing a nickname takes a deliberate Enter
+    [InlineData("   ")]
+    public void Rename_ClickingAwayAbandonsAnUnchangedOrEmptyName(string typed)
+    {
+        // The field's LostFocus settles the edit by the same rule as closing the panel.
+        var (vm, a, _) = SignedInWithTwoAccounts();
+        var raised = false;
+        vm.RenameAccountRequested += (_, _) => raised = true;
+        vm.BeginRename(a.Id);
+        vm.RenameText = typed;
+
+        vm.SettleRename(a.Id);
+
+        Assert.False(raised);
+        Assert.Null(vm.EditingAccountId);
+        Assert.False(vm.AccountRows.Single(r => r.Id == a.Id).IsEditing);
+    }
+
+    [Fact]
+    public void Rename_ClickingAwaySavesAChangedNameOnce()
+    {
+        var (vm, a, _) = SignedInWithTwoAccounts();
+        var commits = new List<(Guid Id, string Name)>();
+        vm.RenameAccountRequested += (id, name) => commits.Add((id, name));
+        vm.BeginRename(a.Id);
+        vm.RenameText = "Work";
+
+        vm.SettleRename(a.Id);
+        vm.SettleRename(a.Id); // LostFocus again as the row is torn down
+
+        Assert.Equal(new[] { (a.Id, "Work") }, commits);
+        Assert.Null(vm.EditingAccountId);
+    }
+
+    [Fact]
+    public void Rename_ASecondCommitForTheSameEdit_IsIgnored()
+    {
+        // Enter commits, then the field's LostFocus fires as its row leaves edit mode. The second
+        // commit must not write the name again.
+        var (vm, a, _) = SignedInWithTwoAccounts();
+        var commits = 0;
+        vm.RenameAccountRequested += (_, _) => commits++;
+        vm.BeginRename(a.Id);
+
+        vm.CommitRename(a.Id, "Work");
+        vm.CommitRename(a.Id, "Work");
+
+        Assert.Equal(1, commits);
+    }
+
+    [Fact]
+    public void Rename_EndsWhenTheAccountBeingRenamedIsRemoved()
+    {
+        var (vm, a, b) = SignedInWithTwoAccounts();
+        var c = new Account { Email = "c@x.com", SessionKey = "k", OrganizationId = "o3" };
+        vm.Accounts = new[] { a, b, c };
+        vm.BeginRename(c.Id);
+        vm.RenameText = "Gone soon";
+
+        vm.Accounts = new[] { a, b };
+
+        Assert.Null(vm.EditingAccountId);
+        Assert.Equal(string.Empty, vm.RenameText);
     }
 
     // MARK: - Manual/visual contracts (no headless assertion possible)

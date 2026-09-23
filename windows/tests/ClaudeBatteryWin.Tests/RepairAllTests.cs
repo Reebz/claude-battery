@@ -142,6 +142,50 @@ public sealed class RepairAllTests : IDisposable
         Assert.Empty(confirmations); // one account repaired, nothing worth a sentence
     }
 
+    [Fact]
+    public async Task AllStored_Repair_PersistsTheCapturedUserAgentOnEveryRepairedAccount()
+    {
+        // Cloudflare binds the fresh cf_clearance to the WebView2 UA it was issued to. The live
+        // transport gets that UA from OnAuthSuccess, but the next launch and every account switch
+        // seed the poll from the STORED UA, so a repair that kept the old one polled the new cookies
+        // under the wrong UA and got a 403 right after a good sign-in (U1/U2).
+        var store = NewStore();
+        store.UpsertAccount(Stored("org-a") with { UserAgent = "UA/Old" });
+        store.UpsertAccount(Stored("org-b"));
+
+        var api = new FakeClaudeApi { Orgs = new[] { Org("org-a"), Org("org-b") } };
+        var (manager, web, _, _, _) = NewManagerOn(store, api);
+
+        manager.PresentLogin();
+        web.RaiseNavigationCompleted(new[] { AuthManagerTests.Cookie("__cf_bm", "cf-new") }, ua: "UA/WebView2");
+        web.RaiseCookiesObserved(FreshCookies());
+        await manager.LastDiscoveryTask!;
+
+        Assert.All(store.Accounts, a => Assert.Equal("sk-fresh", a.SessionKey));
+        Assert.All(store.Accounts, a => Assert.Equal("UA/WebView2", a.UserAgent));
+        Assert.All(NewStore().Accounts, a => Assert.Equal("UA/WebView2", a.UserAgent)); // persisted
+    }
+
+    [Fact]
+    public async Task AddingTheSecondOrganisation_PersistsTheCapturedUserAgentOnTheRevivedSibling()
+    {
+        var store = NewStore();
+        store.UpsertAccount(Stored("org-personal") with { UserAgent = "UA/Old" });
+
+        var api = new FakeClaudeApi { Orgs = new[] { Org("org-personal"), Org("org-team") } };
+        var (manager, web, picker, _, _) = NewManagerOn(store, api);
+        picker.Choice = Org("org-team");
+
+        manager.PresentLogin();
+        web.RaiseNavigationCompleted(new[] { AuthManagerTests.Cookie("__cf_bm", "cf-new") }, ua: "UA/WebView2");
+        web.RaiseCookiesObserved(FreshCookies());
+        await manager.LastDiscoveryTask!;
+
+        var sibling = store.Accounts.First(a => a.OrganizationId == "org-personal");
+        Assert.Equal("sk-fresh", sibling.SessionKey);
+        Assert.Equal("UA/WebView2", sibling.UserAgent);
+    }
+
     private (AuthManager Manager, FakeLoginWebView WebView, FakeOrgPicker Picker, AccountStore Store, List<string> Confirmations)
         NewManagerOn(AccountStore store, FakeClaudeApi api)
     {

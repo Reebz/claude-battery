@@ -231,6 +231,33 @@ public sealed class NotifierTests
         Assert.Equal(1, sink.Delivered);
     }
 
+    [Fact]
+    public void SessionResetInADifferentShape_IsNotARollover_ButARealRolloverStillReArms()
+    {
+        var latch = new FakeLatch();
+        var sink = new FakeToastSink { Deliverable = true };
+        var notifier = new Notifier(() => true, latch, sink);
+        var account = NewAccount(threshold: 20);
+
+        // The same reset instant as limits[] sends it (whole seconds) and as five_hour.resets_at
+        // sends it (with a fractional part). The resolver can fall back between the two.
+        var wholeSeconds = new DateTimeOffset(2026, 6, 19, 12, 0, 0, TimeSpan.Zero);
+        var withFraction = wholeSeconds.AddMilliseconds(500);
+
+        Assert.True(notifier.Evaluate(account, 10, wholeSeconds)); // fire + latch
+        var latched = account with { DidNotifyBelowThreshold = true };
+
+        // Flipping between the two shapes is the same window: the latch holds, no second toast.
+        Assert.False(notifier.Evaluate(latched, 10, withFraction));
+        Assert.False(notifier.Evaluate(latched, 10, wholeSeconds));
+        Assert.Equal(1, sink.Delivered);
+        Assert.True(latch.Get(account.Id));
+
+        // A real rollover (hours later) still clears the latch and re-attempts delivery.
+        Assert.True(notifier.Evaluate(latched, 10, wholeSeconds.AddHours(5)));
+        Assert.Equal(2, sink.Delivered);
+    }
+
     // ---- notifications off by default ----
 
     [Fact]

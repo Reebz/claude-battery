@@ -28,8 +28,10 @@ public interface IClaudeApi
 
     /// <summary>
     /// Fetch and decode <c>GET /api/organizations/{organizationId}/prepaid/credits</c>. Returns
-    /// null when credits are unavailable (any non-2xx or decode failure), so the caller degrades
-    /// silently to no-credits (R13); it does not throw for the credits path.
+    /// null when credits are unavailable (any non-2xx, decode failure, transport error, or request
+    /// timeout), so the caller degrades silently to no-credits (R13); it does not throw for the
+    /// credits path. The one exception is the caller's own cancellation, which propagates as
+    /// <see cref="OperationCanceledException"/>.
     /// </summary>
     Task<Credits?> GetCreditsAsync(string organizationId, CancellationToken cancellationToken);
 
@@ -44,10 +46,15 @@ public interface IClaudeApi
 
     /// <summary>
     /// Fetch and decode <c>GET /api/organizations</c> for org discovery (U7). Never returns the
-    /// first org as a default; the caller decides auto-select vs picker. An empty list means no
-    /// organizations were found (a Pro/Max plan may be required).
+    /// first org as a default; the caller decides auto-select vs picker. An empty list means a 2xx
+    /// response whose body decoded to an empty array: no organizations were found (a Pro/Max plan
+    /// may be required). A failed request is never reported as an empty list.
     /// </summary>
     /// <exception cref="ClaudeAuthException">Thrown on a 401/403.</exception>
+    /// <exception cref="System.Net.Http.HttpRequestException">Thrown when the response is any other
+    /// non-2xx (5xx, 429, a non-403 Cloudflare challenge) or a 2xx with an empty body, so a transient
+    /// outage reads as a connection error rather than "no organizations". The message is a constant
+    /// with no body or header material (redaction gate).</exception>
     Task<IReadOnlyList<Organization>> GetOrganizationsAsync(CancellationToken cancellationToken);
 }
 

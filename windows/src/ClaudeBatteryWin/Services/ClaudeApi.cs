@@ -184,12 +184,15 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
         {
             return await SendAndDecodeAsync<Credits>(path, throwOnAuth: false, cancellationToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            throw; // Honor cancellation; only credits-specific failures degrade to null.
+            throw; // Honor the CALLER's cancellation; only credits-specific failures degrade to null.
         }
         catch
         {
+            // Includes a request timeout: SendRawAsync's own 30s deadline cancels only its linked
+            // token, so the TaskCanceledException it raises arrives with the caller's token still
+            // un-cancelled. That is a credits failure like any other and degrades to null (R13).
             return null;
         }
     }
@@ -198,7 +201,21 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
     public async Task<IReadOnlyList<Organization>> GetOrganizationsAsync(CancellationToken cancellationToken)
     {
         const string path = "/api/organizations";
-        var orgs = await SendAndDecodeAsync<List<Organization>>(path, throwOnAuth: true, cancellationToken).ConfigureAwait(false);
+        var bytes = await SendRawAsync(path, throwOnAuth: true, cancellationToken).ConfigureAwait(false);
+
+        // A null/empty body means SendRawAsync saw a non-success, non-auth status (5xx, 429, a
+        // non-403 Cloudflare challenge) or an empty 2xx - an outage, NOT "this login has no
+        // organizations". Mapping it to an empty list told the user a Pro or Max plan may be required
+        // during a transient incident. Throw a plain transport error instead so org discovery shows
+        // "Connection error" and the manual paste reports a connection error, mirroring GetUsageAsync.
+        // Only a 2xx body that decodes to an empty array is a real "no organizations". Message is a
+        // constant - no body or header material (redaction gate).
+        if (bytes is not { Length: > 0 })
+        {
+            throw new HttpRequestException("claude.ai /api/organizations returned no usable body (non-success status or empty response).");
+        }
+
+        var orgs = JsonSerializer.Deserialize<List<Organization>>(bytes, JsonOptions);
         return orgs ?? new List<Organization>();
     }
 
@@ -239,7 +256,7 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
 
     /// <summary>
     /// Build, send, and STJ-decode a GET to <paramref name="path"/> for the small, stable-shape
-    /// endpoints (credits, organizations). The polymorphic, drift-prone <c>/usage</c> body does NOT
+    /// endpoints (credits). The polymorphic, drift-prone <c>/usage</c> body does NOT
     /// use this path - it decodes via <see cref="UsageResponseParser"/> for per-field tolerance.
     /// Maps 401/403 to <see cref="ClaudeAuthException"/> when <paramref name="throwOnAuth"/> is set;
     /// any other non-2xx returns the default (null) so the caller can treat it as a soft failure.

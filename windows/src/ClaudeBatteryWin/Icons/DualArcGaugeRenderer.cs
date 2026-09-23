@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Drawing.Text;
 
 namespace ClaudeBatteryWin.Icons;
 
@@ -14,6 +15,12 @@ namespace ClaudeBatteryWin.Icons;
 /// Colours follow the tray rule, not the panel's: one base tint for the taskbar's theme, red for a
 /// side that is nearly empty, nothing else. Ported from the Mac renderer, scaled from its twenty
 /// point canvas to the cell the shell actually gives us.
+///
+/// The status states carry the Mac's glyphs so they can be told apart: "!" at half strength for an
+/// expired session or repeated failures, "..." at half strength for stale, "..." at full strength
+/// for loading, and no glyph for signed out. The Mac draws the glyph to the right of the rings on a
+/// wider canvas; the tray cell is square, so here it sits centred over the empty rings, the same way
+/// the Stacked Bars style centres it over its hollow bar.
 /// </summary>
 public sealed class DualArcGaugeRenderer : ITrayIconRenderer
 {
@@ -30,6 +37,12 @@ public sealed class DualArcGaugeRenderer : ITrayIconRenderer
 
     /// <summary>How faint the unfilled part of each ring is.</summary>
     private const int TrackAlpha = 38; // the Mac's 0.15 opacity
+
+    /// <summary>The status glyph's font size as a share of the cell, matching Stacked Bars.</summary>
+    private const float StatusGlyphRatio = 0.55f;
+
+    /// <summary>The monospace family Stacked Bars draws its status glyph in.</summary>
+    private const string GlyphFamily = "Consolas";
 
     private RenderSignature? _lastSignature;
 
@@ -61,10 +74,10 @@ public sealed class DualArcGaugeRenderer : ITrayIconRenderer
         {
             TrayRenderState.Battery battery => MakeBatteryBitmap(battery.Reading, baseColor, size),
             TrayRenderState.Unauthenticated => MakeEmptyBitmap(baseColor, size),
-            TrayRenderState.AuthFailed => MakeStatusBitmap(baseColor, 0.5, size),
-            TrayRenderState.StatusError => MakeStatusBitmap(baseColor, 0.5, size),
-            TrayRenderState.StatusStale => MakeStatusBitmap(baseColor, 0.5, size),
-            TrayRenderState.StatusLoading => MakeStatusBitmap(baseColor, 1.0, size),
+            TrayRenderState.AuthFailed => MakeStatusBitmap("!", baseColor, 0.5, size),
+            TrayRenderState.StatusError => MakeStatusBitmap("!", baseColor, 0.5, size),
+            TrayRenderState.StatusStale => MakeStatusBitmap("...", baseColor, 0.5, size),
+            TrayRenderState.StatusLoading => MakeStatusBitmap("...", baseColor, 1.0, size),
             _ => throw new ArgumentOutOfRangeException(nameof(state)),
         };
 
@@ -97,11 +110,29 @@ public sealed class DualArcGaugeRenderer : ITrayIconRenderer
         return bitmap;
     }
 
-    /// <summary>Both rings empty and faded: something is wrong, or the first poll has not answered.</summary>
-    private static Bitmap MakeStatusBitmap(Color baseColor, double alpha, int size)
+    /// <summary>
+    /// Both rings empty with the status glyph centred over them: something is wrong, or the first
+    /// poll has not answered.
+    ///
+    /// The fade goes on the glyph, not the rings. Fading the rings could not tell the states apart:
+    /// the track is already at its fixed 0.15 opacity (the Mac's <c>withAlphaComponent(0.15)</c>
+    /// replaces the faded alpha the same way), so before the glyph every status state, and signed
+    /// out, drew the same two faint rings and an expired session gave no cue in the tray.
+    /// </summary>
+    private static Bitmap MakeStatusBitmap(string text, Color baseColor, double alpha, int size)
     {
-        var faded = Color.FromArgb((int)Math.Round(255 * alpha), baseColor);
-        return MakeEmptyBitmap(faded, size);
+        var bitmap = MakeEmptyBitmap(baseColor, size);
+        using var g = NewGraphics(bitmap, clear: false);
+
+        var tinted = Color.FromArgb((int)Math.Round(255 * Math.Max(0, Math.Min(1, alpha))), baseColor);
+        using var font = new Font(GlyphFamily, size * StatusGlyphRatio, FontStyle.Regular, GraphicsUnit.Pixel);
+        using var format = (StringFormat)StringFormat.GenericTypographic.Clone();
+        format.FormatFlags |= StringFormatFlags.MeasureTrailingSpaces;
+
+        var textSize = g.MeasureString(text, font, int.MaxValue, format);
+        using var brush = new SolidBrush(tinted);
+        g.DrawString(text, font, brush, (size - textSize.Width) / 2f, (size - textSize.Height) / 2f, format);
+        return bitmap;
     }
 
     private static void DrawArc(Graphics g, int size, float radiusRatio, double percent, Color baseColor)
@@ -129,11 +160,16 @@ public sealed class DualArcGaugeRenderer : ITrayIconRenderer
 
     private static Bitmap NewCanvas(int size) => new(size, size, PixelFormat.Format32bppArgb);
 
-    private static Graphics NewGraphics(Bitmap bitmap)
+    private static Graphics NewGraphics(Bitmap bitmap, bool clear = true)
     {
         var g = Graphics.FromImage(bitmap);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.Clear(Color.Transparent);
+        // Greyscale text antialiasing, as Stacked Bars uses: ClearType fringes on a transparent canvas.
+        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        if (clear)
+        {
+            g.Clear(Color.Transparent);
+        }
         return g;
     }
 }

@@ -304,6 +304,83 @@ public sealed class AccountStoreTests : IDisposable
         Assert.Equal("UA/Old", store.Accounts[0].UserAgent); // preserved, not clobbered to null
     }
 
+    [Fact]
+    public void DuplicateOrg_Reauth_RefreshesOrganizationNameInPlace()
+    {
+        // The in-place re-auth used to drop the organization name, so the account signed in to was
+        // the one row whose name never refreshed while its repaired siblings' names did (R20).
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "old", OrganizationId = "org-A", OrganizationName = "Old Name",
+        });
+
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "new", OrganizationId = "org-A", OrganizationName = "New Name",
+        });
+
+        Assert.Equal("New Name", Assert.Single(store.Accounts).OrganizationName);
+        Assert.Equal("New Name", NewStore(new CookieContainer()).Accounts[0].OrganizationName); // persisted
+    }
+
+    [Fact]
+    public void DuplicateOrg_Reauth_WithNoOrganizationName_KeepsTheStoredOne()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "old", OrganizationId = "org-A", OrganizationName = "Acme",
+        });
+
+        store.UpsertAccount(new Account { Email = "a@x.com", SessionKey = "new", OrganizationId = "org-A" });
+
+        Assert.Equal("Acme", Assert.Single(store.Accounts).OrganizationName);
+    }
+
+    [Fact]
+    public void UpdateSession_WithUserAgent_StoresIt_AndNullKeepsTheStoredOne()
+    {
+        // A repair persists the UA its fresh cookies were captured under (cf_clearance is bound to
+        // it, and the next launch seeds the poll from the stored UA); a repair that knows no UA
+        // (a manual paste) never wipes a known-good one (U1/U2).
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "old", OrganizationId = "org-A", UserAgent = "UA/Old",
+        });
+        var id = store.Accounts[0].Id;
+
+        store.UpdateSession(id, "fresh", "sessionKey=fresh; cf_clearance=cf", userAgent: "UA/New");
+        Assert.Equal("UA/New", store.Accounts[0].UserAgent);
+        Assert.Equal("UA/New", NewStore(new CookieContainer()).Accounts[0].UserAgent); // persisted
+
+        store.UpdateSession(id, "fresher", "sessionKey=fresher; cf_clearance=cf2", userAgent: null);
+        Assert.Equal("fresher", store.Accounts[0].SessionKey);
+        Assert.Equal("UA/New", store.Accounts[0].UserAgent);
+    }
+
+    [Fact]
+    public void RepairFromSignIn_WritesSessionUserAgentOrganizationNameAndPlaceholderEmail()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(new Account
+        {
+            Email = "Account 1", SessionKey = "old", OrganizationId = "org-A", OrganizationName = "Old",
+        });
+        var account = store.Accounts[0];
+        var orgs = new[] { new Organization { Uuid = "org-A", Name = "Renamed" } };
+
+        store.RepairFromSignIn(account, orgs, "fresh", "sessionKey=fresh; cf_clearance=cf", "UA/Captured", "me@x.com");
+
+        var repaired = Assert.Single(store.Accounts);
+        Assert.Equal("fresh", repaired.SessionKey);
+        Assert.Equal("sessionKey=fresh; cf_clearance=cf", repaired.AllCookieHeader);
+        Assert.Equal("UA/Captured", repaired.UserAgent);
+        Assert.Equal("Renamed", repaired.OrganizationName);
+        Assert.Equal("me@x.com", repaired.Email); // the "Account N" placeholder was replaced
+    }
+
     // ---- corrupt blob drops the account + deletes the file + flags re-auth ----
 
     [Fact]

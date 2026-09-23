@@ -210,6 +210,11 @@ public sealed class AccountStore
                 // if a re-auth somehow carried none, so a known-good UA is never clobbered to null
                 // (mirrors UpdateSession, which preserves it).
                 UserAgent = account.UserAgent ?? existing.UserAgent,
+                // Refresh the organization's name too, the same as a sibling repaired by the same
+                // sign-in gets through UpdateOrganizationName (R20). Leaving it out meant the account
+                // signed in to was the one row whose name never updated. Coalesced like the UA, so a
+                // caller that carried no name never blanks a stored one.
+                OrganizationName = account.OrganizationName ?? existing.OrganizationName,
             };
             // Write-then-commit: persist the secret first so a save failure leaves the existing
             // account (and its still-valid jar) exactly as it was.
@@ -337,9 +342,14 @@ public sealed class AccountStore
     ///
     /// A refresh that carries only a session key swaps it into the stored header rather than
     /// replacing the header, for the reason in <see cref="HeaderReplacingSessionKey"/>.
+    ///
+    /// <paramref name="userAgent"/> is the User-Agent the fresh cookies were captured under. It is
+    /// stored with them, because Cloudflare binds <c>cf_clearance</c> to the UA it was issued to and
+    /// the next launch (or account switch) seeds the poll with the stored UA (U1/U2). Null keeps the
+    /// stored UA, so a refresh that knows no UA never wipes a known-good one.
     /// No-op when the id is unknown.
     /// </summary>
-    public void UpdateSession(Guid id, string sessionKey, string? cookieHeader = null)
+    public void UpdateSession(Guid id, string sessionKey, string? cookieHeader = null, string? userAgent = null)
     {
         var index = _accounts.FindIndex(a => a.Id == id);
         if (index < 0)
@@ -356,6 +366,8 @@ public sealed class AccountStore
                 : existing.AllCookieHeader is { Length: > 0 } stored
                     ? HeaderReplacingSessionKey(stored, sessionKey)
                     : existing.AllCookieHeader,
+            // Same coalesce as UpsertAccount's in-place path.
+            UserAgent = userAgent ?? existing.UserAgent,
         };
         // Same write-then-commit order as UpsertAccount: a failed save changes nothing in memory.
         SaveSecret(updated);
@@ -367,6 +379,33 @@ public sealed class AccountStore
             ActivateCookies(updated);
             BumpGenerationAndNotify();
         }
+    }
+
+    /// <summary>
+    /// Write everything one sign-in knows about a stored account it can reach, without making it
+    /// active (R16): the fresh session and the UA it was captured under, the plan and organization
+    /// name from this response's entry for it (R9, R20), and a real address in place of an "Account N"
+    /// placeholder (R21). The one repair write shared by the sign-in window's repair-all and sibling
+    /// paths and the manual paste's; the callers differ only in the cookie header and UA they pass.
+    /// </summary>
+    /// <param name="orgs">The organizations response; the account's own entry is looked up by id.</param>
+    /// <param name="userAgent">
+    /// The UA the fresh cookies were captured under (the WebView2 UA for the sign-in window), or null
+    /// when it is not known (a manual paste), which keeps the stored UA.
+    /// </param>
+    /// <exception cref="AccountPersistenceException">The session could not be saved.</exception>
+    public void RepairFromSignIn(
+        Account account, IReadOnlyList<Organization> orgs, string sessionKey, string? cookieHeader,
+        string? userAgent, string? resolvedEmail)
+    {
+        UpdateSession(account.Id, sessionKey, cookieHeader, userAgent);
+        var org = orgs.FirstOrDefault(o => o.Uuid == account.OrganizationId);
+        if (org is not null)
+        {
+            UpdatePlan(account.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
+            UpdateOrganizationName(account.Id, org.DisplayName);
+        }
+        AuthManager.RepairPlaceholderEmail(this, account, resolvedEmail);
     }
 
     /// <summary>

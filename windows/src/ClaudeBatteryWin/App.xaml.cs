@@ -41,7 +41,8 @@ namespace ClaudeBatteryWin;
 ///   <see cref="UpdateService"/>.</item>
 ///   <item>The crash log (<c>%LocalAppData%\ClaudeBatteryWin\crash.log</c>): the process is
 ///   windowless, so an unhandled exception would otherwise die with nothing a tester can attach.
-///   The CI smoke job and testers read this file.</item>
+///   The CI smoke job and testers read this file. The previous version's log is kept beside it as
+///   <c>crash.previous.log</c> across one update.</item>
 /// </list>
 /// </summary>
 public partial class App : Application
@@ -113,6 +114,18 @@ public partial class App : Application
     // stale read is benign (one extra backoff round before escalation).
     private bool _transportUaIsFallback;
 
+    // The User-Agent the current inner transport was built with. RebuildApiWithUserAgent skips the
+    // swap when the next UA is the same string, so an account change that keeps the UA does not
+    // dispose the transport under an in-flight request (review F2). UI-thread only.
+    private string? _transportUserAgent;
+
+    // The active account as last read on the UI thread, handed to the poller's pool-thread read
+    // (review F1). AccountStore is UI-thread-only: enumerating its live list from the poll thread
+    // races a UI-thread write. Account is an immutable record, so publishing the reference is safe;
+    // it is re-published before every poll (re)start and after every store write the poller cares
+    // about (see PublishPolledAccount).
+    private Account? _polledAccount;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         // --- Velopack MUST run first (U12) ----------------------------------------------------
@@ -127,8 +140,11 @@ public partial class App : Application
         // does NOT set Handled: the process still terminates, it just leaves a trace behind. The
         // CI smoke job and testers read %LocalAppData%\ClaudeBatteryWin\crash.log.
         // Entries written by earlier betas are unredacted, so the first launch of a build that
-        // redacts them clears whatever is already on disk before adding to it (U2).
-        TruncateUnredactedCrashLogOnce();
+        // redacts them clears whatever is already on disk before adding to it (U2). After that, the
+        // first launch of each new version moves the previous version's log to crash.previous.log
+        // rather than clearing it, so a crash from before an update survives it (review F3). The
+        // move redacts it again, in case an older unredacting beta added to it (review F2).
+        PrepareCrashLogForThisVersion();
         DispatcherUnhandledException += (_, args) => WriteCrashLog("dispatcher", args.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, args) => WriteCrashLog("appdomain", args.ExceptionObject as Exception);
         TaskScheduler.UnobservedTaskException += (_, args) =>
@@ -291,23 +307,31 @@ public partial class App : Application
         var seedUserAgent = ResolveSeedUserAgent(_accountStore.ActiveAccount);
         _transportUaIsFallback = seedUserAgent == DefaultUserAgent;
         _api = new SwappableClaudeApi(new ClaudeApi(_cookieJar, seedUserAgent));
+        _transportUserAgent = seedUserAgent;
+        PublishPolledAccount();
 
         _network = new SystemNetworkAvailability();
         _clock = new SystemSchedulerClock();
         // The poller reads the AccountStore's request generation live so a poll superseded by an
         // account switch/re-auth discards its result instead of writing onto the new account (U2).
+        // A plain int read from the poll thread: never torn, and the poller reads it under its own
+        // lock, so a stale value only ever looks superseded.
         _usageService = new UsageService(_api, _network, _clock,
             () => _accountStore?.CurrentGeneration ?? 0,
             // Live fallback-UA signal for the CF-block escalation (review F1): true only while the
             // transport runs the frozen DefaultUserAgent. Updated on every re-seed in
             // RebuildApiWithUserAgent, so a login swap or activation re-seed retires it.
             () => _transportUaIsFallback,
-            // The account being polled, read once per poll, so a reading carries the conversion for
-            // the plan that actually produced it (KTD9).
-            () => _accountStore?.ActiveAccount,
+            // The account being polled, so a reading carries the conversion for the plan that
+            // actually produced it (KTD9). UsageService reads it on the UI thread when polling starts
+            // or switches and pairs it with the org; the read is the UI-published snapshot, never
+            // the store's live list (review F1).
+            () => Volatile.Read(ref _polledAccount),
             // What the account learns about its own conversion is stored back on it, so the next
-            // launch starts from what it already knew rather than from nothing.
-            (id, measurement) => _accountStore?.UpdateRatioMeasurement(id, measurement));
+            // launch starts from what it already knew rather than from nothing. The poller calls
+            // this from a pool thread and AccountStore is UI-thread-only, so the write is posted to
+            // the dispatcher, never run inline and never a blocking Invoke (review F1).
+            PersistMeasurementOnUiThread(Dispatcher, () => _accountStore, PublishPolledAccount));
         _usageService.StateChanged += OnUsageStateChanged;
         _usageService.AuthFailureDetected += OnAuthFailureDetected;
 
@@ -395,7 +419,8 @@ public partial class App : Application
     /// the login session UA verbatim. The <see cref="SwappableClaudeApi"/> replaces its inner
     /// transport in place and disposes the prior one, so the <see cref="UsageService"/>,
     /// <see cref="ManualSignIn"/>, and <see cref="AuthManager"/> keep their single reference. Called
-    /// from <see cref="OnAuthSuccess"/> after capture, when the AuthManager has a non-null UA.
+    /// from <see cref="OnAuthSuccess"/> after capture, when the AuthManager has a non-null UA. A
+    /// re-seed with the UA the transport already runs keeps the current transport (review F2).
     /// </summary>
     private void RebuildApiWithUserAgent(string userAgent)
     {
@@ -404,12 +429,78 @@ public partial class App : Application
             return;
         }
 
-        _api.Swap(new ClaudeApi(_cookieJar, userAgent));
+        // A transport captures only its UA and the cookie jar, and the jar is the one shared
+        // instance for the life of the app. So when the UA is unchanged the new transport would be
+        // identical, and the swap would only dispose the old one under whatever request is in
+        // flight (a poll on an account that did not change then counts a hard failure, and a
+        // sign-in step fails) (review F2).
+        if (ShouldRebuildTransport(_transportUserAgent, userAgent))
+        {
+            _api.Swap(new ClaudeApi(_cookieJar, userAgent));
+            _transportUserAgent = userAgent;
+        }
+
         // Single invariant for the CF-block escalation: the flag mirrors "the transport UA is the
         // frozen fallback" and is maintained ONLY here and at the initial seed - every re-seed
         // (login swap with a captured UA, activation re-seed from a persisted UA) passes through.
         _transportUaIsFallback = userAgent == DefaultUserAgent;
     }
+
+    /// <summary>
+    /// Whether a re-seed to <paramref name="nextUserAgent"/> needs a new transport: only when it
+    /// differs (ordinal) from the UA the current transport was built with (review F2). Pure +
+    /// internal so it is unit-tested directly.
+    /// </summary>
+    internal static bool ShouldRebuildTransport(string? currentUserAgent, string nextUserAgent)
+        => !string.Equals(currentUserAgent, nextUserAgent, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Re-read the active account on the UI thread and publish it for the poller's pool-thread read
+    /// (review F1). Called before every poll (re)start and after every store write the poller reads
+    /// back (the ratio measurement, the plan fields a sign-in writes), so the snapshot is current
+    /// whenever a poll can start.
+    /// </summary>
+    private void PublishPolledAccount() => Volatile.Write(ref _polledAccount, _accountStore?.ActiveAccount);
+
+    /// <summary>
+    /// Post <paramref name="action"/> to <paramref name="dispatcher"/> without blocking the caller,
+    /// for a background thread that must reach UI-thread-only state (review F1). Returns false and
+    /// drops the action once the dispatcher is shutting down; the action re-checks on arrival, so
+    /// one posted just before shutdown does not run into a torn-down app.
+    /// </summary>
+    internal static bool PostToUiThread(Dispatcher dispatcher, Action action)
+    {
+        if (dispatcher.HasShutdownStarted)
+        {
+            return false;
+        }
+
+        dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!dispatcher.HasShutdownStarted)
+            {
+                action();
+            }
+        }));
+        return true;
+    }
+
+    /// <summary>
+    /// The poller's persistMeasurement callback (review F1). UsageService invokes it from a pool
+    /// thread, while AccountStore is UI-thread-only: its live list is enumerated by the flyout and
+    /// Settings, so writing <c>_accounts[index]</c> off-thread throws "Collection was modified" on
+    /// the UI thread, and the dispatcher crash hook does not set Handled. The write is posted to the
+    /// dispatcher instead, then <paramref name="afterWrite"/> runs on the UI thread (the app
+    /// re-publishes the polled-account snapshot so the next poll folds into the stored value).
+    /// Internal so the thread hop is tested against a real store.
+    /// </summary>
+    internal static Action<Guid, RatioMeasurement> PersistMeasurementOnUiThread(
+        Dispatcher dispatcher, Func<AccountStore?> store, Action? afterWrite = null)
+        => (id, measurement) => PostToUiThread(dispatcher, () =>
+        {
+            store()?.UpdateRatioMeasurement(id, measurement);
+            afterWrite?.Invoke();
+        });
 
     /// <summary>
     /// The User-Agent to seed the cold-start polling transport with: the restored account's captured
@@ -563,6 +654,12 @@ public partial class App : Application
     /// The flag is set whichever form was used, including a toast the platform accepted and then
     /// dropped: the alternative is re-showing it at every launch for anyone whose notifications are
     /// unreliable, which is the worse failure.
+    ///
+    /// The dialog form is posted to the dispatcher rather than shown here (review F5): a modal
+    /// MessageBox inline held OnStartup until the user dismissed it, so the system-event
+    /// subscriptions, the timers, polling and the update check all waited on a dialog. Posted, it
+    /// opens once startup has finished, and the flag is still set only after it is dismissed, so a
+    /// launch that quits before the user sees it shows it again next time.
     /// </summary>
     private void ShowFirstRunTrayNoticeIfDue()
     {
@@ -571,7 +668,8 @@ public partial class App : Application
             return;
         }
 
-        var decision = DecideTrayNotice(_settings.HasShownTrayNotice, _toastSink.ReadPermission());
+        var settings = _settings;
+        var decision = DecideTrayNotice(settings.HasShownTrayNotice, _toastSink.ReadPermission());
         switch (decision)
         {
             case TrayNotice.None:
@@ -579,14 +677,22 @@ public partial class App : Application
 
             case TrayNotice.Toast:
                 _toastSink.TryShow(TrayNoticeTitle, TrayNoticeBody, Guid.Empty);
-                break;
+                settings.HasShownTrayNotice = true;
+                return;
 
             case TrayNotice.Dialog:
-                MessageBox.Show(TrayNoticeBody, TrayNoticeTitle, MessageBoxButton.OK, MessageBoxImage.Information);
-                break;
-        }
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+                {
+                    if (Dispatcher.HasShutdownStarted)
+                    {
+                        return;
+                    }
 
-        _settings.HasShownTrayNotice = true;
+                    MessageBox.Show(TrayNoticeBody, TrayNoticeTitle, MessageBoxButton.OK, MessageBoxImage.Information);
+                    settings.HasShownTrayNotice = true;
+                }));
+                return;
+        }
     }
 
     private System.Windows.Controls.ContextMenu BuildTrayContextMenu()
@@ -855,6 +961,10 @@ public partial class App : Application
         var store = _accountStore;
         var svc = _usageService;
 
+        // Every UI-thread state change passes through here, so it also keeps the poller's account
+        // snapshot current after store edits that raise no event of their own (review F1).
+        PublishPolledAccount();
+
         // Batch all input setters so the view-model re-resolves ONCE, not once per property (U16/#26).
         using (_flyoutViewModel.SuspendRefresh())
         {
@@ -982,6 +1092,8 @@ public partial class App : Application
                 RebuildApiWithUserAgent(ua);
             }
 
+            // The sign-in may have written the plan fields; publish before the first poll reads them.
+            PublishPolledAccount();
             if (_accountStore?.ActiveAccount is { } active)
             {
                 _usageService?.StartPolling(active.OrganizationId);
@@ -1153,6 +1265,8 @@ public partial class App : Application
     {
         Dispatcher.BeginInvoke(new Action(() =>
         {
+            // Publish the new active account before SwitchAccount arms the next poll (review F1).
+            PublishPolledAccount();
             if (_accountStore?.ActiveAccount is { } active)
             {
                 // Re-seed the transport with the activated account's persisted UA (review F2): the
@@ -1165,7 +1279,9 @@ public partial class App : Application
             }
             else
             {
-                _usageService?.StopPolling();
+                // The last account was removed: forget its org and numbers too, so the tooltip
+                // stops showing them and a resume or reconnect cannot poll the deleted org (A2).
+                _usageService?.ClearAccount();
             }
 
             RefreshIcon();
@@ -1377,6 +1493,26 @@ public partial class App : Application
                 _app.ReleaseSingleInstanceLock();
             }
         }
+
+        public void ExitAfterFailedRelaunch(Exception error)
+        {
+            // The teardown already ran (no tray icon, no polling, lock released), so staying alive
+            // would leave an invisible process that cannot be quit and lets the next launch become
+            // a second instance. Record why in the crash log (the diagnostics logger was closed by
+            // the teardown), then leave through the normal Shutdown -> OnExit path. OnExit runs
+            // ReleaseForShutdown a second time, which only repeats disposals that tolerate it.
+            WriteCrashLog("update-apply", error);
+            try
+            {
+                _app.Dispatcher.Invoke(() => _app.Shutdown(1));
+            }
+            catch (Exception)
+            {
+                // The dispatcher is unreachable, so Shutdown cannot run. Exit outright rather than
+                // linger; the lock is already free and the OS reclaims the rest.
+                Environment.Exit(1);
+            }
+        }
     }
 
     // ============================================================================================
@@ -1478,34 +1614,67 @@ public partial class App : Application
         return text[starts[starts.Count - keep]..];
     }
 
+    /// <summary>The previous version's crash log, kept across one update (review F3).</summary>
+    internal const string PreviousCrashLogFileName = "crash.previous.log";
+
     /// <summary>
-    /// Clears a crash log left by a build that did not redact its entries. Runs once per build: a
-    /// marker file beside the log records which version last did it.
+    /// Runs <see cref="PrepareCrashLog"/> on the real crash-log directory. Swallows everything.
     /// </summary>
-    private static void TruncateUnredactedCrashLogOnce()
+    private static void PrepareCrashLogForThisVersion()
     {
         try
         {
-            var dir = CrashLogDirectory();
-            var marker = Path.Combine(dir, "crash-log-redacted.marker");
-            if (File.Exists(marker)
-                && string.Equals(File.ReadAllText(marker).Trim(), AppVersion, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            Directory.CreateDirectory(dir);
-            var log = Path.Combine(dir, "crash.log");
-            if (File.Exists(log))
-            {
-                File.WriteAllText(log, string.Empty);
-            }
-            File.WriteAllText(marker, AppVersion);
+            PrepareCrashLog(CrashLogDirectory(), AppVersion);
         }
         catch
         {
             // Never throw from the crash-log path.
         }
+    }
+
+    /// <summary>
+    /// Runs once per version, on its first launch: a marker file beside the log records which
+    /// version last did it.
+    ///
+    /// No marker means the log was written by a beta from before the marker existed, and those
+    /// betas did not redact their entries, so the log is cleared (U2). A marker naming another
+    /// version means the log is kept: redacted again and written to
+    /// <see cref="PreviousCrashLogFileName"/>, replacing the one kept before it, so a crash from
+    /// before an update is still there to attach (review F3). It is redacted again because the
+    /// marker only says a redacting build ran last, not that every block came from one: an older
+    /// pre-redaction beta launched in between appends raw text and never touches the marker
+    /// (review F2). Redaction is idempotent, so blocks already redacted come through unchanged. Each
+    /// file is trimmed to <see cref="MaxCrashEntries"/> blocks, so the pair stays bounded. An empty
+    /// log is not moved, so a version that never crashed does not replace the last useful one.
+    /// Internal so it is tested against a temp directory.
+    /// </summary>
+    internal static void PrepareCrashLog(string dir, string version)
+    {
+        var marker = Path.Combine(dir, "crash-log-redacted.marker");
+        var markerVersion = File.Exists(marker) ? File.ReadAllText(marker).Trim() : null;
+        if (string.Equals(markerVersion, version, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(dir);
+        var log = Path.Combine(dir, "crash.log");
+        if (File.Exists(log))
+        {
+            if (markerVersion is null)
+            {
+                File.WriteAllText(log, string.Empty);
+            }
+            else if (new FileInfo(log).Length > 0)
+            {
+                // No total cap here: the file is already bounded by TrimCrashEntries, and the
+                // per-block cap would cut a full log short.
+                var kept = RedactCrashTextInChunks(File.ReadAllText(log), int.MaxValue);
+                File.WriteAllText(Path.Combine(dir, PreviousCrashLogFileName), kept);
+                File.Delete(log);
+            }
+        }
+        File.WriteAllText(marker, version);
     }
 
     /// <summary>
@@ -1518,8 +1687,97 @@ public partial class App : Application
     /// </summary>
     internal static string FormatCrashEntry(DateTimeOffset now, string version, string source, Exception? ex)
         => $"==== {now:O} ClaudeBatteryWin v{version} [{source}] ===={Environment.NewLine}"
-            + SecretRedactor.Redact(ex?.ToString() ?? "(null exception)") + Environment.NewLine
+            + RedactCrashText(ex?.ToString() ?? "(null exception)") + Environment.NewLine
             + Environment.NewLine;
+
+    /// <summary>
+    /// The most exception text one crash block keeps, in characters. Well above a deep stack trace
+    /// with inner exceptions, and with <see cref="MaxCrashEntries"/> blocks per file it keeps the
+    /// log bounded (review F4).
+    /// </summary>
+    internal const int MaxCrashTextLength = 32 * 1024;
+
+    /// <summary>The marker appended when <see cref="MaxCrashTextLength"/> cuts the text short.</summary>
+    internal const string CrashTextTruncatedMarker = "…[TRUNCATED]";
+
+    /// <summary>
+    /// Redacts exception text in chunks of whole lines (reviews F4, F3). <see cref="SecretRedactor"/>
+    /// cuts each input at <see cref="SecretRedactor.MaxRedactInputLength"/> characters to bound its
+    /// regex cost, and a whole stack trace in one call lost most of its frames to that cut, so each
+    /// chunk stays under the cap. Chunks and not single lines, because several patterns match across
+    /// a line break: a credential key and its value ("password:" then the value on the next line),
+    /// "Bearer", and "Authorization:". A key and its value on neighbouring lines must reach the
+    /// redactor in the same call, so a chunk whose last line ends on a delimiter or a scheme word
+    /// hands that line on to the next chunk. The profile-path rewrite runs over the whole text first,
+    /// so the length measured is the length the redactor cuts at (a single line longer than the cap
+    /// is still cut, as before). The total is bounded by <see cref="MaxCrashTextLength"/>: chunks past
+    /// it are dropped, never written unredacted.
+    /// </summary>
+    internal static string RedactCrashText(string text) => RedactCrashTextInChunks(text, MaxCrashTextLength);
+
+    /// <summary>A line that ends where a value is still to come: after ":" or "=" (and an optional
+    /// opening quote), or after "Bearer", "Basic" or "Authorization" (review F3).</summary>
+    private static readonly System.Text.RegularExpressions.Regex DanglingCrashKeyRegex = new(
+        @"(?i)([:=：＝]\s*[""']?|\b(?:bearer|basic|authorization))\s*$",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// <see cref="RedactCrashText"/> with the total cap as a parameter, so the kept previous log is
+    /// redacted again without being cut short (review F2). Chunks past <paramref name="maxLength"/>
+    /// are replaced by <see cref="CrashTextTruncatedMarker"/>.
+    /// </summary>
+    internal static string RedactCrashTextInChunks(string text, int maxLength)
+    {
+        text = SecretRedactor.RedactUserPaths(text);
+        var builder = new System.Text.StringBuilder(Math.Min(text.Length, maxLength) + 64);
+        var chunk = new System.Text.StringBuilder();
+        var lastLineStart = 0;
+        var position = 0;
+
+        // False once the total cap is reached, after the marker has been written.
+        bool Flush()
+        {
+            if (chunk.Length == 0)
+            {
+                return true;
+            }
+            if (builder.Length >= maxLength)
+            {
+                builder.Append(CrashTextTruncatedMarker);
+                return false;
+            }
+            builder.Append(SecretRedactor.Redact(chunk.ToString()));
+            chunk.Clear();
+            return true;
+        }
+
+        while (position < text.Length)
+        {
+            var newline = text.IndexOf('\n', position);
+            var end = newline < 0 ? text.Length : newline + 1;
+            var lineLength = end - position;
+            if (chunk.Length > 0 && chunk.Length + lineLength > SecretRedactor.MaxRedactInputLength)
+            {
+                // A key waiting for its value goes with the value. If the pair is longer than the
+                // cap the redactor cuts the tail off, which drops text but never leaks it.
+                var lastLine = chunk.ToString(lastLineStart, chunk.Length - lastLineStart);
+                var carry = DanglingCrashKeyRegex.IsMatch(lastLine) ? lastLine : string.Empty;
+                chunk.Length -= carry.Length;
+                if (!Flush())
+                {
+                    return builder.ToString();
+                }
+                chunk.Clear().Append(carry);
+            }
+
+            lastLineStart = chunk.Length;
+            chunk.Append(text, position, lineLength);
+            position = end;
+        }
+
+        Flush();
+        return builder.ToString();
+    }
 
     // The shell's small-icon cell size (GetSystemMetrics(SM_CXSMICON)): 16 at 100% scaling, 24 at
     // 150%, 32 at 200%. Rendering at this size keeps the tray icon crisp instead of shell-upscaled.

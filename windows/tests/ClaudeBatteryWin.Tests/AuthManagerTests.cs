@@ -220,6 +220,63 @@ public sealed class AuthManagerTests : IDisposable
         Assert.False(blocked.Allowed);
     }
 
+    // ---- refused new windows: SSO popup vs ordinary link (B3) ----------------------------------
+
+    [Theory]
+    // Sign-in attempts: a hosted IdP, a company IdP subdomain, an OAuth/SAML request, a sign-in path.
+    [InlineData("https://acme.okta.com/app/xyz", NavigationBlockKind.Popup)]
+    [InlineData("https://login.microsoftonline.com/common/oauth2/v2.0/authorize", NavigationBlockKind.Popup)]
+    [InlineData("https://sso.acme.com/", NavigationBlockKind.Popup)]
+    [InlineData("https://idp.example.org/?SAMLRequest=abc", NavigationBlockKind.Popup)]
+    [InlineData("https://id.example.org/start?client_id=x&response_type=code", NavigationBlockKind.Popup)]
+    [InlineData("https://appleid.apple.com/auth/authorize?state=s", NavigationBlockKind.Popup)]
+    [InlineData("https://acme.example.com/adfs/ls/", NavigationBlockKind.Popup)]
+    // Ordinary pages: help, terms, privacy, marketing; never a sign-in.
+    [InlineData("https://claude.com/legal/terms", NavigationBlockKind.Link)]
+    [InlineData("https://www.claude.com/legal/authors", NavigationBlockKind.Link)]
+    [InlineData("https://claude.com/", NavigationBlockKind.Link)]
+    [InlineData("https://login.com/", NavigationBlockKind.Link)]
+    [InlineData("mailto:support@anthropic.com", NavigationBlockKind.Link)]
+    [InlineData("not a url", NavigationBlockKind.Link)]
+    [InlineData("", NavigationBlockKind.Link)]
+    public void ClassifyBlockedNewWindow_SplitsSignInPopupsFromOrdinaryLinks(string url, NavigationBlockKind expected) =>
+        Assert.Equal(expected, AuthManager.ClassifyBlockedNewWindow(url));
+
+    [Fact]
+    public async Task RefusedNewWindow_ToAnOrdinaryPage_IsRecordedOnly_AndCaptureStillWorks()
+    {
+        // Before B3 every refused new window counted as a popup, so a terms link opening in a new tab
+        // showed the SSO card, and the IsError guard then stopped a sign-in completed behind it from
+        // being captured until "Try again". The Mac records such links and never shows them.
+        var api = new FakeClaudeApi { Orgs = new[] { Org("org-1") } };
+        var (manager, web, _, _, store) = NewManager(api);
+        manager.PresentLogin();
+
+        var decision = web.RaiseNewWindowRequested("https://claude.com/legal/terms");
+
+        Assert.False(decision.Allowed);                                // still refused
+        Assert.Equal(LoginStateKind.Idle, manager.LoginState.Kind);    // no SSO card
+
+        web.RaiseCookiesObserved(new[] { Cookie("sessionKey", "sk-live"), Cookie("__cf_bm", "cf") });
+        await manager.LastDiscoveryTask!;
+
+        Assert.Equal(LoginStateKind.Active, manager.LoginState.Kind);
+        Assert.Single(store.Accounts);
+    }
+
+    [Fact]
+    public void RefusedNewWindow_ThatLooksLikeSso_StillShowsTheSsoMessage()
+    {
+        var (manager, web, _, _, _) = NewManager();
+        manager.PresentLogin();
+
+        var decision = web.RaiseNewWindowRequested("https://acme.okta.com/app/sso/saml");
+
+        Assert.False(decision.Allowed);
+        Assert.Equal(LoginStateKind.Error, manager.LoginState.Kind);
+        Assert.Equal(AuthManager.SsoBlockedMessage, manager.LoginState.Message);
+    }
+
     // ---- main-frame navigation gate ------------------------------------------------------------
 
     [Fact]

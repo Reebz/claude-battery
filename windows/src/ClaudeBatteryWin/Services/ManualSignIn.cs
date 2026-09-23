@@ -139,12 +139,10 @@ public sealed class ManualSignIn
     /// pending context and returns <see cref="ManualSignInResult.NeedsOrgChoiceResult"/> for the
     /// picker; <see cref="CompleteWithChosenOrg"/> finishes it.
     ///
-    /// Cookie-jar safety mirrors the Mac: the AccountStore only mutates the shared jar on a
-    /// successful add/re-auth (its <c>UpsertAccount</c> + <c>SwitchTo</c> path); a failed attempt
-    /// performs no jar mutation here, so a healthy active account is never clobbered by a failed
-    /// add. (The Mac had to snapshot-and-restore because its <c>activateCookies</c> ran before
-    /// discovery; here discovery uses the already-primed active jar and only a successful upsert
-    /// re-primes, so there is nothing to restore.)
+    /// Cookie-jar safety mirrors the Mac: discovery primes the shared jar with the PASTED credential
+    /// (issue #13), and every exit that does not end on a successful add/re-auth restores the active
+    /// account's cookies before the finally resumes polling, so a healthy active account is never
+    /// left polling with a failed or refused paste's cookies.
     ///
     /// <b>Threading.</b> Must be awaited from the UI thread. The org fetch resumes on the caller's
     /// synchronization context (<c>ConfigureAwait(true)</c>, as <see cref="AuthManager"/> does) so
@@ -207,13 +205,19 @@ public sealed class ManualSignIn
             _accountStore.RestoreActiveCookies();
             return ManualSignInResult.AuthFailed(suggestFullHeader: parsed.CookieHeader is null);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            // Only the caller's own cancel propagates. ClaudeApi's internal 30s timeout also surfaces
+            // as an OperationCanceledException (TaskCanceledException) with this token NOT cancelled;
+            // that is a network failure and falls through to the connection-error result below.
             _accountStore.RestoreActiveCookies();
             throw;
         }
         catch
         {
+            // A transport failure, a timeout, or a non-2xx non-auth answer (GetOrganizationsAsync
+            // throws HttpRequestException for those rather than returning an empty list, so a server
+            // error is never mistaken for "no organizations").
             _accountStore.RestoreActiveCookies();
             return ManualSignInResult.ConnectionError;
         }
@@ -224,8 +228,19 @@ public sealed class ManualSignIn
             return ManualSignInResult.NoOrganizations;
         }
 
-        // The signed-in address, for the account label. Never fails the paste (R19).
-        var resolvedEmail = await AuthManager.ResolveEmailAsync(_api, orgs, cancellationToken).ConfigureAwait(true);
+        // The signed-in address, for the account label. Never fails the paste (R19). It can still
+        // throw on the caller's own cancel, and the jar holds the pasted credential at that point, so
+        // restore the active account's cookies first like every other early exit.
+        string? resolvedEmail;
+        try
+        {
+            resolvedEmail = await AuthManager.ResolveEmailAsync(_api, orgs, cancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _accountStore.RestoreActiveCookies();
+            throw;
+        }
         var email = resolvedEmail ?? $"Account {_accountStore.Accounts.Count + 1}";
 
         // ONE org-selection rule, shared with the WebView path (AuthManager.SelectOrg); never blindly
@@ -249,7 +264,8 @@ public sealed class ManualSignIn
         }
 
         // Single organization: AddOrReactivate re-primes the jar to the chosen account on success,
-        // so there is nothing to restore here.
+        // and restores the active account's cookies itself on every failure (limit reached, save
+        // failed), so there is nothing to restore here.
         return AddOrReactivate(selection.Org!, parsed.SessionKey, parsed.CookieHeader, email, orgs, resolvedEmail);
     }
 
@@ -278,9 +294,10 @@ public sealed class ManualSignIn
     ///
     /// Which of two things happens next depends on whether the account being viewed was one of the
     /// repaired ones. If it was, the shared jar already holds its fresh credentials from the last
-    /// write, and polling can restart. If it was not, its own cookies go back into the jar and
-    /// polling stays stopped, because restarting it with credentials that are not its own would just
-    /// fail differently.
+    /// write, and that write's activation bump restarts its polling on them. If it was not, its own
+    /// cookies go back into the jar and nothing re-activates it, since its credentials did not
+    /// change; polling picks up again through the resume in <see cref="SignInAsync"/>'s finally,
+    /// on the viewed account's own cookies and never on the pasted ones (R22, R24).
     /// </summary>
     private ManualSignInResult RepairAllStoredOrganizations(
         IReadOnlyList<Organization> orgs, string sessionKey, string? cookieHeader, string? resolvedEmail)
@@ -297,14 +314,10 @@ public sealed class ManualSignIn
         {
             foreach (var account in toRefresh)
             {
-                _accountStore.UpdateSession(account.Id, sessionKey, cookieHeader);
-                var org = orgs.FirstOrDefault(o => o.Uuid == account.OrganizationId);
-                if (org is not null)
-                {
-                    _accountStore.UpdatePlan(account.Id, org.RateLimitTier, org.Capabilities, org.BillingType);
-                    _accountStore.UpdateOrganizationName(account.Id, org.DisplayName);
-                }
-                AuthManager.RepairPlaceholderEmail(_accountStore, account, resolvedEmail);
+                // No UA (userAgent: null): a pasted header comes from the user's own browser, whose UA
+                // this app never sees, and a new pasted account stores none either. Null keeps the
+                // stored UA rather than wiping it.
+                _accountStore.RepairFromSignIn(account, orgs, sessionKey, cookieHeader, userAgent: null, resolvedEmail);
                 refreshedIds.Add(account.Id);
             }
         }
@@ -354,6 +367,12 @@ public sealed class ManualSignIn
         {
             if (!_accountStore.UpsertAccount(account))
             {
+                // Nothing was stored, but the jar may still hold the pasted credential from discovery
+                // (the single-org route primes it and comes straight here). Put the active account's
+                // cookies back before the finally resumes polling, or the active account polls with
+                // someone else's cookies, gets a 401/403 and is marked expired. Mac parity: a
+                // limit-reached result restores (restoreActiveJar after addOrReactivateManualAccount).
+                _accountStore.RestoreActiveCookies();
                 return ManualSignInResult.AccountLimitReached;
             }
 
@@ -375,14 +394,8 @@ public sealed class ManualSignIn
                          .Where(a => a.OrganizationId != org.Uuid)
                          .ToList())
             {
-                _accountStore.UpdateSession(sibling.Id, sessionKey, cookieHeader);
-                var siblingOrg = orgs.FirstOrDefault(o => o.Uuid == sibling.OrganizationId);
-                if (siblingOrg is not null)
-                {
-                    _accountStore.UpdatePlan(sibling.Id, siblingOrg.RateLimitTier, siblingOrg.Capabilities, siblingOrg.BillingType);
-                    _accountStore.UpdateOrganizationName(sibling.Id, siblingOrg.DisplayName);
-                }
-                AuthManager.RepairPlaceholderEmail(_accountStore, sibling, resolvedEmail);
+                // No UA for a paste, as in RepairAllStoredOrganizations: the stored one is kept.
+                _accountStore.RepairFromSignIn(sibling, orgs, sessionKey, cookieHeader, userAgent: null, resolvedEmail);
                 repaired++;
             }
 

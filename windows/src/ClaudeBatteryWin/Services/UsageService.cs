@@ -102,9 +102,11 @@ public sealed class UsageService : IDisposable
     /// returns, exactly like one superseded by an account switch (KTD3).
     private int _suspendEpoch;
 
-    /// True between a sign-in's suspend and its resume. Kept so a resume that arrives after the
-    /// sign-in already restarted polling does not start a second chain.
-    private bool _suspended;
+    /// How many sign-ins currently hold polling paused (R22, KTD3). A count, not a flag: a manual
+    /// paste and a browser sign-in can overlap, and both write the shared jar, so polling restarts
+    /// only when the LAST of them resumes. A resume with nothing held is a no-op, so the count can
+    /// never go negative. Guarded by _gate.
+    private int _suspendCount;
 
     /// Completes when the poll currently running finishes. Null when none is. Tracked here rather
     /// than relying on the scheduler's chain, so a suspend waits for the real request whatever
@@ -121,11 +123,23 @@ public sealed class UsageService : IDisposable
     private string? _organizationId;
 
     /// Reads the account currently being polled, for its stored plan. Null in tests that do not
-    /// wire it, which leaves every reading unconverted.
+    /// wire it, which leaves every reading unconverted. Called ONLY from the methods that set the
+    /// organization (<see cref="SetOrganization"/>, <see cref="StartPolling"/>,
+    /// <see cref="SwitchAccount"/>), which the app calls on the UI thread. The poll itself never
+    /// calls it: the poll runs on a thread-pool thread, and the AccountStore behind this callback
+    /// is UI-thread-only, its live account list shared with the flyout and Settings.
     private readonly Func<Account?>? _activeAccount;
 
+    /// The account the current organization belongs to, captured with it under _gate (see
+    /// <see cref="SetAccount"/>). Kept as a pair so a poll can never combine one account's plan and
+    /// measurement with another account's organization, which an account switch otherwise allows:
+    /// the AccountStore changes its active account at once, while <see cref="SwitchAccount"/> runs
+    /// later through the dispatcher. Null when nothing is wired or the org has no matching account.
+    /// Guarded by _gate.
+    private Account? _account;
+
     /// Stores an account's updated ratio measurement. Null in tests that do not wire it, which
-    /// leaves the measurement in memory for that poll only.
+    /// leaves the measurement in memory for that poll only. Invoked from a thread-pool thread.
     private readonly Action<Guid, RatioMeasurement>? _persistMeasurement;
 
     /// The diagnostics sink for the per-poll plan sample. Null means the app-wide logger, resolved
@@ -145,11 +159,19 @@ public sealed class UsageService : IDisposable
     /// <param name="activeAccount">
     /// Reads the account being polled, so a reading can be paired with that account's plan. The
     /// integration root wires <c>() =&gt; accountStore.ActiveAccount</c>; tests omit it, and the
-    /// reading then carries no conversion.
+    /// reading then carries no conversion. It is read on the thread that calls
+    /// <see cref="SetOrganization"/>, <see cref="StartPolling"/> or <see cref="SwitchAccount"/> (the
+    /// UI thread in the app), never from the poll, and is kept only when its organization id
+    /// matches the one being polled.
     /// </param>
     /// <param name="persistMeasurement">
     /// Stores an account's updated ratio measurement. The integration root wires
-    /// <c>accountStore.UpdateRatioMeasurement</c>.
+    /// <c>accountStore.UpdateRatioMeasurement</c>. Invoked from a THREAD-POOL thread (the poll's
+    /// continuation), and only once the poll is confirmed current: same account generation, no
+    /// sign-in since dispatch, not cancelled. A callback that touches UI-thread-only state must
+    /// marshal itself (for example with <c>Dispatcher.BeginInvoke</c>); the poller does not rely on
+    /// the write having landed when the callback returns, because it carries the new measurement
+    /// forward in its own account snapshot.
     /// </param>
     /// <param name="diagnostics">The diagnostics sink; defaults to the app-wide logger.</param>
     public UsageService(IClaudeApi api, INetworkAvailability network, ISchedulerClock clock,
@@ -229,7 +251,8 @@ public sealed class UsageService : IDisposable
     /// arms in one call.
     public void SetOrganization(string organizationId)
     {
-        lock (_gate) { _organizationId = organizationId; }
+        var account = _activeAccount?.Invoke();
+        lock (_gate) { SetAccount(organizationId, account); }
     }
 
     /// Begin polling the given organization: prime it, run the first poll immediately (a zero-delay
@@ -237,8 +260,21 @@ public sealed class UsageService : IDisposable
     /// <c>startPolling</c> (immediate poll + scheduled next).
     public void StartPolling(string organizationId)
     {
-        lock (_gate) { _organizationId = organizationId; }
+        var account = _activeAccount?.Invoke();
+        lock (_gate) { SetAccount(organizationId, account); }
         RestartPolling();
+    }
+
+    /// <summary>
+    /// Store the organization and the account it belongs to as one pair (A1). The account is read
+    /// by the caller on its own thread (the UI thread in the app) and kept only when it really is
+    /// that organization's account, so a poll never folds one account's readings into another's
+    /// measurement. MUST be called inside the <c>_gate</c> lock.
+    /// </summary>
+    private void SetAccount(string organizationId, Account? account)
+    {
+        _organizationId = organizationId;
+        _account = account is not null && account.OrganizationId == organizationId ? account : null;
     }
 
     /// Stop polling: cancel any in-flight poll, NULL the CTS so a stopped state is detectable, and
@@ -257,6 +293,10 @@ public sealed class UsageService : IDisposable
     /// request mid-flight, reading the jar while it is being rewritten. The suspend epoch covers the
     /// other half: a response that arrives after this returns is discarded exactly like one from a
     /// superseded account switch.
+    ///
+    /// Suspends nest: every call must be paired with one <see cref="ResumePolling"/>, and polling
+    /// stays paused until the last pair closes, so an overlapping manual paste and browser sign-in
+    /// cannot resume polling while the other is still writing the jar.
     /// </summary>
     public async Task SuspendPollingAsync()
     {
@@ -265,7 +305,7 @@ public sealed class UsageService : IDisposable
         lock (_gate)
         {
             _suspendEpoch++;
-            _suspended = true;
+            _suspendCount++;
             _pollCts?.Cancel();
             _clock.Disarm();
             chained = _currentPoll;
@@ -291,18 +331,23 @@ public sealed class UsageService : IDisposable
     /// and cancellation: a missed resume leaves polling dead until the app restarts, which is worse
     /// than the race it guards against.
     ///
-    /// A no-op when polling was already restarted by a successful sign-in, and when there is no
+    /// A no-op when nothing is suspended (an unbalanced extra resume is clamped rather than driving
+    /// the count negative), while another sign-in still holds its own suspend, and when there is no
     /// account to poll.
     /// </summary>
     public void ResumePolling()
     {
         lock (_gate)
         {
-            if (!_suspended)
+            if (_suspendCount == 0)
             {
                 return;
             }
-            _suspended = false;
+            _suspendCount--;
+            if (_suspendCount > 0)
+            {
+                return; // another sign-in is still writing the jar; the last resume restarts
+            }
             if (_disposed || _organizationId is null)
             {
                 return;
@@ -322,15 +367,47 @@ public sealed class UsageService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Stop polling because no account is left (the last one was removed), and forget everything
+    /// about the account that was being polled (A2). <see cref="StopPolling"/> alone keeps the org
+    /// id and the last reading, which is right for shutdown and an auth failure but wrong here: the
+    /// tray tooltip would keep showing the removed account's numbers, and a resume, a reconnect or
+    /// a sign-in's resume would restart polling the deleted organization. With the org cleared all
+    /// three stay idle until <see cref="StartPolling"/> or <see cref="SwitchAccount"/> names a new
+    /// one. A sign-in suspend in progress is left alone; its resume still pairs off, and then finds
+    /// nothing to poll. Raises <see cref="StateChanged"/> when anything visible was cleared.
+    /// </summary>
+    public void ClearAccount()
+    {
+        StopPolling();
+
+        bool changed;
+        lock (_gate)
+        {
+            changed = LatestReading is not null || LastSuccessfulFetch is not null
+                      || ConsecutiveFailures != 0 || AuthFailed;
+            _organizationId = null;
+            _account = null;
+            LatestReading = null;
+            LastSuccessfulFetch = null;
+            ConsecutiveFailures = 0;
+            AuthFailed = false;
+            _consecutiveCfBlocks = 0;
+            _firstPollAfterResume = true;
+        }
+        if (changed) RaiseStateChanged();
+    }
+
     /// Switch to a different account: clear all prior state and restart polling for the new org.
     /// Mirrors the Mac <c>switchAccount</c>. The cookie jar priming and request-generation token
     /// bump happen in the AccountStore (U5) at the activation boundary, before this is called.
     public void SwitchAccount(string organizationId)
     {
+        var account = _activeAccount?.Invoke();
         bool changed;
         lock (_gate)
         {
-            _organizationId = organizationId;
+            SetAccount(organizationId, account);
             changed = LatestReading is not null || LastSuccessfulFetch is not null
                       || ConsecutiveFailures != 0 || AuthFailed;
             LatestReading = null;
@@ -446,19 +523,22 @@ public sealed class UsageService : IDisposable
         try
         {
             string? org;
+            Account? account;
             int dispatchGeneration;
             int dispatchSuspendEpoch;
-            // Read once, here, so the ratio applied below belongs to the same account that produced
-            // this response even if the user switches accounts while the request is in flight.
-            var account = _activeAccount?.Invoke();
             lock (_gate)
             {
+                // Read the org and its account together, once, here, so the ratio applied below
+                // belongs to the same account that produced this response even if the user switches
+                // accounts while the request is in flight. Both come from this service's own pair
+                // (A1), never from the AccountStore: this runs on a thread-pool thread.
                 org = _organizationId;
+                account = _account;
                 // Stamp this poll with the generation current at dispatch; every state write below
                 // re-reads the live generation under the lock and discards if it has advanced (U2).
                 dispatchGeneration = _currentGeneration?.Invoke() ?? 0;
                 dispatchSuspendEpoch = _suspendEpoch;
-                if (_suspended)
+                if (_suspendCount > 0)
                 {
                     return; // a sign-in is rewriting the jar; this poll must not read it
                 }
@@ -594,10 +674,7 @@ public sealed class UsageService : IDisposable
                 snapshot.WeeklyRemaining,
                 snapshot.WeeklyPercentWasRead ? snapshot.WeeklyResetDate : null);
 
-            if (account is not null && measurement != account.RatioMeasurement)
-            {
-                _persistMeasurement?.Invoke(account.Id, measurement);
-            }
+            var measurementChanged = account is not null && measurement != account.RatioMeasurement;
 
             var appliedRatio = PlanRatio.Resolve(measured: measurement.Ratio, tier: account?.RateLimitTier);
             var reading = new UsageReading(snapshot, appliedRatio);
@@ -615,6 +692,25 @@ public sealed class UsageService : IDisposable
                 ConsecutiveFailures = 0;
                 AuthFailed = false;
                 _consecutiveCfBlocks = 0; // any success breaks the CF-block streak
+
+                // Carry the new measurement forward in this service's own snapshot, so the next poll
+                // folds onto it without reading the store back. Only when the pair is still the one
+                // this poll started with: a switch that landed since then brought its own account.
+                if (measurementChanged && ReferenceEquals(_account, account))
+                {
+                    _account = account! with { RatioMeasurement = measurement };
+                }
+            }
+
+            // Persist only now that the poll is confirmed current (A1): same generation, no sign-in
+            // since dispatch, not cancelled. Persisting earlier let a superseded poll fold the old
+            // organization's readings into the stored measurement. Outside the lock, because the
+            // callback is the app's code and this lock must never wait on it. Keyed by the
+            // account's own id, so even a switch landing in between writes this account's
+            // measurement onto this account.
+            if (measurementChanged)
+            {
+                _persistMeasurement?.Invoke(account!.Id, measurement);
             }
 
             // Record what this plan reports, so plans nobody here can see can still be validated
@@ -740,7 +836,7 @@ public sealed class UsageService : IDisposable
     /// MUST be called inside the <c>_gate</c> lock.
     /// </summary>
     private bool IsSupersededBySignIn(int dispatchSuspendEpoch)
-        => _suspended || _suspendEpoch != dispatchSuspendEpoch;
+        => _suspendCount > 0 || _suspendEpoch != dispatchSuspendEpoch;
 
     private void RaiseStateChanged() => StateChanged?.Invoke(this, EventArgs.Empty);
 

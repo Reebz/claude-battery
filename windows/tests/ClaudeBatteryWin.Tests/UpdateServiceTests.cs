@@ -1,4 +1,5 @@
 using System.Net.Http;
+using System.Runtime.CompilerServices;
 using ClaudeBatteryWin.Services;
 using Xunit;
 
@@ -41,6 +42,10 @@ public class UpdateServiceTests
         public bool IsInstalled { get; set; } = true;
         public VelopackUpdateInfo? CheckResult { get; set; }
         public Exception? CheckThrows { get; set; }
+        /// What <see cref="CanApply"/> answers: false models an update whose Velopack object is gone.
+        public bool CanApplyResult { get; set; } = true;
+        /// When set, the hand-off fails after the teardown (Update.exe missing, package gone, ...).
+        public Exception? ApplyThrows { get; set; }
 
         public int CheckCount { get; private set; }
         public int DownloadCount { get; private set; }
@@ -58,6 +63,12 @@ public class UpdateServiceTests
             return Task.FromResult(CheckResult);
         }
 
+        public bool CanApply(VelopackUpdateInfo update)
+        {
+            Calls.Add("can-apply");
+            return CanApplyResult;
+        }
+
         public Task DownloadUpdatesAsync(VelopackUpdateInfo update, CancellationToken cancellationToken)
         {
             DownloadCount++;
@@ -65,10 +76,15 @@ public class UpdateServiceTests
             return Task.CompletedTask;
         }
 
+        // Returning models the real hand-off succeeding (the process would have exited here).
         public void ApplyUpdatesAndRestart(VelopackUpdateInfo update)
         {
             ApplyCount++;
             Calls.Add("apply");
+            if (ApplyThrows is not null)
+            {
+                throw ApplyThrows;
+            }
         }
     }
 
@@ -85,6 +101,8 @@ public class UpdateServiceTests
         /// <see cref="PrepareForRelaunch"/> must release it before the new instance can acquire it.
         public bool MutexHeld { get; private set; } = true;
         public int TeardownCount { get; private set; }
+        public int ExitCount { get; private set; }
+        public Exception? ExitError { get; private set; }
 
         public FakeTeardown(FakeUpdater updater)
         {
@@ -98,6 +116,13 @@ public class UpdateServiceTests
             // Mirror the real ordering: poller/WebView2 disposal happens here, then the mutex is
             // released LAST so the relaunched instance becomes primary.
             MutexHeld = false;
+        }
+
+        public void ExitAfterFailedRelaunch(Exception error)
+        {
+            ExitCount++;
+            ExitError = error;
+            _updater.Calls.Add("exit");
         }
     }
 
@@ -308,9 +333,10 @@ public class UpdateServiceTests
 
         await service.ApplyUpdateAsync();
 
-        // Load-bearing order: download the payload, tear down cleanly (mutex released last inside
-        // teardown), then hand off to Velopack's relaunch. The check is first from the earlier call.
-        Assert.Equal(new[] { "check", "download", "teardown", "apply" }, updater.Calls.ToArray());
+        // Required order: confirm the update can still be applied, download the payload, tear down
+        // cleanly (mutex released last inside teardown), then hand off to Velopack's relaunch. The
+        // check is first from the earlier call. A successful hand-off never reaches the exit path.
+        Assert.Equal(new[] { "check", "can-apply", "download", "teardown", "apply" }, updater.Calls.ToArray());
     }
 
     [Fact]
@@ -327,6 +353,170 @@ public class UpdateServiceTests
         Assert.Equal(0, teardown.TeardownCount);
         // The mutex stays held: no relaunch happened, so the running instance keeps ownership.
         Assert.True(teardown.MutexHeld);
+    }
+
+    [Fact]
+    public async Task ApplyUpdate_SuccessfulHandOff_DoesNotRunTheExitPath()
+    {
+        var pending = new VelopackUpdateInfo { Version = ANewerVersion };
+        var (service, _, teardown) = BuildService(checkResult: pending);
+        await service.CheckForUpdatesAsync();
+
+        await service.ApplyUpdateAsync();
+
+        Assert.Equal(0, teardown.ExitCount);
+    }
+
+    [Fact]
+    public async Task ApplyUpdate_WhenTheUpdateCanNoLongerBeApplied_FailsBeforeAnyTeardown()
+    {
+        // D1: the Velopack object behind the pending update is missing. Tearing down first would
+        // leave an invisible app, so the apply must refuse while the app is still whole, and throw
+        // so the Settings row says the update failed.
+        var pending = new VelopackUpdateInfo { Version = ANewerVersion };
+        var (service, updater, teardown) = BuildService(checkResult: pending);
+        await service.CheckForUpdatesAsync();
+        updater.CanApplyResult = false;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.ApplyUpdateAsync());
+
+        Assert.Equal(0, updater.DownloadCount);
+        Assert.Equal(0, teardown.TeardownCount);
+        Assert.Equal(0, updater.ApplyCount);
+        Assert.Equal(0, teardown.ExitCount);
+        Assert.True(teardown.MutexHeld);
+    }
+
+    [Fact]
+    public async Task ApplyUpdate_WhenTheHandOffThrowsAfterTeardown_ExitsThroughTheShutdownPath()
+    {
+        // D1: past the teardown there is no icon and no lock. A failed hand-off must end the process
+        // (via the teardown's exit path) instead of leaving it running unseen.
+        var pending = new VelopackUpdateInfo { Version = ANewerVersion };
+        var (service, updater, teardown) = BuildService(checkResult: pending);
+        await service.CheckForUpdatesAsync();
+        var failure = new InvalidOperationException("Update.exe missing");
+        updater.ApplyThrows = failure;
+
+        var applied = await service.ApplyUpdateAsync();
+
+        Assert.False(applied);
+        Assert.Equal(1, teardown.ExitCount);
+        Assert.Same(failure, teardown.ExitError);
+        Assert.Equal(new[] { "check", "can-apply", "download", "teardown", "apply", "exit" }, updater.Calls.ToArray());
+    }
+
+    [Fact]
+    public async Task ApplyUpdate_ARecheckThatFindsNothing_AppliesTheSnapshotItStartedWith()
+    {
+        // A daily re-check lands while the download runs and clears AvailableUpdate. The apply keeps
+        // the update object it started with and hands that same object to the updater, so its
+        // Velopack object rides along. This pins the UpdateService side only; D1 itself lived in the
+        // real updater, which the GitHubUpdater_* tests below pin (review F7).
+        var pending = new VelopackUpdateInfo { Version = ANewerVersion };
+        var updater = new FakeUpdater { CheckResult = pending };
+        var teardown = new FakeTeardown(updater);
+        var gate = new TaskCompletionSource();
+        var gated = new GatedDownloadUpdater(updater, gate.Task);
+        var service = new UpdateService(gated, teardown);
+        await service.CheckForUpdatesAsync();
+
+        var apply = service.ApplyUpdateAsync();
+        updater.CheckResult = null;
+        await service.CheckForUpdatesAsync();
+        Assert.Null(service.AvailableUpdate);
+        gate.SetResult();
+
+        Assert.True(await apply);
+        Assert.Equal(1, teardown.TeardownCount);
+        Assert.Equal(1, updater.ApplyCount);
+        Assert.Same(pending, gated.AppliedUpdate);
+        Assert.Equal(0, teardown.ExitCount);
+    }
+
+    [Fact]
+    public void GitHubUpdater_AnUpdateWithoutItsVelopackObject_CannotBeApplied()
+    {
+        // Review F7 / D1: the real updater reads the Velopack object off the update it is handed,
+        // never from a "last check" it keeps. An update without one is refused before the teardown
+        // (CanApply) and fails loudly after it (NativeOf), never a silent return.
+        foreach (var native in new object?[] { null, new object() })
+        {
+            var update = new VelopackUpdateInfo { Version = ANewerVersion, Native = native };
+
+            Assert.False(GitHubVelopackUpdater.CarriesNativeRelease(update));
+            Assert.Throws<InvalidOperationException>(() => GitHubVelopackUpdater.NativeOf(update));
+        }
+    }
+
+    [Fact]
+    public void GitHubUpdater_TheVelopackObjectRidesOnTheUpdateItCameWith()
+    {
+        // Built without its constructor: the test only needs an instance of the type, and the
+        // constructor's shape differs between Velopack versions.
+        var native = (Velopack.UpdateInfo)RuntimeHelpers.GetUninitializedObject(typeof(Velopack.UpdateInfo));
+        var update = new VelopackUpdateInfo { Version = ANewerVersion, Native = native };
+
+        Assert.True(GitHubVelopackUpdater.CarriesNativeRelease(update));
+        Assert.Same(native, GitHubVelopackUpdater.NativeOf(update));
+    }
+
+    [Fact]
+    public async Task ApplyUpdate_ASecondApplyWhileTheFirstRuns_DoesNotTearDownTwice()
+    {
+        var pending = new VelopackUpdateInfo { Version = ANewerVersion };
+        var updater = new FakeUpdater { CheckResult = pending };
+        var teardown = new FakeTeardown(updater);
+        var gate = new TaskCompletionSource();
+        var gated = new GatedDownloadUpdater(updater, gate.Task);
+        var service = new UpdateService(gated, teardown);
+        await service.CheckForUpdatesAsync();
+
+        var first = service.ApplyUpdateAsync();
+        var second = await service.ApplyUpdateAsync();
+        gate.SetResult();
+
+        Assert.False(second);
+        Assert.True(await first);
+        Assert.Equal(1, teardown.TeardownCount);
+        Assert.Equal(1, updater.ApplyCount);
+    }
+
+    /// <summary>
+    /// Wraps a <see cref="FakeUpdater"/> so the download waits on a gate the test opens, leaving a
+    /// window in which a re-check or a second apply can run.
+    /// </summary>
+    private sealed class GatedDownloadUpdater : IVelopackUpdater
+    {
+        private readonly FakeUpdater _inner;
+        private readonly Task _gate;
+
+        public GatedDownloadUpdater(FakeUpdater inner, Task gate)
+        {
+            _inner = inner;
+            _gate = gate;
+        }
+
+        public VelopackUpdateInfo? AppliedUpdate { get; private set; }
+
+        public bool IsInstalled => _inner.IsInstalled;
+
+        public Task<VelopackUpdateInfo?> CheckForUpdatesAsync(CancellationToken cancellationToken) =>
+            _inner.CheckForUpdatesAsync(cancellationToken);
+
+        public bool CanApply(VelopackUpdateInfo update) => _inner.CanApply(update);
+
+        public async Task DownloadUpdatesAsync(VelopackUpdateInfo update, CancellationToken cancellationToken)
+        {
+            await _gate.ConfigureAwait(false);
+            await _inner.DownloadUpdatesAsync(update, cancellationToken).ConfigureAwait(false);
+        }
+
+        public void ApplyUpdatesAndRestart(VelopackUpdateInfo update)
+        {
+            AppliedUpdate = update;
+            _inner.ApplyUpdatesAndRestart(update);
+        }
     }
 
     [Fact]
@@ -440,6 +630,47 @@ public class UpdateServiceTests
             await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
             return null;
         }
+
+        public bool CanApply(VelopackUpdateInfo update) => true;
+
+        public Task DownloadUpdatesAsync(VelopackUpdateInfo update, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+
+        public void ApplyUpdatesAndRestart(VelopackUpdateInfo update)
+        {
+        }
+    }
+
+    [Fact]
+    public async Task ACheckThatIgnoresTheTokenAndNeverAnswers_StillEndsOnTheFailureRow()
+    {
+        // D2: Velopack's real check takes no token at all, so a stalled GitHub request never
+        // observes the timeout. The service must stop waiting on its own and say the check failed.
+        var updater = new DeafHangingUpdater();
+        var service = new UpdateService(
+            updater, new FakeTeardown(new FakeUpdater()), checkTimeout: TimeSpan.FromMilliseconds(50));
+
+        var check = service.CheckForUpdatesAsync();
+        var finished = await Task.WhenAny(check, Task.Delay(TimeSpan.FromSeconds(10)));
+
+        Assert.Same(check, finished);
+        Assert.Null(await check);
+        Assert.True(service.LastCheckFailed);
+        Assert.False(service.HasChecked);
+        Assert.Equal("Couldn't check for updates.", UpdateService.UpdateRowText(
+            isInstalled: true, null, service.HasChecked, service.LastCheckFailed));
+    }
+
+    /// <summary>An updater whose check never completes and never looks at the token (like Velopack's).</summary>
+    private sealed class DeafHangingUpdater : IVelopackUpdater
+    {
+        private readonly TaskCompletionSource<VelopackUpdateInfo?> _never = new();
+
+        public bool IsInstalled => true;
+
+        public Task<VelopackUpdateInfo?> CheckForUpdatesAsync(CancellationToken cancellationToken) => _never.Task;
+
+        public bool CanApply(VelopackUpdateInfo update) => true;
 
         public Task DownloadUpdatesAsync(VelopackUpdateInfo update, CancellationToken cancellationToken) =>
             Task.CompletedTask;

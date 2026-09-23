@@ -56,6 +56,11 @@ public sealed class ManualSignInTests : IDisposable
         public IReadOnlyList<Organization> Orgs = Array.Empty<Organization>();
         public int? AuthFailStatus; // when set, GetOrganizationsAsync throws ClaudeAuthException
         public bool Throw;          // when set, GetOrganizationsAsync throws a transport error
+        public Exception? OrganizationsThrows; // when set, GetOrganizationsAsync throws exactly this
+
+        // When set, the account-email lookup cancels this source and then honours the token, the way
+        // a user cancel that lands during the lookup would surface.
+        public CancellationTokenSource? CancelOnEmailLookup;
 
         // When set, the sessionKey cookie present in this jar AT DISCOVERY TIME is recorded, so a
         // test can assert which credential org discovery actually used (issue #13).
@@ -77,7 +82,14 @@ public sealed class ManualSignInTests : IDisposable
         public string? AccountEmail;
 
         public Task<string?> GetAccountEmailAsync(CancellationToken cancellationToken)
-            => Task.FromResult(AccountEmail);
+        {
+            if (CancelOnEmailLookup is not null)
+            {
+                CancelOnEmailLookup.Cancel();
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            return Task.FromResult(AccountEmail);
+        }
 
         public Task<IReadOnlyList<Organization>> GetOrganizationsAsync(CancellationToken cancellationToken)
         {
@@ -93,6 +105,10 @@ public sealed class ManualSignInTests : IDisposable
             if (Throw)
             {
                 throw new HttpRequestException("simulated transport failure");
+            }
+            if (OrganizationsThrows is not null)
+            {
+                throw OrganizationsThrows;
             }
             if (CompleteOffThread)
             {
@@ -557,5 +573,171 @@ public sealed class ManualSignInTests : IDisposable
         Assert.True(uiContext.PostCount >= 1);                // the continuation was posted back...
         Assert.Equal(uiContext.ThreadId, commitThreadId);      // ...and the store mutated on that thread
         Assert.Single(store.Accounts);
+    }
+
+    // ---- every early exit after the jar is primed restores the active account's cookies ----
+
+    private static Account ActiveA() => new()
+    {
+        Email = "a@x.com", SessionKey = "sk-A", OrganizationId = "org-A",
+        AllCookieHeader = "sessionKey=sk-A; __cf_bm=cfA",
+    };
+
+    private static string? JarSessionKey(CookieContainer jar) =>
+        jar.GetCookies(new Uri("https://claude.ai"))["sessionKey"]?.Value;
+
+    [Fact]
+    public async Task SignIn_AccountLimitReached_RestoresActiveAccountJar()
+    {
+        // With the account list full, a paste for an 11th organization is refused. Discovery primed
+        // the shared jar with the pasted credential, so the refusal must put the active account's
+        // cookies back: otherwise the resumed poll sends the pasted identity's cookies for the active
+        // account, gets a 401/403 and marks a healthy account expired.
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        store.UpsertAccount(ActiveA());
+        for (var i = 1; i < AccountStore.MaxAccounts; i++)
+        {
+            store.UpsertAccount(new Account
+            {
+                Email = $"u{i}@x.com", SessionKey = $"sk-{i}", OrganizationId = $"org-{i}",
+                AllCookieHeader = $"sessionKey=sk-{i}; __cf_bm=cf{i}",
+            });
+        }
+        Assert.Equal(AccountStore.MaxAccounts, store.Accounts.Count);
+
+        var api = new FakeApi { Orgs = new[] { Org("org-new", email: "new@x.com") }, JarToObserve = jar };
+        var result = await new ManualSignIn(api, store).SignInAsync("sessionKey=sk-PASTED; __cf_bm=cfP");
+
+        Assert.Equal(ManualSignInResult.ResultKind.AccountLimitReached, result.Kind);
+        Assert.Equal("sk-PASTED", api.SessionKeySeenAtDiscovery); // the paste did prime the jar
+        Assert.Equal(AccountStore.MaxAccounts, store.Accounts.Count);
+        Assert.Equal("org-A", store.ActiveAccount!.OrganizationId);
+        Assert.Equal("sk-A", JarSessionKey(jar));
+        Assert.Equal("cfA", jar.GetCookies(new Uri("https://claude.ai"))["__cf_bm"]!.Value);
+    }
+
+    [Fact]
+    public async Task SignIn_OrganizationsServerError_IsConnectionError_RestoresActiveAccountJar()
+    {
+        // GetOrganizationsAsync throws HttpRequestException for a non-2xx, non-auth answer instead
+        // of returning an empty list, so a server error is a connection error, never "no
+        // organizations".
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        store.UpsertAccount(ActiveA());
+
+        var api = new FakeApi
+        {
+            Orgs = new[] { Org("org-B") },
+            OrganizationsThrows = new HttpRequestException("Organizations request failed."),
+        };
+        var result = await new ManualSignIn(api, store).SignInAsync("sessionKey=sk-B; __cf_bm=cfB");
+
+        Assert.Equal(ManualSignInResult.ResultKind.ConnectionError, result.Kind);
+        Assert.Single(store.Accounts);
+        Assert.Equal("sk-A", JarSessionKey(jar));
+    }
+
+    [Fact]
+    public async Task SignIn_OrganizationsTimeout_WithTokenNotCancelled_IsConnectionError_NotACancel()
+    {
+        // ClaudeApi's internal 30s timeout surfaces as a TaskCanceledException while the caller's
+        // token is NOT cancelled. That is a network failure, so it must map to ConnectionError rather
+        // than propagate as if the user had cancelled.
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        store.UpsertAccount(ActiveA());
+
+        var api = new FakeApi { OrganizationsThrows = new TaskCanceledException("The request timed out.") };
+        using var cts = new CancellationTokenSource();
+        var result = await new ManualSignIn(api, store).SignInAsync("sessionKey=sk-B; __cf_bm=cfB", cts.Token);
+
+        Assert.False(cts.IsCancellationRequested);
+        Assert.Equal(ManualSignInResult.ResultKind.ConnectionError, result.Kind);
+        Assert.Equal("sk-A", JarSessionKey(jar));
+    }
+
+    [Fact]
+    public async Task SignIn_UserCancelDuringDiscovery_Propagates_RestoresActiveAccountJar()
+    {
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        store.UpsertAccount(ActiveA());
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var api = new FakeApi { OrganizationsThrows = new OperationCanceledException(cts.Token) };
+        var resumed = 0;
+        var manual = new ManualSignIn(api, store) { OnResumePolling = () => resumed++ };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => manual.SignInAsync("sessionKey=sk-B; __cf_bm=cfB", cts.Token));
+
+        Assert.Equal("sk-A", JarSessionKey(jar));
+        Assert.Equal(1, resumed); // polling still resumes on the cancel exit
+    }
+
+    [Fact]
+    public async Task SignIn_UserCancelDuringEmailLookup_Propagates_RestoresActiveAccountJar()
+    {
+        // The email lookup runs after discovery primed the jar with the pasted credential; a user
+        // cancel there must restore the active account's cookies before it propagates.
+        var jar = new CookieContainer();
+        var store = NewStore(jar);
+        store.UpsertAccount(ActiveA());
+
+        using var cts = new CancellationTokenSource();
+        var api = new FakeApi { Orgs = new[] { Org("org-B") }, CancelOnEmailLookup = cts, JarToObserve = jar };
+        var manual = new ManualSignIn(api, store);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => manual.SignInAsync("sessionKey=sk-B; __cf_bm=cfB", cts.Token));
+
+        Assert.Equal("sk-B", api.SessionKeySeenAtDiscovery);
+        Assert.Single(store.Accounts);
+        Assert.Equal("sk-A", JarSessionKey(jar));
+    }
+
+    // ---- what a paste writes onto accounts it already knows ----
+
+    [Fact]
+    public async Task SignIn_ExistingOrg_Reauth_RefreshesOrganizationName()
+    {
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "sk-old", OrganizationId = "o1", OrganizationName = "Old Name",
+        });
+
+        var api = new FakeApi { Orgs = new[] { Org("o1", name: "New Name", email: "a@x.com") } };
+        var result = await new ManualSignIn(api, store).SignInAsync("sessionKey=sk-new; __cf_bm=cf-new");
+
+        Assert.Equal(ManualSignInResult.ResultKind.Success, result.Kind);
+        Assert.Equal("New Name", Assert.Single(store.Accounts).OrganizationName);
+    }
+
+    [Fact]
+    public async Task SignIn_RepairWithoutUserAgent_KeepsTheStoredUserAgent()
+    {
+        // A pasted header comes from the user's own browser, whose UA this app never sees. The
+        // repair writes the fresh cookies but must not wipe the UA each account already has.
+        var store = NewStore(new CookieContainer());
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "sk-old", OrganizationId = "org-a", UserAgent = "UA/Stored-A",
+        });
+        store.UpsertAccount(new Account
+        {
+            Email = "a@x.com", SessionKey = "sk-old", OrganizationId = "org-b", UserAgent = "UA/Stored-B",
+        });
+
+        var api = new FakeApi { Orgs = new[] { Org("org-a"), Org("org-b") } };
+        var result = await new ManualSignIn(api, store).SignInAsync("sessionKey=sk-pasted; __cf_bm=cf-new");
+
+        Assert.Equal(ManualSignInResult.ResultKind.AlreadySignedInAllOrgs, result.Kind);
+        Assert.All(store.Accounts, a => Assert.Equal("sk-pasted", a.SessionKey));
+        Assert.Equal("UA/Stored-A", store.Accounts.First(a => a.OrganizationId == "org-a").UserAgent);
+        Assert.Equal("UA/Stored-B", store.Accounts.First(a => a.OrganizationId == "org-b").UserAgent);
     }
 }

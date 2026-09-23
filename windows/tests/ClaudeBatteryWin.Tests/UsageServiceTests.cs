@@ -878,6 +878,310 @@ public class UsageServiceTests
         Assert.Null(service.LatestUsage);
         Assert.Equal(0, service.ConsecutiveFailures);
     }
+
+    // MARK: - Account pairing and measurement persistence (A1)
+
+    private static readonly DateTimeOffset SessionReset = new(2026, 6, 19, 15, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset WeeklyReset = new(2026, 6, 23, 9, 0, 0, TimeSpan.Zero);
+
+    /// A response whose percentages were really read and carry reset times, so each poll folds a
+    /// real sample into the ratio measurement.
+    private static UsageApiResponse ReadingWithResets(double sessionUsed, double weeklyUsed) => new()
+    {
+        Limits = new[]
+        {
+            new UsageLimit { Kind = "session", Percent = sessionUsed, ResetsAt = SessionReset },
+            new UsageLimit { Kind = "weekly_all", Percent = weeklyUsed, ResetsAt = WeeklyReset },
+        },
+    };
+
+    /// A private, disabled logger: a poll with an account emits a plan sample, and it must not land
+    /// in the app-wide logger another test class may have installed.
+    private static readonly IDiagnosticsLogger Quiet = new DiagnosticsLogger(settings: null, enabledOverride: false);
+
+    private static Account AccountFor(string organizationId, string? tier = null) => new()
+    {
+        Email = "someone@example.com",
+        SessionKey = "sk-test",
+        OrganizationId = organizationId,
+        RateLimitTier = tier,
+    };
+
+    [Fact]
+    public async Task Poll_NeverCallsTheActiveAccountSource_ItUsesTheAccountCapturedWithTheOrg()
+    {
+        // The source behind activeAccount is the UI-thread-only AccountStore, and the poll runs on a
+        // thread-pool thread. It may only be read where the org is set (on the UI thread in the app).
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi();
+        var account = AccountFor(Org);
+        var reads = 0;
+
+        using var service = new UsageService(api, net, clock,
+            activeAccount: () => { reads++; return account; }, diagnostics: Quiet);
+        service.StartPolling(Org);
+        Assert.Equal(1, reads);
+
+        await service.PollUsageAsync(CancellationToken.None);
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.Equal(1, reads);
+        Assert.Equal(2, api.UsageCallCount);
+    }
+
+    [Fact]
+    public async Task AnAccountFromAnotherOrg_IsNeverPairedWithThePolledOrg()
+    {
+        // The store switched its active account ahead of the poller (SwitchTo is immediate, the
+        // poller's SwitchAccount arrives later through the dispatcher). The org being polled must
+        // not be paired with that other account's plan, and its readings must not be stored on it.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi();
+        var other = AccountFor("org-other", tier: "default_claude_pro");
+        var persisted = new List<(Guid Id, RatioMeasurement Measurement)>();
+
+        using var service = new UsageService(api, net, clock,
+            activeAccount: () => other,
+            persistMeasurement: (id, m) => persisted.Add((id, m)), diagnostics: Quiet);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.NotNull(service.LatestReading);
+        Assert.Null(service.LatestReading!.PlanRatio); // the other account's plan was not applied
+        Assert.Empty(persisted);
+    }
+
+    [Fact]
+    public async Task SwitchAccount_PairsTheNewOrgWithTheNewAccount()
+    {
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi();
+        var first = AccountFor(Org);
+        var second = AccountFor("org-456");
+        var active = first;
+        var persisted = new List<(Guid Id, RatioMeasurement Measurement)>();
+
+        using var service = new UsageService(api, net, clock,
+            activeAccount: () => active,
+            persistMeasurement: (id, m) => persisted.Add((id, m)), diagnostics: Quiet);
+        service.StartPolling(Org);
+        await service.PollUsageAsync(CancellationToken.None);
+
+        active = second;
+        service.SwitchAccount(second.OrganizationId);
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.Equal(new[] { first.Id, second.Id }, persisted.Select(p => p.Id).ToArray());
+    }
+
+    [Fact]
+    public async Task APollSupersededByAnAccountSwitch_NeverPersistsItsMeasurement()
+    {
+        // The measurement used to be stored before the generation re-check, so a poll overtaken by a
+        // switch still folded the old org's reading into the stored measurement.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var generation = 1;
+        var api = new FakeApi
+        {
+            UsageBehavior = _ =>
+            {
+                generation = 2; // a switch lands while the request is in flight
+                return ReadingWithResets(10, 20);
+            },
+        };
+        var persisted = new List<(Guid Id, RatioMeasurement Measurement)>();
+
+        using var service = new UsageService(api, net, clock, () => generation,
+            activeAccount: () => AccountFor(Org),
+            persistMeasurement: (id, m) => persisted.Add((id, m)), diagnostics: Quiet);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.Null(service.LatestReading);
+        Assert.Empty(persisted);
+    }
+
+    [Fact]
+    public async Task APollOvertakenByASignIn_NeverPersistsItsMeasurement()
+    {
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        UsageService? service = null;
+        Task? suspend = null;
+        var api = new FakeApi
+        {
+            UsageBehavior = _ =>
+            {
+                suspend = service!.SuspendPollingAsync(); // a sign-in starts mid-request
+                return ReadingWithResets(10, 20);
+            },
+        };
+        var persisted = new List<(Guid Id, RatioMeasurement Measurement)>();
+
+        service = new UsageService(api, net, clock,
+            activeAccount: () => AccountFor(Org),
+            persistMeasurement: (id, m) => persisted.Add((id, m)), diagnostics: Quiet);
+        using (service)
+        {
+            service.StartPolling(Org);
+
+            await service.PollUsageAsync(CancellationToken.None);
+            await suspend!;
+
+            Assert.Null(service.LatestReading);
+            Assert.Empty(persisted);
+        }
+    }
+
+    [Fact]
+    public async Task ACurrentPoll_Persists_AndTheNextPollFoldsOntoIt_WithoutTheStoreWriteLanding()
+    {
+        // The app marshals the persist onto the UI thread, so the store may not have the new
+        // measurement when the next poll runs. The poller carries it forward itself, so the second
+        // interval is still measured against the first reading, not against nothing.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi { UsageBehavior = _ => ReadingWithResets(10, 20) };
+        var account = AccountFor(Org); // the "store" never changes
+        var persisted = new List<(Guid Id, RatioMeasurement Measurement)>();
+
+        using var service = new UsageService(api, net, clock,
+            activeAccount: () => account,
+            persistMeasurement: (id, m) => persisted.Add((id, m)), diagnostics: Quiet);
+        service.StartPolling(Org);
+
+        await service.PollUsageAsync(CancellationToken.None);
+        api.UsageBehavior = _ => ReadingWithResets(15, 22);
+        await service.PollUsageAsync(CancellationToken.None);
+
+        Assert.Equal(2, persisted.Count);
+        Assert.All(persisted, p => Assert.Equal(account.Id, p.Id));
+        Assert.Equal(5, persisted[1].Measurement.SessionPointsConsumed, 6);
+        Assert.Equal(2, persisted[1].Measurement.WeeklyPointsConsumed, 6);
+    }
+
+    // MARK: - Last account removed (A2)
+
+    [Fact]
+    public async Task ClearAccount_ForgetsTheRemovedAccountsReading_AndNotifies()
+    {
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi();
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+        await service.PollUsageAsync(CancellationToken.None);
+        Assert.NotNull(service.LatestReading);
+
+        var notified = false;
+        service.StateChanged += (_, _) => notified = true;
+        service.ClearAccount();
+
+        Assert.True(notified); // the app re-renders the tooltip from the cleared state
+        Assert.Null(service.LatestReading);
+        Assert.Null(service.LastSuccessfulFetch);
+        Assert.Equal(0, service.ConsecutiveFailures);
+        Assert.False(service.AuthFailed);
+        Assert.False(clock.IsArmed);
+    }
+
+    [Fact]
+    public async Task AfterClearAccount_ResumeReconnectAndSignInResume_NeverPollTheRemovedOrg()
+    {
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi();
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+        await service.PollUsageAsync(CancellationToken.None);
+        service.ClearAccount();
+
+        service.HandleResume();
+        Assert.False(clock.IsArmed);
+
+        net.IsAvailable = false;
+        net.IsAvailable = true;
+        Assert.False(clock.IsArmed);
+
+        await service.SuspendPollingAsync();
+        service.ResumePolling();
+        Assert.False(clock.IsArmed);
+
+        await service.PollUsageAsync(CancellationToken.None);
+        Assert.Equal(1, api.UsageCallCount); // only the poll from before the removal
+        Assert.Null(service.LatestReading);
+    }
+
+    [Fact]
+    public async Task StopPolling_StillKeepsState_ForShutdownAndAuthFailure()
+    {
+        // StopPolling's own contract is unchanged: only ClearAccount forgets the account.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi();
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+        await service.PollUsageAsync(CancellationToken.None);
+        service.StopPolling();
+
+        Assert.NotNull(service.LatestReading);
+        service.HandleResume();
+        Assert.True(clock.IsArmed); // the org is still known, so a wake re-polls it
+    }
+
+    // MARK: - Nested sign-in suspends (A3)
+
+    [Fact]
+    public async Task OverlappingSignIns_PollingResumesOnlyWhenTheLastOneFinishes()
+    {
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi();
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+
+        await service.SuspendPollingAsync(); // browser sign-in
+        await service.SuspendPollingAsync(); // manual paste, overlapping it
+
+        service.ResumePolling(); // the first to finish
+        Assert.False(clock.IsArmed);
+        await service.PollUsageAsync(CancellationToken.None);
+        Assert.Equal(0, api.UsageCallCount); // the other is still writing the jar
+
+        service.ResumePolling(); // the last to finish
+        Assert.True(clock.IsArmed);
+        await service.PollUsageAsync(CancellationToken.None);
+        Assert.Equal(1, api.UsageCallCount);
+    }
+
+    [Fact]
+    public async Task AnUnbalancedResume_CannotCancelOutTheNextSuspend()
+    {
+        // Extra resumes are clamped at zero, so a later sign-in's suspend still holds polling off.
+        var clock = new FakeClock();
+        var net = new FakeNetwork { IsAvailable = true };
+        var api = new FakeApi();
+
+        using var service = new UsageService(api, net, clock);
+        service.StartPolling(Org);
+
+        service.ResumePolling();
+        service.ResumePolling();
+        await service.SuspendPollingAsync();
+
+        await service.PollUsageAsync(CancellationToken.None);
+        Assert.Equal(0, api.UsageCallCount);
+    }
 }
 
 // MARK: - Test doubles

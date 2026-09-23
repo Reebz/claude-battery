@@ -61,6 +61,9 @@ public sealed class UpdateService
 
     private readonly TimeSpan _checkTimeout;
 
+    // 1 while an ApplyUpdateAsync is between its checks and the hand-off.
+    private int _applying;
+
     /// <param name="checkTimeout">How long one check may run. Only the tests pass this; production
     /// takes <see cref="CheckTimeout"/>.</param>
     public UpdateService(IVelopackUpdater updater, IUpdateTeardown teardown, TimeSpan? checkTimeout = null)
@@ -98,7 +101,11 @@ public sealed class UpdateService
 
         try
         {
-            var info = await _updater.CheckForUpdatesAsync(linked.Token).ConfigureAwait(false);
+            // WaitAsync, not just the token: Velopack's own check takes no token, so an updater
+            // that cannot observe it would otherwise hold this await past the timeout forever and
+            // the timeout branch below could never run (R47).
+            var info = await _updater.CheckForUpdatesAsync(linked.Token)
+                .WaitAsync(linked.Token).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
 
             // Guard the announcement with our own component-wise comparison (R47): a release named
@@ -239,6 +246,16 @@ public sealed class UpdateService
     /// here, the new instance would see <c>createdNew == false</c>, signal the (dying) old instance,
     /// and exit -- the double-instance bounce. <see cref="IUpdateTeardown.PrepareForRelaunch"/> owns
     /// that exact sequence so it is testable in isolation.
+    ///
+    /// The teardown is one-way: after it the tray icon is gone, polling is stopped and the lock is
+    /// free. So the preconditions the updater can report (a pending update, <c>CanApply</c>) are
+    /// checked BEFORE it, and throw there (the callers already turn a throw into the "Update failed"
+    /// row) while the app is still whole. Failures only the hand-off itself can reveal (a missing
+    /// Update.exe, a refused process start) still happen after the teardown, which is why the next
+    /// step exists. If
+    /// the hand-off itself fails after the teardown, the process is ended through
+    /// <see cref="IUpdateTeardown.ExitAfterFailedRelaunch"/> rather than left running with no icon,
+    /// no window and no lock, where the next launch would become a second instance.
     /// </summary>
     public async Task<bool> ApplyUpdateAsync(CancellationToken cancellationToken = default)
     {
@@ -247,19 +264,53 @@ public sealed class UpdateService
             return false;
         }
 
-        var update = AvailableUpdate;
+        // One apply at a time: a second click on the flyout link while the first is downloading
+        // must not run the teardown and the hand-off twice.
+        if (Interlocked.Exchange(ref _applying, 1) == 1)
+        {
+            return false;
+        }
 
-        // Background download. Velopack is a no-op if the delta is already present on disk.
-        await _updater.DownloadUpdatesAsync(update, cancellationToken).ConfigureAwait(false);
-        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            // Captured once. A re-check that lands mid-apply may replace or clear AvailableUpdate,
+            // but this snapshot carries its own Velopack object, so it stays applicable.
+            var update = AvailableUpdate;
 
-        // Clean teardown BEFORE relaunch: stop poller, dispose WebView2 environments, release mutex.
-        // After this returns the single-instance mutex is free for the new process to acquire.
-        _teardown.PrepareForRelaunch();
+            if (!_updater.CanApply(update))
+            {
+                // Nothing torn down yet: the app keeps running and the row says the update failed.
+                throw new InvalidOperationException("The pending update can no longer be applied.");
+            }
 
-        // Hands off to the new version. This call exits the current process; nothing after it runs.
-        _updater.ApplyUpdatesAndRestart(update);
-        return true;
+            // Background download. Velopack is a no-op if the delta is already present on disk.
+            await _updater.DownloadUpdatesAsync(update, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Clean teardown BEFORE relaunch: stop poller, dispose WebView2 environments, release mutex.
+            // After this returns the single-instance mutex is free for the new process to acquire.
+            _teardown.PrepareForRelaunch();
+
+            try
+            {
+                // Hands off to the new version. On success this exits the current process and
+                // nothing after it runs.
+                _updater.ApplyUpdatesAndRestart(update);
+            }
+            catch (Exception ex)
+            {
+                // Past the point of no return: the icon and the lock are already gone. End the
+                // process cleanly so the user can simply launch it again.
+                _teardown.ExitAfterFailedRelaunch(ex);
+                return false;
+            }
+
+            return true;
+        }
+        finally
+        {
+            Volatile.Write(ref _applying, 0);
+        }
     }
 }
 
@@ -278,6 +329,13 @@ public interface IUpdateTeardown
     /// Must leave the single-instance mutex released so the relaunched process becomes the primary.
     /// </summary>
     void PrepareForRelaunch();
+
+    /// <summary>
+    /// The hand-off failed after <see cref="PrepareForRelaunch"/> already ran. Record why, then end
+    /// the process through the app's normal shutdown so no icon-less, lock-less copy keeps running
+    /// and the user can relaunch.
+    /// </summary>
+    void ExitAfterFailedRelaunch(Exception error);
 }
 
 /// <summary>
@@ -293,10 +351,15 @@ public interface IVelopackUpdater
     /// Check the source for a newer release; null means up to date.
     Task<VelopackUpdateInfo?> CheckForUpdatesAsync(CancellationToken cancellationToken);
 
+    /// True when <paramref name="update"/> still carries what the updater needs to download and
+    /// apply it. Asked before the teardown, so a refusal leaves the app running.
+    bool CanApply(VelopackUpdateInfo update);
+
     /// Download the given update's assets into the local package cache.
     Task DownloadUpdatesAsync(VelopackUpdateInfo update, CancellationToken cancellationToken);
 
-    /// Stage the update and relaunch into the new version. Exits the current process.
+    /// Stage the update and relaunch into the new version. Exits the current process on success
+    /// and throws on failure; it never returns without having handed off.
     void ApplyUpdatesAndRestart(VelopackUpdateInfo update);
 }
 
@@ -312,17 +375,25 @@ public sealed record VelopackUpdateInfo
 
     /// Release notes (markdown/text) for the available release, shown in the update row.
     public string? ReleaseNotes { get; init; }
+
+    /// The updater's own object for this release (Velopack's <c>UpdateInfo</c> in production).
+    /// Carried on the projection rather than kept as "the last check's result" inside the updater,
+    /// so a re-check that finds nothing cannot pull it out from under an apply already under way.
+    internal object? Native { get; init; }
 }
 
 /// <summary>
 /// Production <see cref="IVelopackUpdater"/> bound to the GitHub Releases source -- the existing
 /// <c>gh release</c> pipeline (parity with the Mac <c>UpdateChecker.releasesURL</c> repo). Holds
-/// the real <see cref="UpdateManager"/> and the most recent native <c>UpdateInfo</c> so the apply
-/// path can pass Velopack's own object back, while the public surface stays on the test-friendly
-/// <see cref="VelopackUpdateInfo"/> projection.
+/// the real <see cref="UpdateManager"/>; each check's native <c>UpdateInfo</c> rides on the
+/// <see cref="VelopackUpdateInfo"/> it returns (<see cref="VelopackUpdateInfo.Native"/>) so the
+/// apply path can pass Velopack's own object back, while the public surface stays on the
+/// test-friendly projection.
 ///
-/// Not exercised by unit tests (it touches GitHub + disk + the process); <see cref="UpdateService"/>
-/// is tested against a fake <see cref="IVelopackUpdater"/>.
+/// The manager calls are not exercised by unit tests (they touch GitHub + disk + the process);
+/// <see cref="UpdateService"/> is tested against a fake <see cref="IVelopackUpdater"/>. The check
+/// that an update still carries its Velopack object (<see cref="CarriesNativeRelease"/>,
+/// <see cref="NativeOf"/>) is tested directly, since that is where D1 lived (review F7).
 /// </summary>
 public sealed class GitHubVelopackUpdater : IVelopackUpdater
 {
@@ -331,21 +402,31 @@ public sealed class GitHubVelopackUpdater : IVelopackUpdater
 
     private readonly UpdateManager _manager;
 
-    // Velopack's UpdateInfo is not reconstructable from our projection, so the native object found
-    // by the last check is held for the apply path (download + restart take the native type).
-    private UpdateInfo? _lastNativeInfo;
-
     public GitHubVelopackUpdater()
     {
-        _manager = new UpdateManager(new GithubSource(GitHubRepoUrl, accessToken: null, prerelease: false));
+        // prerelease: true because every Windows build ships as a GitHub pre-release
+        // (windows-test-*); with false, Velopack drops all of them and a Velopack install would
+        // report "Up to date." forever. The Mac releases in the same repo do not shadow the Windows
+        // feed: GithubSource reads the 10 newest releases and skips any without this channel's
+        // releases.<channel>.json asset, which the Mac DMG releases never carry.
+        _manager = new UpdateManager(new GithubSource(GitHubRepoUrl, accessToken: null, prerelease: true));
     }
 
     public bool IsInstalled => _manager.IsInstalled;
 
     public async Task<VelopackUpdateInfo?> CheckForUpdatesAsync(CancellationToken cancellationToken)
     {
-        var info = await _manager.CheckForUpdatesAsync().ConfigureAwait(false);
-        _lastNativeInfo = info;
+        // Velopack's check takes no token, so WaitAsync is the only way the caller's timeout can
+        // end the wait (R47). The abandoned check keeps running; observe its fault so a late
+        // failure is not reported as an unobserved task exception.
+        var check = _manager.CheckForUpdatesAsync();
+        _ = check.ContinueWith(
+            t => _ = t.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+        var info = await check.WaitAsync(cancellationToken).ConfigureAwait(false);
         if (info is null)
         {
             return null;
@@ -355,30 +436,38 @@ public sealed class GitHubVelopackUpdater : IVelopackUpdater
         return new VelopackUpdateInfo
         {
             Version = target.Version.ToString(),
-            ReleaseNotes = target.NotesMarkdown ?? target.NotesHTML
+            ReleaseNotes = target.NotesMarkdown ?? target.NotesHTML,
+            Native = info
         };
     }
 
+    public bool CanApply(VelopackUpdateInfo update) => CarriesNativeRelease(update);
+
     public async Task DownloadUpdatesAsync(VelopackUpdateInfo update, CancellationToken cancellationToken)
     {
-        // Use the native object the matching check produced; ignore the projection here.
-        if (_lastNativeInfo is null)
-        {
-            return;
-        }
-
-        await _manager.DownloadUpdatesAsync(_lastNativeInfo).ConfigureAwait(false);
+        await _manager.DownloadUpdatesAsync(NativeOf(update)).ConfigureAwait(false);
     }
 
     public void ApplyUpdatesAndRestart(VelopackUpdateInfo update)
     {
-        if (_lastNativeInfo is null)
-        {
-            return;
-        }
+        // Exits the current process and relaunches the new version (Velopack launches Update.exe,
+        // then calls Environment.Exit(0)); a failure to launch the updater throws out of here. The
+        // native API takes the VelopackAsset (TargetFullRelease), not the UpdateInfo wrapper.
+        _manager.ApplyUpdatesAndRestart(NativeOf(update).TargetFullRelease);
 
-        // Exits the current process and relaunches the new version. The native API takes the
-        // VelopackAsset (TargetFullRelease), not the UpdateInfo wrapper.
-        _manager.ApplyUpdatesAndRestart(_lastNativeInfo.TargetFullRelease);
+        // Unreachable with Velopack as shipped. If a future version ever returns instead of
+        // exiting, turn that into the failure UpdateService already handles rather than a silent
+        // return after the teardown.
+        throw new InvalidOperationException("Velopack returned from ApplyUpdatesAndRestart without exiting.");
     }
+
+    /// <summary>True when <paramref name="update"/> carries the Velopack object its check produced.
+    /// Read only from the update itself, never from updater state a later check could replace.</summary>
+    internal static bool CarriesNativeRelease(VelopackUpdateInfo update) => update.Native is UpdateInfo;
+
+    /// <summary>The Velopack object carried on <paramref name="update"/>. Throws when it is missing,
+    /// so the apply fails loudly instead of returning silently after the teardown (D1).</summary>
+    internal static UpdateInfo NativeOf(VelopackUpdateInfo update) =>
+        update.Native as UpdateInfo
+        ?? throw new InvalidOperationException("The update has no Velopack release attached.");
 }

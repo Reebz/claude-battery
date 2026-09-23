@@ -171,6 +171,81 @@ public class ClaudeApiTests
         Assert.IsNotType<ClaudeAuthException>(ex);
     }
 
+    // --- Organizations: an outage is not "no organizations" (B2) -------------------------------
+
+    [Theory]
+    [InlineData(HttpStatusCode.ServiceUnavailable)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    public async Task GetOrganizationsAsync_OnNonAuthNonSuccess_ThrowsTransportError_NotEmptyList(HttpStatusCode status)
+    {
+        // The old mapping turned any non-2xx other than 401/403 into an empty list, so a transient
+        // outage told the user "No Claude organizations were found ... a Pro or Max plan may be
+        // required". It must throw a plain transport error (never the auth type) instead. The body
+        // is secret-bearing to prove nothing from it reaches the message (redaction gate).
+        const string secretBody = "{\"sessionKey\":\"sk-ant-LEAK\"}";
+        var handler = new CapturingHandler(_ => JsonResponse(status, secretBody));
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(
+            () => api.GetOrganizationsAsync(CancellationToken.None));
+        Assert.IsNotType<ClaudeAuthException>(ex);
+        Assert.DoesNotContain("sk-ant-", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("sessionKey", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task GetOrganizationsAsync_On200WithEmptyBody_ThrowsTransportError()
+    {
+        var handler = new CapturingHandler(_ => JsonResponse(HttpStatusCode.OK, string.Empty));
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => api.GetOrganizationsAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetOrganizationsAsync_On200WithEmptyArray_ReturnsEmptyList()
+    {
+        // The one real "no organizations": a successful response that lists none.
+        var handler = new CapturingHandler(_ => JsonResponse(HttpStatusCode.OK, "[]"));
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        var orgs = await api.GetOrganizationsAsync(CancellationToken.None);
+        Assert.Empty(orgs);
+    }
+
+    // --- Credits: a request timeout degrades to null, a caller cancel still throws (B1) ---------
+
+    [Fact]
+    public async Task GetCreditsAsync_OnRequestTimeout_DegradesToNull()
+    {
+        // A timeout cancels the request's OWN token, never the caller's, and surfaces as a
+        // TaskCanceledException with the caller's token un-cancelled. The old unfiltered
+        // `catch (OperationCanceledException) { throw; }` rethrew it, contradicting R13. Driven by
+        // a stalled server and a short client timeout, the same shape as SendRawAsync's 30s deadline.
+        using var client = new HttpClient(new StallingHandler()) { Timeout = TimeSpan.FromMilliseconds(100) };
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        var credits = await api.GetCreditsAsync("org-1", CancellationToken.None);
+        Assert.Null(credits);
+    }
+
+    [Fact]
+    public async Task GetCreditsAsync_CallerCancelled_StillThrowsOperationCanceled()
+    {
+        var handler = new CapturingHandler(_ => JsonResponse(HttpStatusCode.OK, "{}"));
+        using var client = new HttpClient(handler);
+        var api = new ClaudeApi(client, TestUserAgent);
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => api.GetCreditsAsync("org-1", cts.Token));
+    }
+
     // --- (2b) Cloudflare-block discrimination on the auth exception (U3) ------------------------
 
     [Fact]
@@ -630,6 +705,16 @@ public class ClaudeApiTests
                 h => h.Key, h => h.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
             LastRequest = new CapturedRequest(request.Method, request.RequestUri!, headers);
             return Task.FromResult(_responder(request));
+        }
+    }
+
+    /// <summary>Never answers: waits until the request's token is cancelled (by a client timeout).</summary>
+    private sealed class StallingHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+            return new HttpResponseMessage(HttpStatusCode.OK);
         }
     }
 

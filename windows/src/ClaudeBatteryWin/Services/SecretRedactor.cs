@@ -48,7 +48,9 @@ public static class SecretRedactor
             StringComparer.Ordinal);
 
     private const string NonScalarRedactionMarker = "REDACTED_NONSCALAR";
-    private const int MaxRedactInputLength = 4096;
+    /// <summary>The per-call input cap. Internal so the crash log can cut its text into chunks that
+    /// stay under it (review F3).</summary>
+    internal const int MaxRedactInputLength = 4096;
     private const char FullwidthColon = '：';
     private const char FullwidthEquals = '＝';
 

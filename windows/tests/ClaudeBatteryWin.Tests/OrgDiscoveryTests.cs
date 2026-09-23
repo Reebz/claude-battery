@@ -248,6 +248,77 @@ public sealed class OrgDiscoveryTests : IDisposable
     }
 
     [Fact]
+    public async Task RequestTimeout_DuringDiscovery_IsAFailure_NotACancel_AndRestoresActiveCookies()
+    {
+        // B1: ClaudeApi's own 30s deadline throws TaskCanceledException while the discovery token is
+        // NOT cancelled. The old unfiltered catch read that as a teardown and returned silently: the
+        // spinner stayed up until the inactivity timer, the capture guard stayed set, and the jar kept
+        // the NEW identity's cookies while polling resumed, so the healthy active account polled with
+        // the wrong cookies and read "Session expired".
+        var api = new FakeClaudeApi { OrganizationsThrows = new TaskCanceledException("request timed out") };
+        var (manager, web, _, store) = NewManager(api);
+        store.UpsertAccount(new Account { Email = "a@x.com", SessionKey = "sk-ACTIVE", OrganizationId = "org-active" });
+        var resumes = 0;
+        manager.OnResumePolling = () => resumes++;
+
+        manager.PresentLogin();
+        web.RaiseCookiesObserved(new[]
+        {
+            AuthManagerTests.Cookie("sessionKey", "sk-NEW"),
+            AuthManagerTests.Cookie("__cf_bm", "cf-new"),
+        });
+        await manager.LastDiscoveryTask!;
+
+        Assert.Equal(LoginStateKind.Error, manager.LoginState.Kind);
+        Assert.Equal("Connection error. Please try again.", manager.LoginState.Message);
+        Assert.False(manager.HasCapturedSession);   // guard reset so a retry can capture again
+        Assert.Null(manager.PendingSessionKey);
+        Assert.True(manager.HasActiveLoginWebView); // window stays open showing the error
+        Assert.Equal("sk-ACTIVE", _jar.GetCookies(new Uri("https://claude.ai"))["sessionKey"]!.Value);
+        Assert.Equal(1, resumes);                    // polling resumed on the failure exit
+        Assert.Single(store.Accounts);               // nothing added
+    }
+
+    [Fact]
+    public async Task ServerOutage_DuringDiscovery_ShowsConnectionError_NotNoOrganizations()
+    {
+        // B2, end to end through the real ClaudeApi: a 503 used to decode as an empty list and show
+        // "No Claude organizations were found ... a Pro or Max plan may be required".
+        using var client = new HttpClient(new StatusHandler(HttpStatusCode.ServiceUnavailable));
+        var api = new ClaudeApi(client, "UA/Test");
+        var store = NewStore();
+        var web = new FakeLoginWebView();
+        var manager = new AuthManager(api, store, new FakeLoginWebViewFactory(web), new FakeOrgPicker());
+
+        manager.PresentLogin();
+        web.RaiseCookiesObserved(SessionCookies());
+        await manager.LastDiscoveryTask!;
+
+        Assert.Equal(LoginStateKind.Error, manager.LoginState.Kind);
+        Assert.Equal("Connection error. Please try again.", manager.LoginState.Message);
+        Assert.False(manager.HasCapturedSession);
+        Assert.Empty(store.Accounts);
+    }
+
+    [Fact]
+    public async Task EmptyOrgList_From200_StillShowsNoOrganizations()
+    {
+        // The real "no organizations" case keeps its message: a 2xx that lists none.
+        using var client = new HttpClient(new StatusHandler(HttpStatusCode.OK, "[]"));
+        var api = new ClaudeApi(client, "UA/Test");
+        var store = NewStore();
+        var web = new FakeLoginWebView();
+        var manager = new AuthManager(api, store, new FakeLoginWebViewFactory(web), new FakeOrgPicker());
+
+        manager.PresentLogin();
+        web.RaiseCookiesObserved(SessionCookies());
+        await manager.LastDiscoveryTask!;
+
+        Assert.Equal(LoginStateKind.Error, manager.LoginState.Kind);
+        Assert.StartsWith("No Claude organizations were found", manager.LoginState.Message);
+    }
+
+    [Fact]
     public async Task FailureThenRetry_CanCaptureAgain()
     {
         // First attempt: 403 fails and resets the guard.
@@ -339,5 +410,24 @@ public sealed class OrgDiscoveryTests : IDisposable
         Assert.Equal("Acme", labels[1]);
         Assert.Equal("Acme (2)", labels[2]);
         Assert.Equal("Organization 4", labels[3]);
+    }
+
+    /// Answers every request with one fixed status and body, so the real ClaudeApi decode runs.
+    private sealed class StatusHandler : HttpMessageHandler
+    {
+        private readonly HttpStatusCode _status;
+        private readonly string _body;
+
+        public StatusHandler(HttpStatusCode status, string body = "")
+        {
+            _status = status;
+            _body = body;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(_status)
+            {
+                Content = new StringContent(_body, System.Text.Encoding.UTF8, "application/json"),
+            });
     }
 }

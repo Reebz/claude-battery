@@ -228,10 +228,14 @@
                                    Foreground="{DynamicResource ForegroundBrush}"
                                    Visibility="{Binding IsNotEditing, Converter={StaticResource BoolToVisibility}}" />
                         <!-- Renaming happens where the name is read, instead of sending the user to
-                             Settings to fix a label they are looking at right now (R36). -->
+                             Settings to fix a label they are looking at right now (R36). The text is
+                             bound two-way to the view-model's RenameText, not to this row, so a poll
+                             or the minute tick rebuilding the row cannot wipe what has been typed.
+                             Every row's box shares that one value, but only the editing row's box
+                             is visible. -->
                         <TextBox Grid.Column="1"
                                  x:Name="RenameBox"
-                                 Text="{Binding DisplayName, Mode=OneWay}"
+                                 Text="{Binding DataContext.RenameText, RelativeSource={RelativeSource AncestorType={x:Type ItemsControl}}, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                  Tag="{Binding Id}"
                                  FontSize="11"
                                  VerticalAlignment="Center"
@@ -372,7 +376,7 @@
                            Margin="0,0,0,8"
                            FontSize="11"
                            TextWrapping="Wrap"
-                           Foreground="{DynamicResource MutedBrush}"
+                           Foreground="{DynamicResource LabelMutedBrush}"
                            Visibility="{Binding HasSignInConfirmation, Converter={StaticResource BoolToVisibility}}" />
 
                 <!-- Session + Weekly gauge cards side by side -->
