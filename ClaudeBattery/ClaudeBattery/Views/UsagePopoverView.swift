@@ -156,13 +156,13 @@ struct UsagePopoverView: View {
                 )
             }
 
-            // "+Add Account" when only 1 account — show as subtle link
+            // "+ Add another account" when only 1 account, shown as a subtle link
             if accountStore.accounts.count == 1 && accountStore.canAddAccount {
                 Button(action: onSignIn) {
                     HStack(spacing: 4) {
                         Image(systemName: "plus")
                             .font(PopoverTextSize.font(10, weight: .medium, offset: textOffset))
-                        Text("Add Account")
+                        Text("Add another account")
                             .font(PopoverTextSize.font(11, weight: .medium, offset: textOffset))
                     }
                     .foregroundColor(Color(white: 0.5))

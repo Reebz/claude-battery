@@ -1,5 +1,11 @@
 # Change Log
 
+### Unreleased
+
+**Popover**
+- With one account, the link under the dials now reads "Add another account" instead of "Add Account", since an account already exists (issue #53).
+- The popover now opens with nothing selected for the keyboard. With macOS Keyboard navigation turned on, it used to put keyboard focus on the first button every time it opened, which drew a blue outline around the one-account link. Press Tab to move focus in, and the outline is drawn fresh at the current text size.
+
 ### v1.73
 
 **Session and Weekly Dials**

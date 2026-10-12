@@ -259,10 +259,30 @@ class MenuBarController: NSObject {
     private func showPopover() {
         guard let button = statusItem.button else { return }
         NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        DispatchQueue.main.async { [weak self] in
-            self?.popover.contentViewController?.view.window?.makeKey()
+        Self.present(popover, relativeTo: button.bounds, of: button)
+    }
+
+    /// Shows the popover under the status item, makes its window key, and leaves no button focused.
+    /// With macOS Keyboard navigation on, AppKit hands the first focusable control keyboard focus on
+    /// every open: the one-account Add Account link, which then wore a blue focus ring every time
+    /// the popover appeared (#53 follow-up). Clearing it on each open, here and again after makeKey,
+    /// means focus only arrives when the user presses Tab, with a ring drawn at the current text
+    /// size. The reused popover keeps its focus between opens, so the first open alone is not enough.
+    static func present(_ popover: NSPopover, relativeTo rect: NSRect, of view: NSView) {
+        popover.show(relativeTo: rect, of: view, preferredEdge: .minY)
+        clearFocus(in: popover)
+        DispatchQueue.main.async {
+            popover.contentViewController?.view.window?.makeKey()
+            clearFocus(in: popover)
         }
+    }
+
+    /// A text field being typed in keeps its focus, so a rename left open when the popover closed
+    /// still takes typing when it reopens.
+    private static func clearFocus(in popover: NSPopover) {
+        guard let window = popover.contentViewController?.view.window,
+              !(window.firstResponder is NSText) else { return }
+        _ = window.makeFirstResponder(nil)
     }
 
     private func showContextMenu() {
