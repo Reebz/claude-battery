@@ -5,15 +5,59 @@ import os
 
 private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.claudebattery.app", category: "Usage")
 
+/// Why the usage poll is failing, for the failures that change what the user has to do. Network
+/// errors, 5xx and bad JSON are not here: they only feed `consecutiveFailures` and its backoff.
+/// The strings are what the popover shows for each case.
+enum UsagePollError: LocalizedError, Equatable {
+    /// 401, or a 403 that is not a region refusal (claude.ai's `account_session_invalid`). Polling
+    /// stops until the user signs in again.
+    case sessionExpired
+    /// 403 `region_unavailable`: claude.ai refuses the region, which here means the VPN dropped.
+    /// Polling keeps going on the failure backoff and recovers on its own.
+    case regionUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .sessionExpired: "Session expired"
+        case .regionUnavailable: "Claude isn't available in your region"
+        }
+    }
+
+    var recoverySuggestion: String? {
+        switch self {
+        case .sessionExpired: "Please sign in again to continue."
+        case .regionUnavailable: "Check your VPN. Retrying automatically."
+        }
+    }
+
+    /// The error a non-2xx usage answer means, or nil when it is an ordinary failure.
+    static func from(statusCode: Int, body: Data) -> UsagePollError? {
+        switch statusCode {
+        case 403 where isRegionUnavailable(body): .regionUnavailable
+        case 401, 403: .sessionExpired
+        default: nil
+        }
+    }
+
+    /// True for claude.ai's `{"error":{"details":{"error_code":"region_unavailable"}}}` body.
+    static func isRegionUnavailable(_ data: Data) -> Bool {
+        struct Body: Decodable {
+            struct Err: Decodable { struct Details: Decodable { let error_code: String? }; let details: Details? }
+            let error: Err?
+        }
+        return (try? JSONDecoder().decode(Body.self, from: data))?.error?.details?.error_code == "region_unavailable"
+    }
+}
+
 @MainActor
 class UsageService: NSObject, ObservableObject {
     @Published var latestUsage: UsageData?
     @Published var lastSuccessfulFetch: Date?
     @Published private(set) var consecutiveFailures: Int = 0
-    @Published private(set) var authFailed: Bool = false
-    /// The last poll was refused with `region_unavailable` (a VPN that dropped). Transient, not an
-    /// expired session: polling keeps going on the failure backoff and recovers on its own.
-    @Published private(set) var regionUnavailable: Bool = false
+    /// Set by a failed poll whose reason the user can act on; cleared by a successful poll and by
+    /// an account switch. `.regionUnavailable` is also cleared by any other HTTP answer, so a VPN
+    /// that came back to a 500 stops blaming the VPN.
+    @Published private(set) var pollError: UsagePollError?
 
     private enum Constants {
         static let staleThresholdSeconds: TimeInterval = 660
@@ -99,15 +143,14 @@ class UsageService: NSObject, ObservableObject {
         latestUsage = nil
         lastSuccessfulFetch = nil
         consecutiveFailures = 0
-        authFailed = false
-        regionUnavailable = false
+        pollError = nil
         restartPolling()
     }
 
     /// The popover opened while polls are failing, or the user pressed Retry Now: retry now rather
     /// than wait out a backoff of up to 30 minutes, so a VPN that came back shows fresh numbers.
     func retryIfFailing() {
-        guard consecutiveFailures > 0, !authFailed, accountStore.activeAccount != nil else { return }
+        guard consecutiveFailures > 0, pollError != .sessionExpired, accountStore.activeAccount != nil else { return }
         restartPolling()
     }
 
@@ -219,19 +262,21 @@ class UsageService: NSObject, ObservableObject {
             // claude.ai answers 403 both for an expired session (`account_session_invalid`) and for
             // a request from an unsupported region (`region_unavailable`, e.g. the VPN dropped).
             // Only the first is a sign-out; the second backs off like any other failed poll.
-            // Re-derived from every HTTP answer, so a VPN that came back to a 500 stops blaming
-            // the VPN.
-            let isRegionBlock = httpResponse.statusCode == 403 && Self.isRegionUnavailable(data)
-            if regionUnavailable != isRegionBlock { regionUnavailable = isRegionBlock }
-            if isRegionBlock {
+            let error = UsagePollError.from(statusCode: httpResponse.statusCode, body: data)
+            if pollError == .regionUnavailable, error != .regionUnavailable { pollError = nil }
+
+            if error == .regionUnavailable {
                 consecutiveFailures += 1
+                // An expired session stays expired: the region check comes first on the server, so
+                // this answer says nothing about whether the session recovered.
+                if pollError == nil { pollError = .regionUnavailable }
                 logger.warning("Region unavailable (HTTP 403), backing off")
                 return
             }
 
-            if httpResponse.statusCode == 401 || httpResponse.statusCode == 403 {
+            if error == .sessionExpired {
                 consecutiveFailures += 1
-                authFailed = true
+                pollError = .sessionExpired
                 latestUsage = nil
                 // Non-PII account id, not displayName (= email by default): os_log lines can be
                 // read off-device, so never emit an email here.
@@ -350,7 +395,7 @@ class UsageService: NSObject, ObservableObject {
 
             lastSuccessfulFetch = Date()
             if consecutiveFailures != 0 { consecutiveFailures = 0 }
-            if authFailed { authFailed = false }
+            if pollError != nil { pollError = nil }
 
             if let weeklyRemaining = latestUsage?.weeklyRemaining {
                 checkAndNotify(account: account, remaining: weeklyRemaining)
@@ -364,15 +409,6 @@ class UsageService: NSObject, ObservableObject {
     }
 
     var onAuthFailure: (() -> Void)?
-
-    /// True for claude.ai's `{"error":{"details":{"error_code":"region_unavailable"}}}` body.
-    nonisolated static func isRegionUnavailable(_ data: Data) -> Bool {
-        struct Body: Decodable {
-            struct Err: Decodable { struct Details: Decodable { let error_code: String? }; let details: Details? }
-            let error: Err?
-        }
-        return (try? JSONDecoder().decode(Body.self, from: data))?.error?.details?.error_code == "region_unavailable"
-    }
 
     // MARK: - Notifications
 
@@ -418,7 +454,7 @@ class UsageService: NSObject, ObservableObject {
     // MARK: - Wake
 
     @objc private func handleWake() {
-        guard accountStore.activeAccount != nil, !authFailed else { return }
+        guard accountStore.activeAccount != nil, pollError != .sessionExpired else { return }
         restartPolling()
     }
 }

@@ -255,7 +255,7 @@ public class UsageServiceTests
         // the next exchange (U3/U5).
         var clock = new FakeClock();
         var net = new FakeNetwork { IsAvailable = true };
-        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.CloudflareBlock) };
 
         using var service = new UsageService(api, net, clock);
         service.StartPolling(Org);
@@ -275,7 +275,7 @@ public class UsageServiceTests
         // AfterAuthFailed_TimerFireChain_DoesNotReArm with the OPPOSITE expectation.
         var clock = new FakeClock();
         var net = new FakeNetwork { IsAvailable = true };
-        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.CloudflareBlock) };
 
         using var service = new UsageService(api, net, clock);
         service.StartPolling(Org);   // arms the zero-delay first fire
@@ -295,7 +295,7 @@ public class UsageServiceTests
         // than prompting re-auth - it advances the failure count but NEVER sets authFailed.
         var clock = new FakeClock();
         var net = new FakeNetwork { IsAvailable = true };
-        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.CloudflareBlock) };
 
         using var service = new UsageService(api, net, clock);
         service.StartPolling(Org);
@@ -332,7 +332,7 @@ public class UsageServiceTests
         // tell is a genuine auth 403 and hard-stops even on the first poll.
         var clock = new FakeClock();
         var net = new FakeNetwork { IsAvailable = true };
-        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: false) };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.Session) };
 
         using var service = new UsageService(api, net, clock);
         service.StartPolling(Org);
@@ -368,7 +368,7 @@ public class UsageServiceTests
         api.UsageBehavior = _ =>
         {
             generation = 2; // the switch supersedes this poll's dispatch generation (1)
-            throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true);
+            throw new ClaudeAuthException(403, AuthFailureKind.CloudflareBlock);
         };
         await service.PollUsageAsync(CancellationToken.None);
 
@@ -388,7 +388,7 @@ public class UsageServiceTests
         // poller must route to the auth-failed surface instead of backing off forever.
         var clock = new FakeClock();
         var net = new FakeNetwork { IsAvailable = true };
-        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.CloudflareBlock) };
 
         using var service = new UsageService(api, net, clock, transportUaIsFallback: () => true);
         service.StartPolling(Org);
@@ -416,7 +416,7 @@ public class UsageServiceTests
         // genuine edge block when the UA already matches the login session's.
         var clock = new FakeClock();
         var net = new FakeNetwork { IsAvailable = true };
-        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.CloudflareBlock) };
 
         using var service = new UsageService(api, net, clock, transportUaIsFallback: () => false);
         service.StartPolling(Org);
@@ -437,7 +437,7 @@ public class UsageServiceTests
         // and two more blocks must not add up to an escalation.
         var clock = new FakeClock();
         var net = new FakeNetwork { IsAvailable = true };
-        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.CloudflareBlock) };
 
         using var service = new UsageService(api, net, clock, transportUaIsFallback: () => true);
         service.StartPolling(Org);
@@ -449,7 +449,7 @@ public class UsageServiceTests
         await service.PollUsageAsync(CancellationToken.None); // success resets the streak
         Assert.Equal(0, service.ConsecutiveFailures);
 
-        api.UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true);
+        api.UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.CloudflareBlock);
         await service.PollUsageAsync(CancellationToken.None); // block (streak 1 again)
         await service.PollUsageAsync(CancellationToken.None); // block (streak 2)
 
@@ -463,7 +463,7 @@ public class UsageServiceTests
         // pre-existing test): the CF soft path is exactly as before.
         var clock = new FakeClock();
         var net = new FakeNetwork { IsAvailable = true };
-        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true) };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.CloudflareBlock) };
 
         using var service = new UsageService(api, net, clock);
         service.StartPolling(Org);
@@ -481,12 +481,12 @@ public class UsageServiceTests
     [Fact]
     public async Task Poll_401WithCloudflareFlag_StillHardStops()
     {
-        // LooksLikeCloudflareBlock's cf-mitigated branch is status-independent, so a 401 CAN carry
+        // The CloudflareBlock kind's cf-mitigated branch is status-independent, so a 401 CAN carry
         // the flag; only the poller's StatusCode == 403 conjunct keeps a flagged 401 a hard stop.
         // This pins that conjunct directly - a refactor weakening either half now fails a test.
         var clock = new FakeClock();
         var net = new FakeNetwork { IsAvailable = true };
-        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(401, looksLikeCloudflareBlock: true) };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(401, AuthFailureKind.CloudflareBlock) };
 
         using var service = new UsageService(api, net, clock);
         service.StartPolling(Org);
@@ -511,7 +511,7 @@ public class UsageServiceTests
         await service.PollUsageAsync(CancellationToken.None); // success: snapshot published
         Assert.NotNull(service.LatestUsage);
 
-        api.UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: true);
+        api.UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.CloudflareBlock);
         await service.PollUsageAsync(CancellationToken.None); // CF block: soft
 
         Assert.NotNull(service.LatestUsage); // stale snapshot retained
@@ -533,7 +533,7 @@ public class UsageServiceTests
         service.AuthFailureDetected += (_, _) => authFired = true;
 
         await service.PollUsageAsync(CancellationToken.None); // success: snapshot published
-        api.UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: false, isRegionUnavailable: true);
+        api.UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.RegionUnavailable);
         for (var i = 0; i < 4; i++)
         {
             await service.PollUsageAsync(CancellationToken.None);
@@ -556,7 +556,7 @@ public class UsageServiceTests
         // poll gets the same one-shot grace as a transient online throw, and never signs out.
         var clock = new FakeClock();
         var net = new FakeNetwork { IsAvailable = true };
-        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, looksLikeCloudflareBlock: false, isRegionUnavailable: true) };
+        var api = new FakeApi { UsageBehavior = _ => throw new ClaudeAuthException(403, AuthFailureKind.RegionUnavailable) };
 
         using var service = new UsageService(api, net, clock);
         var authFired = false;

@@ -117,15 +117,15 @@ class MenuBarController: NSObject {
         // Without these, every @Published write (even identical values) triggers updateIcon().
         usageService.$latestUsage
             .combineLatest(usageService.$consecutiveFailures, accountStore.$activeAccountId)
-            .combineLatest(usageService.$authFailed)
+            .combineLatest(usageService.$pollError)
             .removeDuplicates { prev, next in
                 prev.0.0 == next.0.0 && prev.0.1 == next.0.1 && prev.0.2 == next.0.2 && prev.1 == next.1
             }
             .throttle(for: .milliseconds(500), scheduler: RunLoop.main, latest: true)
             .receive(on: RunLoop.main)
-            .sink { [weak self] combined, authFailed in
+            .sink { [weak self] combined, pollError in
                 let (usage, _, activeId) = combined
-                self?.updateIcon(usage, isAuthenticated: activeId != nil, authFailed: authFailed)
+                self?.updateIcon(usage, isAuthenticated: activeId != nil, authFailed: pollError == .sessionExpired)
             }
             .store(in: &cancellables)
 
@@ -136,7 +136,7 @@ class MenuBarController: NSObject {
         iconStyleObservation = UserDefaults.standard.observe(\.iconStyle, options: [.new]) { [weak self] _, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.pollError == .sessionExpired)
             }
         }
 
@@ -147,7 +147,7 @@ class MenuBarController: NSObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.syncCountdownTimer()
-                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.pollError == .sessionExpired)
             }
         }
 
@@ -167,7 +167,7 @@ class MenuBarController: NSObject {
                 // The countdown cell is composed into button.image, so a normal updateIcon
                 // re-render (different isMenuBarDark -> different signature) repaints the cell in
                 // the new color too. No separate title-color refresh needed.
-                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.pollError == .sessionExpired)
             }
         }
 
@@ -182,7 +182,7 @@ class MenuBarController: NSObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.lastRenderedSignature = nil
-                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.pollError == .sessionExpired)
             }
         }
 
@@ -192,7 +192,7 @@ class MenuBarController: NSObject {
         stalenessTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
+                self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.pollError == .sessionExpired)
             }
         }
         stalenessTimer?.tolerance = 30
@@ -528,7 +528,7 @@ class MenuBarController: NSObject {
             let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.authFailed)
+                    self.updateIcon(self.usageService.latestUsage, isAuthenticated: self.accountStore.isAuthenticated, authFailed: self.usageService.pollError == .sessionExpired)
                 }
             }
             timer.tolerance = 30

@@ -583,7 +583,7 @@ final class UsageServicePollTests: XCTestCase {
         XCTAssertEqual(usage.weeklyRemaining, 40.0, accuracy: 0.01)
         XCTAssertEqual(usage.sessionRemaining, 65.0, accuracy: 0.01)
         XCTAssertEqual(service.consecutiveFailures, 0)
-        XCTAssertFalse(service.authFailed)
+        XCTAssertNotEqual(service.pollError, .sessionExpired)
         XCTAssertNotNil(service.lastSuccessfulFetch)
     }
 
@@ -633,7 +633,7 @@ final class UsageServicePollTests: XCTestCase {
 
         await service.pollUsage()
 
-        XCTAssertTrue(service.authFailed)
+        XCTAssertEqual(service.pollError, .sessionExpired)
         XCTAssertEqual(service.consecutiveFailures, 1)
         XCTAssertTrue(authCallbackFired)
         XCTAssertNil(service.latestUsage)
@@ -657,7 +657,7 @@ final class UsageServicePollTests: XCTestCase {
 
         await service.pollUsage()
 
-        XCTAssertTrue(service.authFailed)
+        XCTAssertEqual(service.pollError, .sessionExpired)
         XCTAssertEqual(service.consecutiveFailures, 1)
         XCTAssertTrue(authCallbackFired)
     }
@@ -683,9 +683,9 @@ final class UsageServicePollTests: XCTestCase {
 
         await service.pollUsage()
 
-        XCTAssertFalse(service.authFailed)
+        XCTAssertNotEqual(service.pollError, .sessionExpired)
         XCTAssertFalse(authCallbackFired)
-        XCTAssertTrue(service.regionUnavailable)
+        XCTAssertEqual(service.pollError, .regionUnavailable)
         XCTAssertEqual(service.consecutiveFailures, 1)
 
         // VPN back: the next successful poll clears the flag.
@@ -693,7 +693,7 @@ final class UsageServicePollTests: XCTestCase {
         mockSession.responseStatusCode = 200
         await service.pollUsage()
 
-        XCTAssertFalse(service.regionUnavailable)
+        XCTAssertNil(service.pollError)
         XCTAssertEqual(service.consecutiveFailures, 0)
     }
 
@@ -710,13 +710,13 @@ final class UsageServicePollTests: XCTestCase {
         )
 
         await service.pollUsage()
-        XCTAssertTrue(service.regionUnavailable)
+        XCTAssertEqual(service.pollError, .regionUnavailable)
 
         mockSession.responseData = Data("{\"error\":\"internal\"}".utf8)
         mockSession.responseStatusCode = 500
         await service.pollUsage()
 
-        XCTAssertFalse(service.regionUnavailable)
+        XCTAssertNil(service.pollError)
         XCTAssertEqual(service.consecutiveFailures, 2)
     }
 
@@ -766,8 +766,8 @@ final class UsageServicePollTests: XCTestCase {
         defer { service.stopPolling() }
 
         await service.pollUsage()
-        XCTAssertTrue(service.authFailed)
-        XCTAssertGreaterThan(service.consecutiveFailures, 0, "so only the authFailed check can stop the retry")
+        XCTAssertEqual(service.pollError, .sessionExpired)
+        XCTAssertGreaterThan(service.consecutiveFailures, 0, "so only the sessionExpired check can stop the retry")
         XCTAssertNil(service.nextPollDate)
         let before = usageRequestCount()
 
@@ -793,7 +793,7 @@ final class UsageServicePollTests: XCTestCase {
 
         await service.pollUsage()
         XCTAssertEqual(service.consecutiveFailures, 0)
-        XCTAssertFalse(service.authFailed, "so only the failure count can stop the retry")
+        XCTAssertNil(service.pollError, "so only the failure count can stop the retry")
         XCTAssertNil(service.nextPollDate)
         let before = usageRequestCount()
 
@@ -820,7 +820,7 @@ final class UsageServicePollTests: XCTestCase {
 
         await service.pollUsage()
         XCTAssertGreaterThan(service.consecutiveFailures, 0)
-        XCTAssertFalse(service.authFailed)
+        XCTAssertNotEqual(service.pollError, .sessionExpired)
         accountStore.removeAccount(testAccount.id)
         XCTAssertNil(accountStore.activeAccount)
 
@@ -831,7 +831,7 @@ final class UsageServicePollTests: XCTestCase {
 
     /// Region state belongs to the account that hit it, so switching accounts starts clean.
     @MainActor
-    func testSwitchAccount_clearsRegionUnavailable() async {
+    func testSwitchAccount_clearsRegionError() async {
         mockSession.responseData = regionUnavailableBody
         mockSession.responseStatusCode = 403
 
@@ -843,19 +843,53 @@ final class UsageServicePollTests: XCTestCase {
         defer { service.stopPolling() }
 
         await service.pollUsage()
-        XCTAssertTrue(service.regionUnavailable)
+        XCTAssertEqual(service.pollError, .regionUnavailable)
 
         // Checked before any await, so the poll switchAccount restarts has not run yet.
         service.switchAccount()
 
-        XCTAssertFalse(service.regionUnavailable, "switchAccount should clear regionUnavailable")
+        XCTAssertNil(service.pollError, "switchAccount should clear the region error")
+    }
+
+    /// Once expired, only a success or an account switch clears it: neither a region 403 nor a 500
+    /// may turn "Sign In Again" into the VPN card or restart polling.
+    @MainActor
+    func testSessionExpired_isStickyAcrossRegionAnd500() async {
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 403
+
+        let service = UsageService(
+            storage: storage,
+            accountStore: accountStore,
+            session: mockSession
+        )
+
+        await service.pollUsage()
+        XCTAssertEqual(service.pollError, .sessionExpired)
+
+        mockSession.responseData = regionUnavailableBody
+        await service.pollUsage()
+        XCTAssertEqual(service.pollError, .sessionExpired)
+
+        mockSession.responseData = Data()
+        mockSession.responseStatusCode = 500
+        await service.pollUsage()
+        XCTAssertEqual(service.pollError, .sessionExpired)
+    }
+
+    func testPollError_fromStatusAndBody() {
+        XCTAssertEqual(UsagePollError.from(statusCode: 403, body: regionUnavailableBody), .regionUnavailable)
+        XCTAssertEqual(UsagePollError.from(statusCode: 403, body: Data()), .sessionExpired)
+        XCTAssertEqual(UsagePollError.from(statusCode: 401, body: regionUnavailableBody), .sessionExpired)
+        XCTAssertNil(UsagePollError.from(statusCode: 500, body: regionUnavailableBody))
+        XCTAssertNil(UsagePollError.from(statusCode: 429, body: Data()))
     }
 
     func testIsRegionUnavailable_onlyMatchesTheRegionCode() {
-        XCTAssertTrue(UsageService.isRegionUnavailable(regionUnavailableBody))
-        XCTAssertFalse(UsageService.isRegionUnavailable(Data(#"{"type":"error","error":{"type":"permission_error","message":"Invalid authorization","details":{"error_code":"account_session_invalid"}}}"#.utf8)))
-        XCTAssertFalse(UsageService.isRegionUnavailable(Data("<!DOCTYPE html><title>Just a moment...</title>".utf8)))
-        XCTAssertFalse(UsageService.isRegionUnavailable(Data()))
+        XCTAssertTrue(UsagePollError.isRegionUnavailable(regionUnavailableBody))
+        XCTAssertFalse(UsagePollError.isRegionUnavailable(Data(#"{"type":"error","error":{"type":"permission_error","message":"Invalid authorization","details":{"error_code":"account_session_invalid"}}}"#.utf8)))
+        XCTAssertFalse(UsagePollError.isRegionUnavailable(Data("<!DOCTYPE html><title>Just a moment...</title>".utf8)))
+        XCTAssertFalse(UsagePollError.isRegionUnavailable(Data()))
     }
 
     // MARK: - 500 server error
@@ -874,7 +908,7 @@ final class UsageServicePollTests: XCTestCase {
         await service.pollUsage()
 
         XCTAssertEqual(service.consecutiveFailures, 1)
-        XCTAssertFalse(service.authFailed)
+        XCTAssertNotEqual(service.pollError, .sessionExpired)
         XCTAssertNil(service.latestUsage)
     }
 
@@ -1055,12 +1089,12 @@ final class UsageServicePollTests: XCTestCase {
         mockSession.responseStatusCode = 401
         await service.pollUsage()
 
-        XCTAssertTrue(service.authFailed)
+        XCTAssertEqual(service.pollError, .sessionExpired)
         XCTAssertNil(service.latestUsage,
                      "latestUsage should be cleared on auth failure so popover shows re-auth screen")
     }
 
-    // MARK: - switchAccount resets authFailed
+    // MARK: - switchAccount resets pollError
 
     @MainActor
     func testSwitchAccount_resetsAuthFailedAndConsecutiveFailures() async {
@@ -1074,13 +1108,13 @@ final class UsageServicePollTests: XCTestCase {
         mockSession.responseData = Data()
         mockSession.responseStatusCode = 401
         await service.pollUsage()
-        XCTAssertTrue(service.authFailed)
+        XCTAssertEqual(service.pollError, .sessionExpired)
         XCTAssertEqual(service.consecutiveFailures, 1)
 
         // switchAccount should reset everything
         service.switchAccount()
 
-        XCTAssertFalse(service.authFailed, "switchAccount should clear authFailed")
+        XCTAssertNil(service.pollError, "switchAccount should clear pollError")
         XCTAssertEqual(service.consecutiveFailures, 0, "switchAccount should reset consecutiveFailures")
         XCTAssertNil(service.latestUsage, "switchAccount should clear latestUsage")
     }
@@ -1110,7 +1144,7 @@ final class UsageServicePollTests: XCTestCase {
         XCTAssertTrue(answered, "the response really was handed back")
 
         // Fails fast the moment the cancelled poll wrongly applies that response.
-        let leaked = await waitUntil(timeout: 0.5) { service.authFailed || authFailures > 0 }
+        let leaked = await waitUntil(timeout: 0.5) { (service.pollError == .sessionExpired) || authFailures > 0 }
         XCTAssertFalse(leaked, "a poll cancelled by the sign-in must not read the response as its own account's")
         XCTAssertEqual(service.consecutiveFailures, 0, "and it must not count as a failure either")
     }
@@ -1129,7 +1163,7 @@ final class UsageServicePollTests: XCTestCase {
         XCTAssertTrue(inFlight)
         gate.release()
 
-        let tripped = await waitUntil { service.authFailed }
+        let tripped = await waitUntil { (service.pollError == .sessionExpired) }
         XCTAssertTrue(tripped, "an uncancelled poll does read the 403")
         XCTAssertEqual(authFailures, 1)
     }
@@ -1216,7 +1250,7 @@ final class UsageServicePollTests: XCTestCase {
         let service = UsageService(storage: storage, accountStore: accountStore, session: mockSession)
 
         service.startPolling()
-        let expired = await waitUntil { service.authFailed }
+        let expired = await waitUntil { (service.pollError == .sessionExpired) }
         XCTAssertTrue(expired, "precondition: the session is expired")
         service.stopPolling()  // exactly what ClaudeBatteryApp wires onAuthFailure to
 
@@ -1230,7 +1264,7 @@ final class UsageServicePollTests: XCTestCase {
         let fetched = await waitUntil { service.latestUsage != nil }
         XCTAssertTrue(fetched,
                       "a repaired active account fetches again without the user switching accounts by hand")
-        XCTAssertFalse(service.authFailed)
+        XCTAssertNotEqual(service.pollError, .sessionExpired)
     }
 
     // MARK: - The active account's plan reaching the dial (R1, R3)

@@ -257,7 +257,7 @@ public class ClaudeApiTests
 
         var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
         Assert.Equal(403, ex.StatusCode);
-        Assert.True(ex.LooksLikeCloudflareBlock); // the documented cf-mitigated: challenge tell
+        Assert.Equal(AuthFailureKind.CloudflareBlock, ex.Kind); // the documented cf-mitigated: challenge tell
     }
 
     [Fact]
@@ -269,7 +269,7 @@ public class ClaudeApiTests
         var api = new ClaudeApi(client, TestUserAgent);
 
         var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
-        Assert.True(ex.LooksLikeCloudflareBlock);
+        Assert.Equal(AuthFailureKind.CloudflareBlock, ex.Kind);
     }
 
     [Fact]
@@ -283,7 +283,7 @@ public class ClaudeApiTests
 
         var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
         Assert.Equal(403, ex.StatusCode);
-        Assert.False(ex.LooksLikeCloudflareBlock);
+        Assert.Equal(AuthFailureKind.Session, ex.Kind);
     }
 
     [Fact]
@@ -302,7 +302,7 @@ public class ClaudeApiTests
         var api = new ClaudeApi(client, TestUserAgent);
 
         var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
-        Assert.False(ex.LooksLikeCloudflareBlock);
+        Assert.Equal(AuthFailureKind.Session, ex.Kind);
     }
 
     [Fact]
@@ -314,7 +314,7 @@ public class ClaudeApiTests
 
         var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
         Assert.Equal(401, ex.StatusCode);
-        Assert.False(ex.LooksLikeCloudflareBlock); // a 401 is a genuine auth failure, never a CF block
+        Assert.Equal(AuthFailureKind.Session, ex.Kind); // a 401 is a genuine auth failure, never a CF block
     }
 
     /// <summary>Verbatim body claude.ai returned to a Moscow IP on 2026-10-06 (VPN off).</summary>
@@ -330,8 +330,7 @@ public class ClaudeApiTests
 
         var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
         Assert.Equal(403, ex.StatusCode);
-        Assert.True(ex.IsRegionUnavailable);
-        Assert.False(ex.LooksLikeCloudflareBlock);
+        Assert.Equal(AuthFailureKind.RegionUnavailable, ex.Kind);
         Assert.DoesNotContain("region", ex.Message, StringComparison.OrdinalIgnoreCase); // body not echoed
     }
 
@@ -348,22 +347,22 @@ public class ClaudeApiTests
         var api = new ClaudeApi(client, TestUserAgent);
 
         var ex = await Assert.ThrowsAsync<ClaudeAuthException>(() => api.GetUsageAsync("org-1", CancellationToken.None));
-        Assert.False(ex.IsRegionUnavailable);
+        Assert.NotEqual(AuthFailureKind.RegionUnavailable, ex.Kind);
     }
 
     [Fact]
-    public void ClaudeAuthException_SingleArgCtor_DefaultsCloudflareBlockFalse()
+    public void ClaudeAuthException_DefaultKind_IsSession()
     {
-        // The kept single-arg ctor (the production throw + ~10 test call sites) must default the flag
-        // false so existing 401/403 throws and FakeApi-thrown auth errors stay behaviorally unchanged.
-        Assert.False(new ClaudeAuthException(403).LooksLikeCloudflareBlock);
+        // The status-only ctor (~10 test call sites) must default to a genuine auth failure, so
+        // FakeApi-thrown auth errors still hard-stop and no block is ever assumed.
+        Assert.Equal(AuthFailureKind.Session, new ClaudeAuthException(403).Kind);
         Assert.Equal(403, new ClaudeAuthException(403).StatusCode);
     }
 
     [Fact]
     public async Task AuthException_CarriesOnlyStatusAndFlag_NoBodyOrHeaderMaterial()
     {
-        // The exception must carry ONLY the status int + the derived bool - never body or raw header
+        // The exception must carry ONLY the status int + the derived kind enum - never body or raw header
         // material (KTD3 redaction). Feed a secret-bearing body and assert none of it reaches Message.
         const string secretBody = "{\"sessionKey\":\"sk-ant-LEAK\"}";
         var handler = new CapturingHandler(_ =>
@@ -376,7 +375,7 @@ public class ClaudeApiTests
         Assert.DoesNotContain("sessionKey", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("challenge", ex.Message, StringComparison.OrdinalIgnoreCase); // header value not echoed
 
-        // The exception's OWN public surface is EXACTLY status + the flag (no body/header field). This
+        // The exception's OWN public surface is EXACTLY status + the kind (no body/header field). This
         // catches a future field that carried body/header material, where the Message asserts above (a
         // constant format string interpolating only the status) cannot.
         var declaredProps = typeof(ClaudeAuthException)
@@ -384,7 +383,7 @@ public class ClaudeApiTests
             .Select(p => p.Name)
             .OrderBy(n => n, StringComparer.Ordinal)
             .ToArray();
-        Assert.Equal(new[] { "IsRegionUnavailable", "LooksLikeCloudflareBlock", "StatusCode" }, declaredProps);
+        Assert.Equal(new[] { "Kind", "StatusCode" }, declaredProps);
     }
 
     [Fact]

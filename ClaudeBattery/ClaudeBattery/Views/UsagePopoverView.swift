@@ -101,9 +101,9 @@ struct UsagePopoverView: View {
                 unauthenticatedContent
             } else if let usage = usageService.latestUsage {
                 authenticatedContent(usage: usage)
-            } else if usageService.authFailed {
+            } else if usageService.pollError == .sessionExpired {
                 reauthContent
-            } else if usageService.regionUnavailable {
+            } else if usageService.pollError == .regionUnavailable {
                 regionUnavailableCard()
                     .padding(16)
             } else if usageService.consecutiveFailures >= 10 {
@@ -137,7 +137,7 @@ struct UsagePopoverView: View {
 
             // A dropped VPN keeps the last numbers on screen, so say plainly that they are stale
             // and why, instead of leaving only the footer's "Usage updated N minutes ago".
-            if usageService.regionUnavailable {
+            if usageService.pollError == .regionUnavailable {
                 regionUnavailableCard()
             }
 
@@ -781,9 +781,9 @@ struct UsagePopoverView: View {
             Image(systemName: "key.slash")
                 .font(PopoverTextSize.font(32, offset: textOffset))
                 .foregroundColor(.secondary)
-            Text("Session expired")
+            Text(UsagePollError.sessionExpired.errorDescription ?? "")
                 .font(PopoverTextSize.font(11, offset: textOffset))
-            Text("Please sign in again to continue.")
+            Text(UsagePollError.sessionExpired.recoverySuggestion ?? "")
                 .font(PopoverTextSize.font(10, offset: textOffset))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -806,10 +806,10 @@ struct UsagePopoverView: View {
             Image(systemName: "network.slash")
                 .font(PopoverTextSize.font(24, offset: textOffset))
                 .foregroundColor(.orange)
-            Text("Claude isn't available in your region")
+            Text(UsagePollError.regionUnavailable.errorDescription ?? "")
                 .font(PopoverTextSize.font(11, weight: .semibold, offset: textOffset))
                 .multilineTextAlignment(.center)
-            Text("Check your VPN. Retrying automatically.")
+            Text(UsagePollError.regionUnavailable.recoverySuggestion ?? "")
                 .font(PopoverTextSize.font(10, offset: textOffset))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
