@@ -246,7 +246,7 @@ final class MenuBarCountdownTests: XCTestCase {
         let dial = weeklyDial(weeklyLeft: 10, at: at)
         XCTAssertEqual(dial.caption, "Caution")
         XCTAssertEqual(dial.runOutSeconds, 14 * 3600)
-        XCTAssertEqual(dial.runOut, "Out in ~14h 00m")
+        XCTAssertEqual(dial.runOut, "Out in ~14h")
     }
 
     func testNoSessionLimit_danger_isRedAndMatchesTheDial() throws {

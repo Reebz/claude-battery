@@ -69,7 +69,7 @@ extension UsagePopoverView {
     /// nil hides it.
     nonisolated static func runOutLine(seconds: TimeInterval?) -> String? {
         guard let seconds else { return nil }
-        return "Out in ~" + CountdownFormat.minuteResolution(seconds: seconds)
+        return "Out in ~" + CountdownFormat.runOutResolution(seconds: seconds)
     }
 
     // MARK: - Dial lines (#44, KTD3)
@@ -247,5 +247,16 @@ enum CountdownFormat {
         if hours > 0 { return String(format: "%dh %02dm", hours, minutes) }
         if minutes >= 1 { return "\(minutes)m" }
         return "<1m"
+    }
+
+    /// The run-out line's duration: `minuteResolution` with a zero last field dropped, so "11h"
+    /// and "2d" rather than "11h 00m" and "2d 00h". The run-out is an estimate the weekly dial
+    /// rounds to whole hours, so the padded zeros carried nothing. The reset countdown keeps its
+    /// padding, because it ticks every minute and a steady width keeps it from jumping.
+    static func runOutResolution(seconds: TimeInterval) -> String {
+        let (days, hours, minutes) = components(seconds: seconds)
+        if days > 0 && hours == 0 { return "\(days)d" }
+        if days == 0 && hours > 0 && minutes == 0 { return "\(hours)h" }
+        return minuteResolution(seconds: seconds)
     }
 }

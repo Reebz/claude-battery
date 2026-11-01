@@ -107,7 +107,11 @@ class MenuBarController: NSObject {
                 usageService: usageService,
                 updateChecker: updateChecker,
                 clock: popoverClock,
-                onSignIn: { [weak self] in self?.authManager.presentLogin() }
+                onSignIn: { [weak self] in self?.authManager.presentLogin() },
+                onOpenSettings: { [weak self] in
+                    self?.popover.performClose(nil)
+                    self?.showSettings()
+                }
             )
         )
     }
