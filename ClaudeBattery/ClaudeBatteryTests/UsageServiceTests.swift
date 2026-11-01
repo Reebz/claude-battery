@@ -99,6 +99,94 @@ final class UsageDataTests: XCTestCase {
         XCTAssertTrue(usage.weeklyPercentWasRead, "the other half of the response was read normally")
     }
 
+    // MARK: - Whether the account has a 5-hour limit at all
+
+    /// The shape claude.ai returns for an account on a plan with no 5-hour limit, as captured live
+    /// in November 2026 (percentages invented): `five_hour` is null and `limits[]` lists only weekly
+    /// windows. The plan string on such an account still reads Max 20x, so this shape is the only
+    /// signal there is.
+    static let noSessionLimitJSON = """
+    {
+      "five_hour": null,
+      "seven_day": { "utilization": 64, "resets_at": "2026-11-01T23:00:00.047137+00:00" },
+      "seven_day_opus": null,
+      "seven_day_sonnet": null,
+      "limits": [
+        { "kind": "weekly_all", "group": "weekly", "percent": 64, "severity": "normal", "is_active": true,
+          "resets_at": "2026-11-01T23:00:00.047137+00:00", "scope": null },
+        { "kind": "weekly_scoped", "group": "weekly", "percent": 21, "severity": "normal", "is_active": false,
+          "resets_at": "2026-11-01T23:00:00.047313+00:00",
+          "scope": { "model": { "display_name": "Fable", "id": null }, "surface": null } }
+      ],
+      "pace": null
+    }
+    """
+
+    func testNoFiveHourLimitResponse_hasNoSessionLimit() throws {
+        let usage = UsageData(from: try decodeJSON(Self.noSessionLimitJSON))
+        XCTAssertFalse(usage.hasSessionLimit)
+        XCTAssertEqual(usage.weeklyRemaining, 36, accuracy: 0.01)
+        XCTAssertTrue(usage.weeklyPercentWasRead)
+    }
+
+    func testSessionEntryInLimits_hasSessionLimit() throws {
+        XCTAssertTrue(UsageData(from: try decodeFixture("usage_limits_spend")).hasSessionLimit)
+    }
+
+    func testLegacyFiveHourObject_hasSessionLimit() throws {
+        XCTAssertTrue(UsageData(from: try decodeFixture("usage_full")).hasSessionLimit)
+    }
+
+    func testIdleSessionEntry_stillHasSessionLimit() throws {
+        // An idle 5-hour window: the limit is listed with nothing used and no reset time. That is
+        // a plan WITH a 5-hour limit, and it must keep the Session surfaces.
+        let usage = UsageData(from: try decodeJSON("""
+        {
+          "five_hour": null,
+          "limits": [
+            { "kind": "session", "group": "session", "percent": 0, "resets_at": null, "is_active": false },
+            { "kind": "weekly_all", "group": "weekly", "percent": 40, "resets_at": "2026-11-01T23:00:00Z" }
+          ]
+        }
+        """))
+        XCTAssertTrue(usage.hasSessionLimit)
+    }
+
+    func testSessionEntryWithNullPercent_stillHasSessionLimit() throws {
+        let usage = UsageData(from: try decodeJSON("""
+        {
+          "limits": [
+            { "kind": "session", "percent": null },
+            { "kind": "weekly_all", "percent": 40 }
+          ]
+        }
+        """))
+        XCTAssertTrue(usage.hasSessionLimit)
+    }
+
+    func testNoWeeklyReading_isNotTreatedAsNoLimit() throws {
+        // Nothing usable came back. A broken response must not switch the layout.
+        let usage = UsageData(from: try decodeJSON("""
+        { "five_hour": null, "seven_day": { "utilization": null, "resets_at": null } }
+        """))
+        XCTAssertTrue(usage.hasSessionLimit)
+    }
+
+    func testLegacyShapeWithNullFiveHourAndAWeeklyReading_hasNoSessionLimit() throws {
+        let usage = UsageData(from: try decodeJSON("""
+        { "five_hour": null, "seven_day": { "utilization": 40, "resets_at": "2026-11-01T23:00:00Z" } }
+        """))
+        XCTAssertFalse(usage.hasSessionLimit)
+    }
+
+    func testEmptyLimitsWithALegacyWeeklyReading_hasNoSessionLimit() throws {
+        let usage = UsageData(from: try decodeJSON("""
+        { "five_hour": null, "seven_day": { "utilization": 40 }, "limits": [] }
+        """))
+        XCTAssertFalse(usage.hasSessionLimit)
+        XCTAssertTrue(usage.weeklyPercentWasRead, "the weekly comes through the legacy fallback")
+    }
+
     // MARK: - Clamping: utilization > 100
 
     func testUtilizationOver100_clampedToZeroRemaining() {
@@ -407,6 +495,14 @@ final class UsageDataTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Decode a `/usage` body from a JSON string with the production decoder settings.
+    private func decodeJSON(_ json: String) throws -> UsageResponse {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(UsageResponse.self, from: Data(json.utf8))
+    }
 
     /// Build a UsageTier by round-tripping through JSON so Codable init is used.
     private func makeTier(utilization: Double, resetsAt: Date? = nil) -> UsageTier {

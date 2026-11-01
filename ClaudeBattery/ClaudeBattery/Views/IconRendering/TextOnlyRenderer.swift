@@ -6,9 +6,21 @@ struct TextOnlyRenderer: IconRenderer {
     private let separatorFont = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .light)
     private let iconHeight: CGFloat = 18
 
-    private func makeTextIcon(session: String, weekly: String, alpha: CGFloat = 1.0, color: NSColor) -> NSImage {
+    /// `session` nil draws the weekly number alone, with no separator: an account with no 5-hour
+    /// limit has no session number to show.
+    private func makeTextIcon(session: String?, weekly: String, alpha: CGFloat = 1.0, color: NSColor) -> NSImage {
         let tintedColor = color.withAlphaComponent(alpha)
         let numAttrs: [NSAttributedString.Key: Any] = [.font: numberFont, .foregroundColor: tintedColor]
+        guard let session else {
+            let weeklyStr = weekly as NSString
+            let weeklySize = weeklyStr.size(withAttributes: numAttrs)
+            let image = NSImage(size: NSSize(width: weeklySize.width, height: iconHeight), flipped: false) { _ in
+                weeklyStr.draw(at: NSPoint(x: 0, y: (iconHeight - weeklySize.height) / 2), withAttributes: numAttrs)
+                return true
+            }
+            image.isTemplate = false
+            return image
+        }
         let sepAttrs: [NSAttributedString.Key: Any] = [.font: separatorFont,
                                                         .foregroundColor: tintedColor.withAlphaComponent(0.5)]
         let sessionStr = session as NSString
@@ -49,7 +61,8 @@ struct TextOnlyRenderer: IconRenderer {
     }
 
     func makeBatteryIcon(usage: UsageData, color: NSColor) -> NSImage {
-        makeTextIcon(session: "\(Int(usage.sessionDisplayRemaining.rounded(.toNearestOrEven)))",
+        makeTextIcon(session: usage.hasSessionLimit
+                        ? "\(Int(usage.sessionDisplayRemaining.rounded(.toNearestOrEven)))" : nil,
                      weekly: "\(Int(usage.weeklyRemaining.rounded(.toNearestOrEven)))",
                      color: color)
     }

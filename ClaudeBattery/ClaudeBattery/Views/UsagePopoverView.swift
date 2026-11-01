@@ -141,8 +141,14 @@ struct UsagePopoverView: View {
                 regionUnavailableCard()
             }
 
-            LazyVGrid(columns: columns, spacing: 8) {
-                sessionCard(usage: usage)
+            // An account with no 5-hour limit has no Session card, so the Weekly card takes the
+            // whole row. Its own run-out line already carries the forecast.
+            if usage.hasSessionLimit {
+                LazyVGrid(columns: columns, spacing: 8) {
+                    sessionCard(usage: usage)
+                    weeklyCard(usage: usage)
+                }
+            } else {
                 weeklyCard(usage: usage)
             }
 
@@ -358,7 +364,7 @@ struct UsagePopoverView: View {
     /// Session window length: 5h, consistent with the 5-tick session gauge (A3).
     static let sessionWindow: TimeInterval = 5 * 3600
     /// Weekly window length: 7 days.
-    static let weeklyWindow: TimeInterval = 7 * 24 * 3600
+    nonisolated static let weeklyWindow: TimeInterval = 7 * 24 * 3600
 
     /// Time remaining in the window as a percent (counts down 100 -> 0), clamped 0-100.
     /// The API supplies only `resetsAt` (the window end); the start is derived as
@@ -390,9 +396,9 @@ struct UsagePopoverView: View {
     /// faster than the clock). It is exactly how much longer the inner time arc is than the outer
     /// usage arc, so the RAG status names the visible gap between the two arcs.
     /// At or above this delta the pace is Caution (amber).
-    static let cautionDelta: Double = 10
+    nonisolated static let cautionDelta: Double = 10
     /// At or above this delta the pace is Danger (red).
-    static let dangerDelta: Double = 25
+    nonisolated static let dangerDelta: Double = 25
 
     /// Pace status for one window, from the current usage snapshot only. Mirrors
     /// `timeRemainingPercent` (window start = `resetsAt - window`; a nil/past/non-finite delta
@@ -400,7 +406,7 @@ struct UsagePopoverView: View {
     /// ahead of pace (negative delta) is always `.onTrack`, and 0% usage remaining is `.danger`
     /// (already used up). No early-window or near-reset guard is needed: unlike a projected run-out
     /// time, the delta is stable across the whole window (it never divides by elapsed time).
-    static func paceStatus(remainingPercent: Double, resetsAt: Date?, window: TimeInterval, now: Date = Date()) -> PaceStatus {
+    nonisolated static func paceStatus(remainingPercent: Double, resetsAt: Date?, window: TimeInterval, now: Date = Date()) -> PaceStatus {
         guard let resetsAt,
               let r = CountdownFormat.remainingSeconds(until: resetsAt, now: now) else { return .unknown }
         if remainingPercent <= 0 { return .danger }
@@ -428,7 +434,7 @@ struct UsagePopoverView: View {
     }
 
     /// Copy for the pace caption under each dial (#31). nil hides the line (`.unknown`, KTD4).
-    static func paceCaption(_ status: PaceStatus) -> String? {
+    nonisolated static func paceCaption(_ status: PaceStatus) -> String? {
         switch status {
         case .onTrack:       return "On Track"
         case .caution:       return "Caution"

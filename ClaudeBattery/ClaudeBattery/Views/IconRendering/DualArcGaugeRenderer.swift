@@ -96,11 +96,13 @@ struct DualArcGaugeRenderer: IconRenderer {
                     fraction: CGFloat(weeklyPercent) / 100.0,
                     trackColor: trackColor, fillColor: weeklyFill)
 
-            // Inner arc — session
-            let sessionFill: NSColor = sessionPercent < 20 ? .red : baseColor
-            drawArc(center: center, radius: innerRadius,
-                    fraction: CGFloat(sessionPercent) / 100.0,
-                    trackColor: trackColor, fillColor: sessionFill)
+            // Inner arc: session, left out on an account with no 5-hour limit
+            if usage.hasSessionLimit {
+                let sessionFill: NSColor = sessionPercent < 20 ? .red : baseColor
+                drawArc(center: center, radius: innerRadius,
+                        fraction: CGFloat(sessionPercent) / 100.0,
+                        trackColor: trackColor, fillColor: sessionFill)
+            }
 
             return true
         }

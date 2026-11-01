@@ -1,7 +1,7 @@
 import XCTest
 @testable import ClaudeBattery
 
-/// Locks the pure `MenuBarController.countdownTitle(usage:enabled:now:)` mapping. The returned
+/// Locks the pure `MenuBarController.countdownCell(usage:enabled:now:)` mapping. The returned
 /// string is composed into the menu-bar icon as a leading "tag cell" and folded into the
 /// IconSignature, but only the string mapping is unit-tested here. `UsageData` has no public
 /// memberwise init, so the fixture decodes a real `UsageResponse` with a `session` limit and a
@@ -105,54 +105,54 @@ final class MenuBarCountdownTests: XCTestCase {
 
     func testEnabled_fourHoursTwentyMinutesOut_isHourPlus() throws {
         let usage = try makeUsage()
-        let title = MenuBarController.countdownTitle(
+        let title = MenuBarController.countdownCell(
             usage: usage, enabled: true, now: now(secondsBeforeReset: 4 * 3600 + 20 * 60)
         )
-        XCTAssertEqual(title, "4h+")
+        XCTAssertEqual(title.text, "4h+")
     }
 
     func testEnabled_thirtyTwoMinutesOut_isMinutes() throws {
         let usage = try makeUsage()
-        let title = MenuBarController.countdownTitle(
+        let title = MenuBarController.countdownCell(
             usage: usage, enabled: true, now: now(secondsBeforeReset: 32 * 60)
         )
-        XCTAssertEqual(title, "32m")
+        XCTAssertEqual(title.text, "32m")
     }
 
     func testEnabled_fortySecondsOut_isLessThanAMinute() throws {
         let usage = try makeUsage()
-        let title = MenuBarController.countdownTitle(
+        let title = MenuBarController.countdownCell(
             usage: usage, enabled: true, now: now(secondsBeforeReset: 40)
         )
-        XCTAssertEqual(title, "<1m")
+        XCTAssertEqual(title.text, "<1m")
     }
 
     func testEnabled_nilSessionResetDate_isEmpty() throws {
         let usage = try makeUsageWithoutSessionReset()
-        let title = MenuBarController.countdownTitle(usage: usage, enabled: true, now: now(secondsBeforeReset: 600))
-        XCTAssertEqual(title, "")
+        let title = MenuBarController.countdownCell(usage: usage, enabled: true, now: now(secondsBeforeReset: 600))
+        XCTAssertEqual(title.text, "")
     }
 
     func testEnabled_nilUsage_isEmpty() {
-        let title = MenuBarController.countdownTitle(usage: nil, enabled: true, now: resetDate)
-        XCTAssertEqual(title, "")
+        let title = MenuBarController.countdownCell(usage: nil, enabled: true, now: resetDate)
+        XCTAssertEqual(title.text, "")
     }
 
     func testDisabled_isEmptyDespiteValidResetDate() throws {
         let usage = try makeUsage()
-        let title = MenuBarController.countdownTitle(
+        let title = MenuBarController.countdownCell(
             usage: usage, enabled: false, now: now(secondsBeforeReset: 32 * 60)
         )
-        XCTAssertEqual(title, "")
+        XCTAssertEqual(title.text, "")
     }
 
     func testEnabled_pastResetDate_isEmpty() throws {
         let usage = try makeUsage()
         // now AFTER the reset -> non-positive countdown -> "" (never traps, never misleads).
-        let title = MenuBarController.countdownTitle(
+        let title = MenuBarController.countdownCell(
             usage: usage, enabled: true, now: now(secondsBeforeReset: -60)
         )
-        XCTAssertEqual(title, "")
+        XCTAssertEqual(title.text, "")
     }
 
     /// The countdown is deliberately NOT suppressed while the weekly limit binds. Suppressing it
@@ -162,20 +162,20 @@ final class MenuBarCountdownTests: XCTestCase {
     /// A future "consistency" change that empties the cell here has to overturn that decision.
     func testEnabled_weeklyLimited_stillReturnsTheSessionCountdown() throws {
         let usage = try makeWeeklyLimitedUsage()
-        let title = MenuBarController.countdownTitle(
+        let title = MenuBarController.countdownCell(
             usage: usage, enabled: true, now: now(secondsBeforeReset: 32 * 60)
         )
-        XCTAssertEqual(title, "32m")
+        XCTAssertEqual(title.text, "32m")
     }
 
     func testEnabled_weeklyHealthy_stillReturnsCountdown() throws {
         let usage = try makeWeeklyHealthyUsage()
         // The control: same two-limit shape with the gate shut. Together with the case above this
         // pins that the cell is indifferent to the weekly gate, in both directions.
-        let title = MenuBarController.countdownTitle(
+        let title = MenuBarController.countdownCell(
             usage: usage, enabled: true, now: now(secondsBeforeReset: 32 * 60)
         )
-        XCTAssertEqual(title, "32m")
+        XCTAssertEqual(title.text, "32m")
     }
 
     func testDefaultFixture_withNoWeeklyLimit_isNotWeeklyLimited() throws {
@@ -184,6 +184,104 @@ final class MenuBarCountdownTests: XCTestCase {
         // above honest: their difference really is the weekly gate and not the fixture shape.
         XCTAssertEqual(usage.weeklyRemaining, 100)
         XCTAssertFalse(usage.isSessionWeeklyLimited)
+    }
+
+    func testSessionCountdown_isAlwaysNeutral() throws {
+        // The session timer keeps its plain look, so its images are unchanged by the tone.
+        let usage = try makeWeeklyLimitedUsage()
+        let cell = MenuBarController.countdownCell(usage: usage, enabled: true, now: now(secondsBeforeReset: 32 * 60))
+        XCTAssertEqual(cell.tone, .neutral)
+    }
+
+    // MARK: - No 5-hour limit: the cell shows the weekly run-out estimate
+
+    /// An account with no 5-hour limit, `weeklyLeft` percent of the week remaining, and the weekly
+    /// reset at `resetEpoch`.
+    private func makeWeeklyOnlyUsage(weeklyLeft: Double) throws -> UsageData {
+        let json = """
+        {
+          "five_hour": null,
+          "limits": [
+            { "kind": "weekly_all", "percent": \(100 - weeklyLeft), "resets_at": \(Int(resetEpoch)) }
+          ]
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        decoder.dateDecodingStrategy = .iso8601
+        let usage = UsageData(from: try decoder.decode(UsageResponse.self, from: Data(json.utf8)))
+        XCTAssertFalse(usage.hasSessionLimit)
+        XCTAssertEqual(usage.weeklyResetDate, resetDate)
+        return usage
+    }
+
+    /// What the popover's Weekly dial prints for the same snapshot and clock.
+    private func weeklyDial(weeklyLeft: Double, at now: Date) -> UsagePopoverView.DialLines {
+        let window = UsagePopoverView.weeklyWindow
+        let pace = UsagePopoverView.paceStatus(remainingPercent: weeklyLeft, resetsAt: resetDate,
+                                               window: window, now: now)
+        return UsagePopoverView.dialLines(pace: pace, rawRemaining: weeklyLeft, resetsAt: resetDate,
+                                          window: window, now: now)
+    }
+
+    func testNoSessionLimit_caution_showsTheDialsRunOutInOrange() throws {
+        let at = now(secondsBeforeReset: 72 * 3600)
+        let cell = MenuBarController.countdownCell(usage: try makeWeeklyOnlyUsage(weeklyLeft: 25), enabled: true, now: at)
+        XCTAssertEqual(cell.text, "32h")
+        XCTAssertEqual(cell.tone, .caution)
+
+        let dial = weeklyDial(weeklyLeft: 25, at: at)
+        XCTAssertEqual(dial.runOutSeconds, 32 * 3600)
+        XCTAssertEqual(dial.runOut, "Out in ~1d 08h")
+    }
+
+    func testNoSessionLimit_cautionUnderTheTwentyPercentFloor_isRed() throws {
+        // The popover paints the pace word red below 20% left whatever the pace says, and the cell
+        // follows it so the two surfaces never disagree about how bad things are.
+        let at = now(secondsBeforeReset: 39 * 3600)
+        let cell = MenuBarController.countdownCell(usage: try makeWeeklyOnlyUsage(weeklyLeft: 10), enabled: true, now: at)
+        XCTAssertEqual(cell.text, "14h")
+        XCTAssertEqual(cell.tone, .danger)
+
+        let dial = weeklyDial(weeklyLeft: 10, at: at)
+        XCTAssertEqual(dial.caption, "Caution")
+        XCTAssertEqual(dial.runOutSeconds, 14 * 3600)
+        XCTAssertEqual(dial.runOut, "Out in ~14h 00m")
+    }
+
+    func testNoSessionLimit_danger_isRedAndMatchesTheDial() throws {
+        let at = now(secondsBeforeReset: 100 * 3600)
+        let cell = MenuBarController.countdownCell(usage: try makeWeeklyOnlyUsage(weeklyLeft: 5), enabled: true, now: at)
+        XCTAssertEqual(cell.text, "4h")
+        XCTAssertEqual(cell.tone, .danger)
+        XCTAssertEqual(weeklyDial(weeklyLeft: 5, at: at).runOutSeconds, 4 * 3600)
+    }
+
+    func testNoSessionLimit_onTrack_showsNoCell() throws {
+        let cell = MenuBarController.countdownCell(usage: try makeWeeklyOnlyUsage(weeklyLeft: 60), enabled: true,
+                                                   now: now(secondsBeforeReset: 72 * 3600))
+        XCTAssertEqual(cell, .none)
+    }
+
+    func testNoSessionLimit_weekUsedUp_showsNoCell() throws {
+        let cell = MenuBarController.countdownCell(usage: try makeWeeklyOnlyUsage(weeklyLeft: 0), enabled: true,
+                                                   now: now(secondsBeforeReset: 39 * 3600))
+        XCTAssertEqual(cell, .none)
+    }
+
+    func testNoSessionLimit_tooEarlyInTheWeekToProject_showsNoCell() throws {
+        // Heavy use eight hours into the week is Danger, but the dial projects nothing that early,
+        // so neither does the menu bar.
+        let at = now(secondsBeforeReset: 160 * 3600)
+        let cell = MenuBarController.countdownCell(usage: try makeWeeklyOnlyUsage(weeklyLeft: 50), enabled: true, now: at)
+        XCTAssertEqual(cell, .none)
+        XCTAssertNil(weeklyDial(weeklyLeft: 50, at: at).runOutSeconds)
+    }
+
+    func testNoSessionLimit_disabled_showsNoCell() throws {
+        let cell = MenuBarController.countdownCell(usage: try makeWeeklyOnlyUsage(weeklyLeft: 25), enabled: false,
+                                                   now: now(secondsBeforeReset: 72 * 3600))
+        XCTAssertEqual(cell, .none)
     }
 
     // MARK: - Version menu title (#48)

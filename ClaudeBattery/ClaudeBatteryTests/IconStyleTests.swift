@@ -250,6 +250,48 @@ final class IconStyleTests: XCTestCase {
     /// 0.05pt difference decided by antialiasing - a flake risk, not a reliable assertion.
     private static let digitDrawingStyles: [IconStyle] = [.textOnly, .dualHorizontal]
 
+    // MARK: - No 5-hour limit: the weekly value alone
+
+    /// An account with no 5-hour limit reads session 100 by default. A has-limit account with a full
+    /// session and the same weekly therefore has the same numbers, so the only way the two icons can
+    /// differ is if the session element really was left out.
+    func testNoSessionLimit_everyRendererLeavesTheSessionOut() {
+        let weeklyOnly = RenderStateTests.makeWeeklyOnlyUsage(weeklyUtilization: 60)
+        let withSession = RenderStateTests.makeUsage(sessionUtilization: 0, weeklyUtilization: 60)
+        XCTAssertFalse(weeklyOnly.hasSessionLimit)
+        XCTAssertTrue(withSession.hasSessionLimit)
+        XCTAssertEqual(weeklyOnly.weeklyRemaining, withSession.weeklyRemaining, accuracy: 0.01)
+        XCTAssertEqual(weeklyOnly.sessionDisplayRemaining, withSession.sessionDisplayRemaining, accuracy: 0.01)
+
+        for style in IconStyle.allCases {
+            let single = style.renderer.makeBatteryIcon(usage: weeklyOnly, color: .white).tiffRepresentation
+            let dual = style.renderer.makeBatteryIcon(usage: withSession, color: .white).tiffRepresentation
+            XCTAssertNotNil(single, "\(style.rawValue) produced no image data")
+            XCTAssertNotEqual(single, dual, "\(style.rawValue) still draws a session element with no 5-hour limit")
+        }
+    }
+
+    func testNoSessionLimit_everyRendererStillDrawsTheWeekly() {
+        let half = RenderStateTests.makeWeeklyOnlyUsage(weeklyUtilization: 50)  // weekly 50 left
+        let low = RenderStateTests.makeWeeklyOnlyUsage(weeklyUtilization: 90)   // weekly 10 left
+
+        for style in IconStyle.allCases {
+            let fromHalf = style.renderer.makeBatteryIcon(usage: half, color: .white).tiffRepresentation
+            let fromLow = style.renderer.makeBatteryIcon(usage: low, color: .white).tiffRepresentation
+            XCTAssertNotEqual(fromHalf, fromLow, "\(style.rawValue) does not draw the weekly value")
+        }
+    }
+
+    func testNoSessionLimit_dualHorizontalIsOneBatteryWide() {
+        let renderer = IconStyle.dualHorizontal.renderer
+        let single = renderer.makeBatteryIcon(usage: RenderStateTests.makeWeeklyOnlyUsage(weeklyUtilization: 60),
+                                              color: .white)
+        let dual = renderer.makeBatteryIcon(usage: RenderStateTests.makeUsage(sessionUtilization: 0, weeklyUtilization: 60),
+                                            color: .white)
+        XCTAssertLessThan(single.size.width, dual.size.width)
+        XCTAssertEqual(single.size.height, dual.size.height, "the countdown cell centres against this height")
+    }
+
     // MARK: - Each renderer call returns a fresh instance (struct value type)
 
     func testRendererReturnsSameTypeEachCall() {

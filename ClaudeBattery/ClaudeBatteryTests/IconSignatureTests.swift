@@ -189,6 +189,20 @@ final class RenderStateTests: XCTestCase {
         ), planRatio: planRatio)
     }
 
+    /// UsageData for an account with no 5-hour limit: `five_hour` null and only a weekly reading,
+    /// the shape claude.ai returns for those plans. Its session fields default to an unused 100.
+    static func makeWeeklyOnlyUsage(weeklyUtilization: Double) -> UsageData {
+        UsageData(from: UsageResponse(
+            fiveHour: nil,
+            sevenDay: Self.makeTier(utilization: weeklyUtilization),
+            sevenDayOpus: nil,
+            sevenDaySonnet: nil,
+            extraUsage: nil,
+            limits: nil,
+            spend: nil
+        ))
+    }
+
     private static func makeTier(utilization: Double) -> UsageTier {
         let json: [String: Any] = ["utilization": utilization]
         let data = try! JSONSerialization.data(withJSONObject: json)
@@ -379,6 +393,37 @@ final class IconSignatureTests: XCTestCase {
         XCTAssertNotEqual(off, on)
     }
 
+    // A run-out that worsens from Caution to Danger can keep the same text ("14h"), and the cell
+    // must still repaint in the new colour.
+    func testCountdownToneChange_producesUnequalSignatures() {
+        let usage = RenderStateTests.makeWeeklyOnlyUsage(weeklyUtilization: 80)
+        let caution = makeSignature(isAuthenticated: true, usage: usage, countdown: "14h", tone: .caution)
+        let danger = makeSignature(isAuthenticated: true, usage: usage, countdown: "14h", tone: .danger)
+        XCTAssertNotEqual(caution, danger)
+    }
+
+    // Switching between a plan with a 5-hour limit and one without changes what is drawn even when
+    // the numbers match, so the signature must change with it.
+    func testSessionLimitPresence_producesUnequalSignatures() {
+        let withSession = RenderStateTests.makeUsage(sessionUtilization: 0, weeklyUtilization: 60)
+        let weeklyOnly = RenderStateTests.makeWeeklyOnlyUsage(weeklyUtilization: 60)
+        XCTAssertNotEqual(makeSignature(isAuthenticated: true, usage: withSession),
+                          makeSignature(isAuthenticated: true, usage: weeklyOnly))
+    }
+
+    // The session timer stays in the menu bar's own colour; a run-out cell is tinted so it cannot be
+    // read as a reset timer.
+    func testTintedCell_looksDifferentFromTheNeutralCell() {
+        let battery = IconStyle.dualHorizontal.renderer.makeBatteryIcon(
+            usage: RenderStateTests.makeUsage(weeklyUtilization: 50.0), color: .white)
+        let neutral = MenuBarController.imageWithCountdownCell(
+            countdown: CountdownCell(text: "4h+", tone: .neutral), batteryImage: battery, color: .white)
+        let caution = MenuBarController.imageWithCountdownCell(
+            countdown: CountdownCell(text: "4h+", tone: .caution), batteryImage: battery, color: .white)
+        XCTAssertNotEqual(neutral.tiffRepresentation, caution.tiffRepresentation,
+                          "a tinted cell must look different from the plain one")
+    }
+
     // MARK: - Helpers
 
     private func makeSignature(
@@ -388,7 +433,8 @@ final class IconSignatureTests: XCTestCase {
         usage: UsageData? = nil,
         consecutiveFailures: Int = 0,
         isStale: Bool = false,
-        countdown: String = ""
+        countdown: String = "",
+        tone: CountdownCell.Tone = .neutral
     ) -> IconSignature {
         let render = MenuBarController.renderState(
             isAuthenticated: isAuthenticated,
@@ -397,7 +443,8 @@ final class IconSignatureTests: XCTestCase {
             consecutiveFailures: consecutiveFailures,
             isStale: isStale
         )
-        return IconSignature(style: style, isMenuBarDark: isMenuBarDark, render: render, countdown: countdown)
+        return IconSignature(style: style, isMenuBarDark: isMenuBarDark, render: render,
+                             countdown: CountdownCell(text: countdown, tone: tone))
     }
 }
 

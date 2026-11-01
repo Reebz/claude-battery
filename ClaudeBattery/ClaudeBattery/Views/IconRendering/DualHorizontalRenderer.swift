@@ -67,7 +67,11 @@ struct DualHorizontalRenderer: IconRenderer {
         let iconHeight: CGFloat = 18
         let gap: CGFloat = 4
 
-        let totalWidth = nubWidth + batteryWidth + gap + batteryWidth + nubWidth
+        // An account with no 5-hour limit has no session to draw, so the weekly battery stands alone.
+        let showsSession = usage.hasSessionLimit
+        let totalWidth = showsSession
+            ? nubWidth + batteryWidth + gap + batteryWidth + nubWidth
+            : batteryWidth + nubWidth
         let baseColor = color
 
         let image = NSImage(size: NSSize(width: totalWidth, height: iconHeight), flipped: false) { _ in
@@ -139,10 +143,13 @@ struct DualHorizontalRenderer: IconRenderer {
             }
 
             // Session battery (left, nub points left)
-            drawBattery(bodyX: nubWidth, nubOnLeft: true, percent: sessionPercent, isLow: isSessionLow)
+            if showsSession {
+                drawBattery(bodyX: nubWidth, nubOnLeft: true, percent: sessionPercent, isLow: isSessionLow)
+            }
 
             // Weekly battery (right, nub points right)
-            drawBattery(bodyX: nubWidth + batteryWidth + gap, nubOnLeft: false, percent: weeklyPercent, isLow: isWeeklyLow)
+            drawBattery(bodyX: showsSession ? nubWidth + batteryWidth + gap : 0, nubOnLeft: false,
+                        percent: weeklyPercent, isLow: isWeeklyLow)
 
             return true
         }

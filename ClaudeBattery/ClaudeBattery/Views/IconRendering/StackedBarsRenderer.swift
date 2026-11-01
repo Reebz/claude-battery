@@ -7,22 +7,28 @@ struct StackedBarsRenderer: IconRenderer {
     private let gap: CGFloat = 3
     private let iconHeight: CGFloat = 18
 
-    private func makeBarsIcon(sessionFraction: CGFloat, weeklyFraction: CGFloat,
+    /// `sessionFraction` nil draws the weekly bar alone, centred: an account with no 5-hour limit
+    /// has no session bar to show.
+    private func makeBarsIcon(sessionFraction: CGFloat?, weeklyFraction: CGFloat,
                               sessionLow: Bool, weeklyLow: Bool,
                               alpha: CGFloat = 1.0, color: NSColor) -> NSImage {
         let baseColor = color.withAlphaComponent(alpha)
         let trackColor = baseColor.withAlphaComponent(0.18)
         let topBarY = (iconHeight + gap) / 2          // session bar (top)
-        let bottomBarY = (iconHeight - gap) / 2 - barHeight  // weekly bar (bottom)
+        let bottomBarY = sessionFraction == nil
+            ? (iconHeight - barHeight) / 2            // weekly bar alone, centred
+            : (iconHeight - gap) / 2 - barHeight      // weekly bar (bottom)
 
         let image = NSImage(size: NSSize(width: barWidth, height: iconHeight), flipped: false) { _ in
             // Tracks
             trackColor.setFill()
-            NSBezierPath(roundedRect: NSRect(x: 0, y: topBarY, width: barWidth, height: barHeight), xRadius: 2, yRadius: 2).fill()
+            if sessionFraction != nil {
+                NSBezierPath(roundedRect: NSRect(x: 0, y: topBarY, width: barWidth, height: barHeight), xRadius: 2, yRadius: 2).fill()
+            }
             NSBezierPath(roundedRect: NSRect(x: 0, y: bottomBarY, width: barWidth, height: barHeight), xRadius: 2, yRadius: 2).fill()
 
             // Session fill (top bar)
-            let sessionFillWidth = barWidth * max(sessionFraction, 0)
+            let sessionFillWidth = barWidth * max(sessionFraction ?? 0, 0)
             if sessionFillWidth > 0 {
                 let fillColor: NSColor = sessionLow ? .red : baseColor
                 fillColor.setFill()
@@ -56,7 +62,7 @@ struct StackedBarsRenderer: IconRenderer {
     }
 
     func makeBatteryIcon(usage: UsageData, color: NSColor) -> NSImage {
-        makeBarsIcon(sessionFraction: CGFloat(usage.sessionDisplayRemaining) / 100.0,
+        makeBarsIcon(sessionFraction: usage.hasSessionLimit ? CGFloat(usage.sessionDisplayRemaining) / 100.0 : nil,
                      weeklyFraction: CGFloat(usage.weeklyRemaining) / 100.0,
                      sessionLow: usage.sessionDisplayRemaining < 20,
                      weeklyLow: usage.weeklyRemaining < 20,
