@@ -7,15 +7,20 @@ struct TextOnlyRenderer: IconRenderer {
     private let iconHeight: CGFloat = 18
 
     /// `session` nil draws the weekly number alone, with no separator: an account with no 5-hour
-    /// limit has no session number to show.
-    private func makeTextIcon(session: String?, weekly: String, alpha: CGFloat = 1.0, color: NSColor) -> NSImage {
+    /// limit has no session number to show. That lone number turns red when `weeklyLow`, the warning
+    /// every other style gives through its red fill; with no session beside it and no countdown cell
+    /// on an empty week, it is the only warning left in the menu bar.
+    private func makeTextIcon(session: String?, weekly: String, weeklyLow: Bool = false,
+                              alpha: CGFloat = 1.0, color: NSColor) -> NSImage {
         let tintedColor = color.withAlphaComponent(alpha)
         let numAttrs: [NSAttributedString.Key: Any] = [.font: numberFont, .foregroundColor: tintedColor]
         guard let session else {
             let weeklyStr = weekly as NSString
-            let weeklySize = weeklyStr.size(withAttributes: numAttrs)
+            var weeklyAttrs = numAttrs
+            if weeklyLow { weeklyAttrs[.foregroundColor] = NSColor.red.withAlphaComponent(alpha) }
+            let weeklySize = weeklyStr.size(withAttributes: weeklyAttrs)
             let image = NSImage(size: NSSize(width: weeklySize.width, height: iconHeight), flipped: false) { _ in
-                weeklyStr.draw(at: NSPoint(x: 0, y: (iconHeight - weeklySize.height) / 2), withAttributes: numAttrs)
+                weeklyStr.draw(at: NSPoint(x: 0, y: (iconHeight - weeklySize.height) / 2), withAttributes: weeklyAttrs)
                 return true
             }
             image.isTemplate = false
@@ -64,6 +69,7 @@ struct TextOnlyRenderer: IconRenderer {
         makeTextIcon(session: usage.hasSessionLimit
                         ? "\(Int(usage.sessionDisplayRemaining.rounded(.toNearestOrEven)))" : nil,
                      weekly: "\(Int(usage.weeklyRemaining.rounded(.toNearestOrEven)))",
+                     weeklyLow: usage.weeklyRemaining < 20,
                      color: color)
     }
 }

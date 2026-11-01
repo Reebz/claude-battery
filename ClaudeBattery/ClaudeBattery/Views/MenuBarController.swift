@@ -389,7 +389,8 @@ class MenuBarController: NSObject {
         // or tone (e.g. "32m" -> "31m") and never in a loop - same-cell fires short-circuit below.
         let countdown = Self.countdownCell(
             usage: usage,
-            enabled: UserDefaults.standard.bool(forKey: MenuBarDefaults.showSessionCountdownKey)
+            enabled: UserDefaults.standard.bool(forKey: MenuBarDefaults.showSessionCountdownKey),
+            paceGradedAt: usageService.lastSuccessfulFetch
         )
         let signature = IconSignature(style: style, isMenuBarDark: isMenuBarDark, render: render, countdown: countdown)
 
@@ -443,9 +444,12 @@ class MenuBarController: NSObject {
     /// the reset time in the state where users most want it. The popover still hides the dial's
     /// inner time arc for that same pairing (`suppressTimeArc:` in `UsagePopoverView.sessionCard`),
     /// so the two surfaces differ here on purpose; do not "restore parity" without re-deciding this.
-    nonisolated static func countdownCell(usage: UsageData?, enabled: Bool, now: Date = Date()) -> CountdownCell {
+    nonisolated static func countdownCell(usage: UsageData?, enabled: Bool, now: Date = Date(),
+                                          paceGradedAt: Date? = nil) -> CountdownCell {
         guard enabled, let usage else { return .none }
-        guard usage.hasSessionLimit else { return weeklyRunOutCell(usage: usage, now: now) }
+        guard usage.hasSessionLimit else {
+            return weeklyRunOutCell(usage: usage, now: now, paceGradedAt: paceGradedAt ?? now)
+        }
         guard let resetDate = usage.sessionResetDate,
               let text = CountdownFormat.compactCountdown(until: resetDate, now: now) else { return .none }
         return CountdownCell(text: text, tone: .neutral)
@@ -457,10 +461,15 @@ class MenuBarController: NSObject {
     /// under the dial means no cell: on track, too early in the week to project, already empty, or
     /// no reset time. The tone follows the dial's pace word, red below the nearly-empty threshold
     /// whatever the pace, so a warning reads as a warning rather than as a reset timer.
-    nonisolated static func weeklyRunOutCell(usage: UsageData, now: Date) -> CountdownCell {
+    ///
+    /// The pace is graded at `paceGradedAt`, the time of the last successful poll, because that is
+    /// when the popover grades the Weekly dial's pace; only the durations follow the minute clock.
+    /// Grading it on every tick instead lets the cell vanish or change colour up to a poll interval
+    /// before the dial's pace word does, when the week sits right on a pace threshold.
+    nonisolated static func weeklyRunOutCell(usage: UsageData, now: Date, paceGradedAt: Date) -> CountdownCell {
         let window = UsagePopoverView.weeklyWindow
         let pace = UsagePopoverView.paceStatus(remainingPercent: usage.weeklyRemaining,
-                                               resetsAt: usage.weeklyResetDate, window: window, now: now)
+                                               resetsAt: usage.weeklyResetDate, window: window, now: paceGradedAt)
         let lines = UsagePopoverView.dialLines(pace: pace, rawRemaining: usage.weeklyRemaining,
                                                resetsAt: usage.weeklyResetDate, window: window, now: now)
         guard let runOut = lines.runOutSeconds else { return .none }

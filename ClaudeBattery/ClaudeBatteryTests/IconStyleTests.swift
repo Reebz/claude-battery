@@ -282,6 +282,32 @@ final class IconStyleTests: XCTestCase {
         }
     }
 
+    /// An empty week on a lone weekly icon must still read as a warning. The digit styles show it as
+    /// a red number; with a 5-hour limit the icon is unchanged, so its empty weekly keeps the neutral
+    /// colour it always had.
+    func testNoSessionLimit_emptyWeek_digitStylesDrawARedNumber() {
+        let empty = RenderStateTests.makeWeeklyOnlyUsage(weeklyUtilization: 100)
+        for style in Self.digitDrawingStyles {
+            let image = style.renderer.makeBatteryIcon(usage: empty, color: .white)
+            XCTAssertTrue(Self.containsRed(image), "\(style.rawValue) draws an empty week without red")
+        }
+        let withSession = RenderStateTests.makeUsage(sessionUtilization: 0, weeklyUtilization: 100)
+        XCTAssertFalse(Self.containsRed(IconStyle.dualHorizontal.renderer.makeBatteryIcon(usage: withSession, color: .white)),
+                       "the two-battery icon must look as it did before")
+    }
+
+    /// Whether any pixel is clearly red (strong red channel, weak green and blue).
+    private static func containsRed(_ image: NSImage) -> Bool {
+        guard let data = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: data) else { return false }
+        for x in 0..<bitmap.pixelsWide {
+            for y in 0..<bitmap.pixelsHigh {
+                guard let c = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB), c.alphaComponent > 0.5 else { continue }
+                if c.redComponent > 0.7, c.greenComponent < 0.35, c.blueComponent < 0.35 { return true }
+            }
+        }
+        return false
+    }
+
     func testNoSessionLimit_dualHorizontalIsOneBatteryWide() {
         let renderer = IconStyle.dualHorizontal.renderer
         let single = renderer.makeBatteryIcon(usage: RenderStateTests.makeWeeklyOnlyUsage(weeklyUtilization: 60),

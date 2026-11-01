@@ -80,7 +80,9 @@ struct DualHorizontalRenderer: IconRenderer {
             let interiorWidth = batteryWidth - fillInset * 2
             let interiorHeight = batteryHeight - fillInset * 2
 
-            func drawBattery(bodyX: CGFloat, nubOnLeft: Bool, percent: Int, isLow: Bool) {
+            // `redWhenEmpty` paints the number red when the fill is gone: at 0 the red fill vanishes,
+            // and a lone weekly battery would otherwise show an empty week in the neutral colour.
+            func drawBattery(bodyX: CGFloat, nubOnLeft: Bool, percent: Int, isLow: Bool, redWhenEmpty: Bool = false) {
                 let font = percent >= 100 ? smallNumberFont : numberFont
                 let numberStr = "\(percent)" as NSString
                 let numberSize = numberStr.size(withAttributes: [.font: font, .kern: kern])
@@ -136,7 +138,7 @@ struct DualHorizontalRenderer: IconRenderer {
                     ctx.clip(to: unfilledRect)
                     numberStr.draw(at: numberPoint, withAttributes: [
                         .font: font, .kern: kern,
-                        .foregroundColor: baseColor
+                        .foregroundColor: redWhenEmpty && isLow && fillWidth <= 0 ? NSColor.red : baseColor
                     ])
                     ctx.restoreGState()
                 }
@@ -149,7 +151,7 @@ struct DualHorizontalRenderer: IconRenderer {
 
             // Weekly battery (right, nub points right)
             drawBattery(bodyX: showsSession ? nubWidth + batteryWidth + gap : 0, nubOnLeft: false,
-                        percent: weeklyPercent, isLow: isWeeklyLow)
+                        percent: weeklyPercent, isLow: isWeeklyLow, redWhenEmpty: !showsSession)
 
             return true
         }

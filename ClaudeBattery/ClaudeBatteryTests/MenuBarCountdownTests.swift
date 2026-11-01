@@ -278,6 +278,29 @@ final class MenuBarCountdownTests: XCTestCase {
         XCTAssertNil(weeklyDial(weeklyLeft: 50, at: at).runOutSeconds)
     }
 
+    /// The popover grades the Weekly dial's pace once per poll and only re-prints the durations on
+    /// its minute clock, so the cell must grade the pace at the poll too. Here the week sits right on
+    /// the Caution line at the poll (time 40.005% left against 30% usage left) and slips below it a
+    /// minute later, before the next poll.
+    func testNoSessionLimit_paceStaysAsGradedAtThePoll_untilTheNextPoll() throws {
+        let polledAt = now(secondsBeforeReset: 241_950)
+        let minuteLater = polledAt.addingTimeInterval(60)
+        let usage = try makeWeeklyOnlyUsage(weeklyLeft: 30)
+
+        let window = UsagePopoverView.weeklyWindow
+        let pace = UsagePopoverView.paceStatus(remainingPercent: 30, resetsAt: resetDate, window: window, now: polledAt)
+        XCTAssertEqual(pace, .caution)
+        XCTAssertEqual(UsagePopoverView.paceStatus(remainingPercent: 30, resetsAt: resetDate, window: window,
+                                                   now: minuteLater), .onTrack, "the fixture must cross the line")
+        let dial = UsagePopoverView.dialLines(pace: pace, rawRemaining: 30, resetsAt: resetDate,
+                                              window: window, now: minuteLater)
+
+        let cell = MenuBarController.countdownCell(usage: usage, enabled: true, now: minuteLater, paceGradedAt: polledAt)
+        XCTAssertEqual(cell.text, "43h")
+        XCTAssertEqual(cell.tone, .caution)
+        XCTAssertEqual(dial.runOutSeconds, 43 * 3600)
+    }
+
     func testNoSessionLimit_disabled_showsNoCell() throws {
         let cell = MenuBarController.countdownCell(usage: try makeWeeklyOnlyUsage(weeklyLeft: 25), enabled: false,
                                                    now: now(secondsBeforeReset: 72 * 3600))
