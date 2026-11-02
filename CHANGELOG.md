@@ -1,5 +1,21 @@
 # Change Log
 
+### v1.77
+
+**Plans with no 5-hour limit**
+- Ultra accounts have no 5-hour limit, but the app still drew a Session battery stuck at 100% with "No reset time". The app now reads the limit from each usage response instead of the plan name, because claude.ai still names these plans Max 20x.
+- On such an account every menu bar icon style shows the weekly value alone, and the popover shows the Weekly card on its own, with its lines beside the dial.
+- The menu bar countdown now shows how long until you run out at your current pace (for example "14h" or "3d"), tinted like the Weekly dial's pace word. It shows only when you are on pace to run out before your weekly reset. The setting is now called "Show countdown in menu bar" and keeps its saved value.
+- On an empty week, the Text Only and Dual Horizontal icons draw the lone weekly value in red, so the menu bar still warns you.
+- Accounts with a 5-hour limit keep both batteries and the session countdown.
+
+**Popover**
+- A gear in the footer opens Settings. It replaces the hint to right-click the menu bar icon.
+- The active account row has a grey fill and a bold name instead of a green fill. The green dot stays.
+- The Credits status sits on its own line and wraps, so "Paused - monthly limit reached" is no longer cut off.
+- The run-out line is semibold and drops a zero last field ("Out in ~11h", not "~11h 00m"). The reset countdown keeps its padding.
+- The footer text is a fixed grey, so it stays readable whatever the wallpaper behind the popover.
+
 ### v1.75
 
 **Sign-in with single sign-on (SSO)**
