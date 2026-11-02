@@ -582,13 +582,13 @@ public sealed class UsageService : IDisposable
                 // either: re-login cannot clear it, and the VPN usually comes back on its own. Back
                 // off like a network failure, with the same first-poll-after-resume grace (a VPN
                 // still reconnecting after wake), and never escalate to the auth-failed surface.
-                if (ex.StatusCode == 403 && ex.IsRegionUnavailable)
+                if (ex.StatusCode == 403 && ex.Kind == AuthFailureKind.RegionUnavailable)
                 {
                     if (!tolerateNoNetwork) RecordHardFailure(dispatchGeneration, dispatchSuspendEpoch, cancellationToken);
                     return;
                 }
 
-                var cfBlock = ex.StatusCode == 403 && ex.LooksLikeCloudflareBlock;
+                var cfBlock = ex.StatusCode == 403 && ex.Kind == AuthFailureKind.CloudflareBlock;
                 if (cfBlock)
                 {
                     int cfStreak;

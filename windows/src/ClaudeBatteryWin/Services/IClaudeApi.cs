@@ -68,37 +68,40 @@ public sealed class ClaudeAuthException : Exception
     public int StatusCode { get; }
 
     /// <summary>
-    /// True when the response carried a Cloudflare bot-block tell (a <c>cf-mitigated: challenge</c>
-    /// header, or a 403 with an HTML content type) rather than a genuine auth rejection. The poller
-    /// (U4) gives the FIRST restored poll one penalty-free retry on a Cloudflare block - the shared
-    /// jar re-earns a fresh <c>__cf_bm</c> via <c>Set-Cookie</c> - while a genuine 401/403 still
-    /// hard-stops. Derived from response HEADERS only, never the body (redaction gate). Defaults
-    /// <c>false</c> on the single-arg ctor so a Cloudflare block is never assumed.
+    /// What the 401/403 most likely means. Only <see cref="AuthFailureKind.Session"/> is a sign-out;
+    /// the poller (U4) backs off on the other two. Derived from headers, plus a bool-only read of a
+    /// small JSON 403 body for <see cref="AuthFailureKind.RegionUnavailable"/>; nothing else from the
+    /// response is retained (redaction gate). Defaults to <see cref="AuthFailureKind.Session"/>, so
+    /// a block is never assumed where the tells are not computed. When a response carries both a
+    /// region body and a Cloudflare tell, <see cref="AuthFailureKind.RegionUnavailable"/> wins.
     /// </summary>
-    public bool LooksLikeCloudflareBlock { get; }
+    public AuthFailureKind Kind { get; }
 
-    /// <summary>
-    /// True for a 403 whose JSON body carries <c>error.details.error_code == "region_unavailable"</c>:
-    /// claude.ai refusing an unsupported region (a VPN that dropped), not an expired session. The
-    /// poller backs off and keeps polling instead of asking for a re-login. Only this bool leaves
-    /// the body read; nothing from the body is retained (redaction gate).
-    /// </summary>
-    public bool IsRegionUnavailable { get; }
-
-    /// <summary>
-    /// Back-compat ctor for every existing 401/403 throw + test call site: defaults the Cloudflare
-    /// signal to <c>false</c> so behavior is unchanged where the tell is not computed.
-    /// </summary>
-    public ClaudeAuthException(int statusCode)
-        : this(statusCode, looksLikeCloudflareBlock: false)
-    {
-    }
-
-    public ClaudeAuthException(int statusCode, bool looksLikeCloudflareBlock, bool isRegionUnavailable = false)
+    public ClaudeAuthException(int statusCode, AuthFailureKind kind = AuthFailureKind.Session)
         : base($"claude.ai returned HTTP {statusCode} (authentication failure)")
     {
         StatusCode = statusCode;
-        LooksLikeCloudflareBlock = looksLikeCloudflareBlock;
-        IsRegionUnavailable = isRegionUnavailable;
+        Kind = kind;
     }
+}
+
+/// <summary>Why claude.ai answered 401/403. See <see cref="ClaudeAuthException.Kind"/>.</summary>
+public enum AuthFailureKind
+{
+    /// <summary>A genuine auth rejection (e.g. <c>account_session_invalid</c>): sign in again.</summary>
+    Session,
+
+    /// <summary>
+    /// A Cloudflare bot-block tell (a <c>cf-mitigated: challenge</c> header, or a 403 with an HTML
+    /// content type). The poller gives the FIRST restored poll one penalty-free retry - the shared
+    /// jar re-earns a fresh <c>__cf_bm</c> via <c>Set-Cookie</c> - then backs off. Header-only and
+    /// status-independent, so the poller still requires a 403 before trusting it.
+    /// </summary>
+    CloudflareBlock,
+
+    /// <summary>
+    /// A 403 whose JSON body carries <c>error.details.error_code == "region_unavailable"</c>:
+    /// claude.ai refusing an unsupported region (a VPN that dropped). Backs off, never signs out.
+    /// </summary>
+    RegionUnavailable,
 }

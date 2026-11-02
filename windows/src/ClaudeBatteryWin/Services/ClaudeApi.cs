@@ -309,10 +309,13 @@ public sealed class ClaudeApi : IClaudeApi, IDisposable
                 // The Cloudflare-block tell comes from response HEADERS only. The one body read on
                 // this path is IsRegionUnavailableAsync, which reduces a small JSON 403 to a bool and
                 // drops the bytes, so no body material reaches the exception (redaction gate). U4
-                // decides what to do with both flags.
+                // decides what to do with the kind.
                 var regionUnavailable = status == 403
                     && await IsRegionUnavailableAsync(response, timeoutToken).ConfigureAwait(false);
-                throw new ClaudeAuthException(status, LooksLikeCloudflareBlock(status, response), regionUnavailable);
+                var kind = regionUnavailable ? AuthFailureKind.RegionUnavailable
+                    : LooksLikeCloudflareBlock(status, response) ? AuthFailureKind.CloudflareBlock
+                    : AuthFailureKind.Session;
+                throw new ClaudeAuthException(status, kind);
             }
 
             return null;
