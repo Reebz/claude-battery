@@ -220,12 +220,14 @@ struct UsagePopoverView: View {
 
     // Gauge cards (Session/Weekly) give the concentric dial and the three lines under it room
     // (#31, #44). Taller than the arc alone needs: the enlarged dial (frame height 80) plus the pace
-    // word (10pt) and the reset countdown and run-out (11pt medium, R11) sit with vertical slack so
-    // nothing clips. 160 fitted one line; the three-line content measured 171 in the render harness
-    // at 10pt and grows 2.4 at 11pt, so 185 still leaves about 12 of the original 14 of slack and
-    // keeps the two cards in a row equal. At slider position 6 the three-line stack grows from
-    // 38.0 to 47.0 and spends 9 of that 12, leaving about 3. Going to 11pt did not need a taller
-    // card and must not quietly get one.
+    // word (10pt), the reset countdown (11pt medium, R11) and the run-out (11pt semibold) sit with
+    // vertical slack so nothing clips. 160 fitted one line; the three-line content measured 171 in
+    // the render harness at 10pt and grows 2.4 at 11pt, so 185 still leaves about 12 of the
+    // original 14 of slack and keeps the two cards in a row equal. At slider position 6 the
+    // three-line stack grows from 38.0 to 47.0 and spends 9 of that 12, leaving about 3. Going to
+    // 11pt did not need a taller card and must not quietly get one. These heights were measured
+    // with the run-out at medium; semibold at the same point size keeps the same line height and
+    // only widens the line, which the one-line shrink below absorbs.
     private let gaugeCardHeight: CGFloat = 185
     // The Models card takes no fixed height: it sizes to its content, with content vertically
     // centered, so it hugs the bars (no excess bottom padding) and never clips the 3-bar case the
@@ -1143,8 +1145,9 @@ private struct DialLinesView: View {
                     .foregroundColor(UsagePopoverView.paceCaptionColor(remaining: displayRemaining, pace: pace))
             }
             // The countdown comes second and the forecast last, so the countdown sits in the same
-            // place whether or not a forecast is there, and both lines are white at 11pt medium:
-            // at 10pt regular in the muted grey they measured 5.3:1 against the card background
+            // place whether or not a forecast is there, and both lines are white at 11pt (the
+            // countdown medium, the run-out semibold): at 10pt regular in the muted grey they
+            // measured 5.3:1 against the card background
             // where the removed full-width Resets row measured 15:1, which is the R11 complaint.
             Text(lines.countdown)
                 .font(PopoverTextSize.font(11, weight: .medium, offset: textOffset))
