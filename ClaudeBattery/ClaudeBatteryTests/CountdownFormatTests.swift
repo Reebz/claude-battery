@@ -10,6 +10,44 @@ final class CountdownFormatTests: XCTestCase {
         now.addingTimeInterval(interval)
     }
 
+    // MARK: - compactRunOut (the weekly run-out cell on accounts with no 5-hour limit)
+
+    func testRunOut_underAMinute() {
+        XCTAssertEqual(CountdownFormat.compactRunOut(seconds: 30), "<1m")
+    }
+
+    func testRunOut_minutes() {
+        XCTAssertEqual(CountdownFormat.compactRunOut(seconds: 59 * 60), "59m")
+    }
+
+    func testRunOut_oneHour() {
+        XCTAssertEqual(CountdownFormat.compactRunOut(seconds: 3600), "1h")
+    }
+
+    func testRunOut_hoursUpToFortyEight_truncated() {
+        XCTAssertEqual(CountdownFormat.compactRunOut(seconds: 32 * 3600), "32h")
+        XCTAssertEqual(CountdownFormat.compactRunOut(seconds: 47 * 3600 + 59 * 60), "47h")
+    }
+
+    func testRunOut_fortyEightHoursAndUp_isWholeDays() {
+        XCTAssertEqual(CountdownFormat.compactRunOut(seconds: 48 * 3600), "2d")
+        XCTAssertEqual(CountdownFormat.compactRunOut(seconds: 6 * 86400 + 23 * 3600), "6d")
+    }
+
+    func testRunOut_tenDaysOrMore_saturates() {
+        XCTAssertEqual(CountdownFormat.compactRunOut(seconds: 10 * 86400), "9d+")
+        XCTAssertEqual(CountdownFormat.compactRunOut(seconds: 400 * 86400), "9d+")
+    }
+
+    func testRunOut_neverMoreThanThreeCharacters() {
+        // Every step of an hour across thirty days, plus each minute of the first two hours.
+        let samples = (0...(30 * 24)).map { TimeInterval($0) * 3600 } + (0...120).map { TimeInterval($0) * 60 }
+        for seconds in samples {
+            let text = CountdownFormat.compactRunOut(seconds: seconds)
+            XCTAssertLessThanOrEqual(text.count, 3, "\(seconds)s printed \(text)")
+        }
+    }
+
     // MARK: - compactCountdown
 
     func testCompact_fourHoursTwentyMinutes_hoursPlus() {

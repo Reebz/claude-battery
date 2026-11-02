@@ -82,6 +82,25 @@ struct MinimalRenderer: IconRenderer {
 
         let baseColor = color
 
+        // An account with no 5-hour limit has only the weekly to show: it takes the whole interior,
+        // with no divider.
+        if !usage.hasSessionLimit {
+            let image = NSImage(size: NSSize(width: iconWidth, height: iconHeight), flipped: false) { [self] _ in
+                drawBatteryShell(color: baseColor)
+                let fillHeight = interiorHeight * CGFloat(weeklyPercent) / 100.0
+                if fillHeight > 0 {
+                    let fillColor: NSColor = isWeeklyLow ? .red : baseColor
+                    fillColor.setFill()
+                    NSBezierPath(roundedRect: NSRect(x: bodyX + fillInset, y: bottomY,
+                                                      width: interiorWidth, height: fillHeight),
+                                  xRadius: 1, yRadius: 1).fill()
+                }
+                return true
+            }
+            image.isTemplate = false
+            return image
+        }
+
         let image = NSImage(size: NSSize(width: iconWidth, height: iconHeight), flipped: false) { [self] _ in
             // 1. Shell (outline + nub)
             drawBatteryShell(color: baseColor)

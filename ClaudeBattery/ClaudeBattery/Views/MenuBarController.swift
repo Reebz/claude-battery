@@ -107,7 +107,11 @@ class MenuBarController: NSObject {
                 usageService: usageService,
                 updateChecker: updateChecker,
                 clock: popoverClock,
-                onSignIn: { [weak self] in self?.authManager.presentLogin() }
+                onSignIn: { [weak self] in self?.authManager.presentLogin() },
+                onOpenSettings: { [weak self] in
+                    self?.popover.performClose(nil)
+                    self?.showSettings()
+                }
             )
         )
     }
@@ -384,12 +388,13 @@ class MenuBarController: NSObject {
             consecutiveFailures: usageService.consecutiveFailures,
             isStale: usageService.isStale
         )
-        // "" when the toggle is off or there is no session reset window. Folding it into the
-        // signature is what makes the per-minute timer re-render exactly once per string change
-        // (e.g. "32m" -> "31m") and never in a loop - same-string fires short-circuit below.
-        let countdown = Self.countdownTitle(
+        // Empty text when the toggle is off or there is nothing to count down. Folding it into the
+        // signature is what makes the per-minute timer re-render exactly once per change of text
+        // or tone (e.g. "32m" -> "31m") and never in a loop - same-cell fires short-circuit below.
+        let countdown = Self.countdownCell(
             usage: usage,
-            enabled: UserDefaults.standard.bool(forKey: MenuBarDefaults.showSessionCountdownKey)
+            enabled: UserDefaults.standard.bool(forKey: MenuBarDefaults.showSessionCountdownKey),
+            paceGradedAt: usageService.lastSuccessfulFetch
         )
         let signature = IconSignature(style: style, isMenuBarDark: isMenuBarDark, render: render, countdown: countdown)
 
@@ -401,7 +406,7 @@ class MenuBarController: NSObject {
         let color: NSColor = isMenuBarDark ? .white : .black
         let base = makeImage(for: render, style: style, color: color)
         // The countdown cell only rides the battery render; status/auth glyphs stay bare.
-        if case .battery = render, !countdown.isEmpty {
+        if case .battery = render, !countdown.text.isEmpty {
             button.image = Self.imageWithCountdownCell(countdown: countdown, batteryImage: base, color: color)
         } else {
             button.image = base
@@ -430,10 +435,11 @@ class MenuBarController: NSObject {
 
     // MARK: - Countdown Cell (composed into button.image; reverses the U7 title path)
 
-    /// Pure mapping from usage + toggle to the compact countdown string. Returns the 3-char
-    /// `compactCountdown` for the session reset when enabled and a positive countdown exists,
-    /// else "" (the off/none state). `nonisolated static` so it is reachable from tests and
-    /// free of controller state, mirroring `renderState`.
+    /// Pure mapping from usage + toggle to the countdown cell. With a 5-hour limit it is the 3-char
+    /// `compactCountdown` for the session reset, drawn neutral, when enabled and a positive
+    /// countdown exists. With no 5-hour limit it is the weekly run-out estimate (see
+    /// `weeklyRunOutCell`). Otherwise `.none`. `nonisolated static` so it is reachable from tests
+    /// and free of controller state, mirroring `renderState`.
     ///
     /// The cell ALWAYS clocks the 5h session, including while the weekly limit binds. Accepted
     /// consequence, decided deliberately: in that state the pill beside the cell shows
@@ -442,14 +448,43 @@ class MenuBarController: NSObject {
     /// the reset time in the state where users most want it. The popover still hides the dial's
     /// inner time arc for that same pairing (`suppressTimeArc:` in `UsagePopoverView.sessionCard`),
     /// so the two surfaces differ here on purpose; do not "restore parity" without re-deciding this.
-    nonisolated static func countdownTitle(usage: UsageData?, enabled: Bool, now: Date = Date()) -> String {
-        guard enabled, let resetDate = usage?.sessionResetDate else { return "" }
-        return CountdownFormat.compactCountdown(until: resetDate, now: now) ?? ""
+    nonisolated static func countdownCell(usage: UsageData?, enabled: Bool, now: Date = Date(),
+                                          paceGradedAt: Date? = nil) -> CountdownCell {
+        guard enabled, let usage else { return .none }
+        guard usage.hasSessionLimit else {
+            return weeklyRunOutCell(usage: usage, now: now, paceGradedAt: paceGradedAt ?? now)
+        }
+        guard let resetDate = usage.sessionResetDate,
+              let text = CountdownFormat.compactCountdown(until: resetDate, now: now) else { return .none }
+        return CountdownCell(text: text, tone: .neutral)
+    }
+
+    /// The run-out cell for an account with no 5-hour limit. It is exactly the run-out the
+    /// popover's Weekly dial prints - same pace, same projection, same quantisation, dropped when it
+    /// would not land before the reset - so the two surfaces can never disagree. No run-out line
+    /// under the dial means no cell: on track, too early in the week to project, already empty, or
+    /// no reset time. The tone follows the dial's pace word, red below the nearly-empty threshold
+    /// whatever the pace, so a warning reads as a warning rather than as a reset timer.
+    ///
+    /// The pace is graded at `paceGradedAt`, the time of the last successful poll, because that is
+    /// when the popover grades the Weekly dial's pace; only the durations follow the minute clock.
+    /// Grading it on every tick instead lets the cell vanish or change colour up to a poll interval
+    /// before the dial's pace word does, when the week sits right on a pace threshold.
+    nonisolated static func weeklyRunOutCell(usage: UsageData, now: Date, paceGradedAt: Date) -> CountdownCell {
+        let window = UsagePopoverView.weeklyWindow
+        let pace = UsagePopoverView.paceStatus(remainingPercent: usage.weeklyRemaining,
+                                               resetsAt: usage.weeklyResetDate, window: window, now: paceGradedAt)
+        let lines = UsagePopoverView.dialLines(pace: pace, rawRemaining: usage.weeklyRemaining,
+                                               resetsAt: usage.weeklyResetDate, window: window, now: now)
+        guard let runOut = lines.runOutSeconds else { return .none }
+        let tone: CountdownCell.Tone =
+            usage.weeklyRemaining < UsageData.lowRemainingThreshold || pace == .danger ? .danger : .caution
+        return CountdownCell(text: CountdownFormat.compactRunOut(seconds: runOut), tone: tone)
     }
 
     /// Title for the disabled first row of the right-click menu, "Claude Battery v1.70", or nil
     /// when there is no version to show (the row is then omitted). `nonisolated static` so it is
-    /// reachable from tests like `countdownTitle`.
+    /// reachable from tests like `countdownCell`.
     nonisolated static func versionMenuTitle(_ version: String?) -> String? {
         UsagePopoverView.versionLabel(version).map { "Claude Battery \($0)" }
     }
@@ -461,7 +496,16 @@ class MenuBarController: NSObject {
     /// IconSignature dedup (which now includes the countdown string) drives a single re-render
     /// per minute. The cell font is one weight lighter / a touch smaller than the heavy battery
     /// digits so the timer reads as secondary while staying in the same monospaced family.
-    nonisolated static func imageWithCountdownCell(countdown: String, batteryImage: NSImage, color: NSColor) -> NSImage {
+    nonisolated static func imageWithCountdownCell(countdown cell: CountdownCell, batteryImage: NSImage,
+                                                   color batteryColor: NSColor) -> NSImage {
+        let countdown = cell.text
+        // The cell takes its tone's colour; the battery beside it keeps the menu bar's own.
+        let color: NSColor
+        switch cell.tone {
+        case .neutral: color = batteryColor
+        case .caution: color = .systemOrange
+        case .danger:  color = .systemRed
+        }
         let font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
         // Canvas height derives from the battery image so a taller renderer (the 20x20
         // DualArcGaugeRenderer) is not clipped or pushed to a negative y in an 18-tall canvas.
@@ -631,10 +675,27 @@ struct IconSignature: Equatable {
     let style: IconStyle
     let isMenuBarDark: Bool
     let render: RenderState
-    /// The composed countdown-cell string ("" when off/none). Part of the signature so a
+    /// The composed countdown cell (empty text when off/none). Part of the signature so a
     /// per-minute countdown change re-renders the image exactly once - the dedup must observe
-    /// the string change, otherwise the new countdown would never paint.
-    let countdown: String
+    /// the change, otherwise the new countdown would never paint. The tone is in here too: a
+    /// run-out can go from Caution to Danger without its text changing.
+    let countdown: CountdownCell
+}
+
+/// What the menu bar countdown cell shows: its text, empty when there is no cell, and the tone it is
+/// drawn in. The session timer is always neutral; the weekly run-out on an account with no 5-hour
+/// limit is tinted like the popover's pace word.
+struct CountdownCell: Equatable {
+    enum Tone: Equatable {
+        case neutral
+        case caution
+        case danger
+    }
+
+    let text: String
+    let tone: Tone
+
+    static let none = CountdownCell(text: "", tone: .neutral)
 }
 
 extension MenuBarController {

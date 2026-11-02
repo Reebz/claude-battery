@@ -67,7 +67,11 @@ struct DualHorizontalRenderer: IconRenderer {
         let iconHeight: CGFloat = 18
         let gap: CGFloat = 4
 
-        let totalWidth = nubWidth + batteryWidth + gap + batteryWidth + nubWidth
+        // An account with no 5-hour limit has no session to draw, so the weekly battery stands alone.
+        let showsSession = usage.hasSessionLimit
+        let totalWidth = showsSession
+            ? nubWidth + batteryWidth + gap + batteryWidth + nubWidth
+            : batteryWidth + nubWidth
         let baseColor = color
 
         let image = NSImage(size: NSSize(width: totalWidth, height: iconHeight), flipped: false) { _ in
@@ -76,7 +80,9 @@ struct DualHorizontalRenderer: IconRenderer {
             let interiorWidth = batteryWidth - fillInset * 2
             let interiorHeight = batteryHeight - fillInset * 2
 
-            func drawBattery(bodyX: CGFloat, nubOnLeft: Bool, percent: Int, isLow: Bool) {
+            // `redWhenEmpty` paints the number red when the fill is gone: at 0 the red fill vanishes,
+            // and a lone weekly battery would otherwise show an empty week in the neutral colour.
+            func drawBattery(bodyX: CGFloat, nubOnLeft: Bool, percent: Int, isLow: Bool, redWhenEmpty: Bool = false) {
                 let font = percent >= 100 ? smallNumberFont : numberFont
                 let numberStr = "\(percent)" as NSString
                 let numberSize = numberStr.size(withAttributes: [.font: font, .kern: kern])
@@ -132,17 +138,20 @@ struct DualHorizontalRenderer: IconRenderer {
                     ctx.clip(to: unfilledRect)
                     numberStr.draw(at: numberPoint, withAttributes: [
                         .font: font, .kern: kern,
-                        .foregroundColor: baseColor
+                        .foregroundColor: redWhenEmpty && isLow && fillWidth <= 0 ? NSColor.red : baseColor
                     ])
                     ctx.restoreGState()
                 }
             }
 
             // Session battery (left, nub points left)
-            drawBattery(bodyX: nubWidth, nubOnLeft: true, percent: sessionPercent, isLow: isSessionLow)
+            if showsSession {
+                drawBattery(bodyX: nubWidth, nubOnLeft: true, percent: sessionPercent, isLow: isSessionLow)
+            }
 
             // Weekly battery (right, nub points right)
-            drawBattery(bodyX: nubWidth + batteryWidth + gap, nubOnLeft: false, percent: weeklyPercent, isLow: isWeeklyLow)
+            drawBattery(bodyX: showsSession ? nubWidth + batteryWidth + gap : 0, nubOnLeft: false,
+                        percent: weeklyPercent, isLow: isWeeklyLow, redWhenEmpty: !showsSession)
 
             return true
         }

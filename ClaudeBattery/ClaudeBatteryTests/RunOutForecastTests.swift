@@ -255,7 +255,20 @@ final class RunOutForecastTests: XCTestCase {
     func testRunOutLine_formatsMinuteResolution() {
         XCTAssertEqual(UsagePopoverView.runOutLine(seconds: 6000), "Out in ~1h 40m")
         XCTAssertEqual(UsagePopoverView.runOutLine(seconds: 45 * 60), "Out in ~45m")
-        XCTAssertEqual(UsagePopoverView.runOutLine(seconds: 11 * 3600), "Out in ~11h 00m")
+        XCTAssertEqual(UsagePopoverView.runOutLine(seconds: 11 * 3600), "Out in ~11h")
+    }
+    func testRunOutLine_dropsAZeroLastField() {
+        // The run-out is an estimate (whole hours on the weekly dial), so a padded zero last field
+        // says nothing: "~11h" and "~2d", while a non-zero field keeps the countdown's padding.
+        XCTAssertEqual(UsagePopoverView.runOutLine(seconds: 2 * 86400), "Out in ~2d")
+        XCTAssertEqual(UsagePopoverView.runOutLine(seconds: 86400 + 5 * 3600), "Out in ~1d 05h")
+        XCTAssertEqual(UsagePopoverView.runOutLine(seconds: 3600 + 5 * 60), "Out in ~1h 05m")
+        XCTAssertEqual(UsagePopoverView.runOutLine(seconds: 3600), "Out in ~1h")
+    }
+    func testRunOutLine_leavesTheResetCountdownPadded() {
+        // Only the estimate drops its zeros; the reset countdown keeps "2h 00m" and "3d 00h".
+        XCTAssertEqual(CountdownFormat.minuteResolution(seconds: 7200), "2h 00m")
+        XCTAssertEqual(CountdownFormat.minuteResolution(seconds: 3 * 86400), "3d 00h")
     }
     func testRunOutLine_nilHidesTheLine() {
         // AE2 together with the pace gate: On Track projects nil, and nil prints nothing.
@@ -417,7 +430,7 @@ final class RunOutForecastTests: XCTestCase {
         XCTAssertEqual(session.countdown, "Resets in 2h 00m")
         let weekly = lines(10, 259200, w)
         XCTAssertEqual(weekly.caption, "Danger")
-        XCTAssertEqual(weekly.runOut, "Out in ~11h 00m")
+        XCTAssertEqual(weekly.runOut, "Out in ~11h")
         XCTAssertEqual(weekly.countdown, "Resets in 3d 00h")
     }
 

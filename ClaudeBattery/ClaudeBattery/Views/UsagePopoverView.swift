@@ -82,6 +82,8 @@ struct UsagePopoverView: View {
     /// three text lines and nothing else (the arcs are siblings of that scope, never children).
     let clock: PopoverClock
     let onSignIn: () -> Void
+    /// Opens the same Settings window as the right-click menu's "Settings..." item.
+    let onOpenSettings: () -> Void
     /// The text-size position the Settings slider writes (R12, grew out of #53). Read here and
     /// published into the environment, so one value drives all 43 text sites in the popover.
     @AppStorage(PopoverTextSize.positionKey) private var textSizePosition = PopoverTextSize.defaultPosition
@@ -141,9 +143,15 @@ struct UsagePopoverView: View {
                 regionUnavailableCard()
             }
 
-            LazyVGrid(columns: columns, spacing: 8) {
-                sessionCard(usage: usage)
-                weeklyCard(usage: usage)
+            // An account with no 5-hour limit has no Session card, so the Weekly card takes the
+            // whole row, with its lines beside the dial. Its own run-out line carries the forecast.
+            if usage.hasSessionLimit {
+                LazyVGrid(columns: columns, spacing: 8) {
+                    sessionCard(usage: usage)
+                    weeklyCard(usage: usage)
+                }
+            } else {
+                weeklyCard(usage: usage, horizontal: true)
             }
 
             if let credits = usage.usageCredits {
@@ -180,18 +188,29 @@ struct UsagePopoverView: View {
                 .padding(.top, 2)
             }
 
-            VStack(spacing: 2) {
+            // Footer row: freshness and version on the left, a Settings gear on the right. The gear
+            // replaces the "Right-click the battery icon in your menu bar for Settings." hint,
+            // which spent two lines on every open describing a control the popover did not have.
+            HStack(spacing: 6) {
                 // Freshness line is now unconditional: the update notice lives in the top banner,
                 // so the two no longer compete for this slot. The version rides after it (#48): it
                 // used to sit in front of "Updated" and the line read as an app-update status.
                 // A leaf view, so the minute clock can move "Usage updated N minutes ago" without a
                 // poll and without re-evaluating anything above it (KTD10).
                 FooterStatusLineView(clock: clock, lastFetch: usageService.lastSuccessfulFetch)
-                Text("Right-click the battery icon in your menu bar for Settings.")
-                    .font(PopoverTextSize.font(9, offset: textOffset))
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
+                Spacer(minLength: 4)
+                Button(action: onOpenSettings) {
+                    Image(systemName: "gearshape")
+                        .font(PopoverTextSize.font(12, weight: .medium, offset: textOffset))
+                        .foregroundColor(Self.footerTextColor)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Settings")
+                .accessibilityLabel("Settings")
             }
+            .padding(.leading, 4)
             .padding(.top, 2)
         }
         .padding(12)
@@ -201,12 +220,14 @@ struct UsagePopoverView: View {
 
     // Gauge cards (Session/Weekly) give the concentric dial and the three lines under it room
     // (#31, #44). Taller than the arc alone needs: the enlarged dial (frame height 80) plus the pace
-    // word (10pt) and the reset countdown and run-out (11pt medium, R11) sit with vertical slack so
-    // nothing clips. 160 fitted one line; the three-line content measured 171 in the render harness
-    // at 10pt and grows 2.4 at 11pt, so 185 still leaves about 12 of the original 14 of slack and
-    // keeps the two cards in a row equal. At slider position 6 the three-line stack grows from
-    // 38.0 to 47.0 and spends 9 of that 12, leaving about 3. Going to 11pt did not need a taller
-    // card and must not quietly get one.
+    // word (10pt), the reset countdown (11pt medium, R11) and the run-out (11pt semibold) sit with
+    // vertical slack so nothing clips. 160 fitted one line; the three-line content measured 171 in
+    // the render harness at 10pt and grows 2.4 at 11pt, so 185 still leaves about 12 of the
+    // original 14 of slack and keeps the two cards in a row equal. At slider position 6 the
+    // three-line stack grows from 38.0 to 47.0 and spends 9 of that 12, leaving about 3. Going to
+    // 11pt did not need a taller card and must not quietly get one. These heights were measured
+    // with the run-out at medium; semibold at the same point size keeps the same line height and
+    // only widens the line, which the one-line shrink below absorbs.
     private let gaugeCardHeight: CGFloat = 185
     // The Models card takes no fixed height: it sizes to its content, with content vertically
     // centered, so it hugs the bars (no excess bottom padding) and never clips the 3-bar case the
@@ -232,7 +253,7 @@ struct UsagePopoverView: View {
                          suppressTimeArc: usage.isSessionWeeklyLimited)
     }
 
-    private func weeklyCard(usage: UsageData) -> some View {
+    private func weeklyCard(usage: UsageData, horizontal: Bool = false) -> some View {
         gaugeCard(title: "Weekly",
                   remaining: usage.weeklyRemaining,
                   rawRemaining: usage.weeklyRemaining,
@@ -240,7 +261,8 @@ struct UsagePopoverView: View {
                   window: Self.weeklyWindow,
                   tickCount: 7,
                   pace: Self.paceStatus(remainingPercent: usage.weeklyRemaining,
-                                        resetsAt: usage.weeklyResetDate, window: Self.weeklyWindow))
+                                        resetsAt: usage.weeklyResetDate, window: Self.weeklyWindow),
+                  horizontal: horizontal)
     }
 
     /// Shared Session/Weekly card: a concentric dual-arc gauge (outer = usage remaining coloured by
@@ -250,9 +272,12 @@ struct UsagePopoverView: View {
     ///
     /// `remaining` is the DISPLAY value (what the dial draws, and what colours it); `rawRemaining`
     /// is what the lines project. They differ only on a weekly-limited Session card.
+    ///
+    /// `horizontal` puts the lines beside the dial instead of under it, for a card that has the
+    /// whole row to itself (the Weekly card on an account with no 5-hour limit).
     private func gaugeCard(title: String, remaining: Double, rawRemaining: Double, resetsAt: Date?,
                            window: TimeInterval, tickCount: Int, pace: PaceStatus,
-                           suppressTimeArc: Bool = false) -> some View {
+                           suppressTimeArc: Bool = false, horizontal: Bool = false) -> some View {
         // Suppress the inner time arc when the shown value is not on this card's own clock: a
         // weekly-limited Session displays the weekly quota, so a session-window time arc would pair
         // two different windows and mislead. nil hides the inner arc, its centre clock, and the
@@ -262,45 +287,59 @@ struct UsagePopoverView: View {
         // clock, because this view must not observe the tick (KTD10 rule 1). It refreshes with the
         // next poll re-render; the visible lines under the dial refresh every minute on their own.
         let spokenLines = Self.dialLines(pace: pace, rawRemaining: rawRemaining, resetsAt: resetsAt, window: window)
+        let dial = ArcGauge(value: remaining,
+                            color: Self.ringColor(remaining: remaining, pace: pace),
+                            innerValue: timeRemaining,
+                            innerColor: Self.neutralInnerRingColor,
+                            tickCount: tickCount)
+            // Height drives the arc radius (ArcShape uses min(width,height)); at ~114pt card
+            // width the height binds, so 80 (was 58) grows the rings enough that even the
+            // widest 100%-over-100% readout (right after a window reset) clears the inner
+            // arc with margin, while the inner inset (9) keeps the two rings visibly apart.
+            // That margin holds at the default text size, and it is thin: the 15pt bold
+            // rounded "100%" measures 41.9pt wide, putting its cap corner 23.7 from the
+            // centre against the inner ring's inner edge at 26. At slider position 6 the
+            // readout is 17pt and 47.0pt wide, corner 26.6 against the same 26, so the
+            // corners touch the inner ring by about half a point. That happens only while
+            // both numbers read 100%, in the moment after a window reset, and it was
+            // accepted: position 6 is the top of the slider precisely because that is
+            // where the panel only roughly fits. Every popover size moves together, so the
+            // readout is not carved out of the scale to buy the margin back.
+            .frame(height: 80)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Self.gaugeAccessibilityLabel(name: title, usage: remaining,
+                                                             timeRemaining: timeRemaining, pace: pace,
+                                                             lines: spokenLines))
+        // The three lines are the only part of the card that observes the minute clock.
+        let lines = DialLinesView(clock: clock,
+                                  title: title,
+                                  pace: pace,
+                                  rawRemaining: rawRemaining,
+                                  displayRemaining: remaining,
+                                  resetsAt: resetsAt,
+                                  window: window,
+                                  alignment: horizontal ? .leading : .center)
         return UsageCard(title: title) {
-            VStack(spacing: 8) {
-                ArcGauge(value: remaining,
-                         color: Self.ringColor(remaining: remaining, pace: pace),
-                         innerValue: timeRemaining,
-                         innerColor: Self.neutralInnerRingColor,
-                         tickCount: tickCount)
-                    // Height drives the arc radius (ArcShape uses min(width,height)); at ~114pt card
-                    // width the height binds, so 80 (was 58) grows the rings enough that even the
-                    // widest 100%-over-100% readout (right after a window reset) clears the inner
-                    // arc with margin, while the inner inset (9) keeps the two rings visibly apart.
-                    // That margin holds at the default text size, and it is thin: the 15pt bold
-                    // rounded "100%" measures 41.9pt wide, putting its cap corner 23.7 from the
-                    // centre against the inner ring's inner edge at 26. At slider position 6 the
-                    // readout is 17pt and 47.0pt wide, corner 26.6 against the same 26, so the
-                    // corners touch the inner ring by about half a point. That happens only while
-                    // both numbers read 100%, in the moment after a window reset, and it was
-                    // accepted: position 6 is the top of the slider precisely because that is
-                    // where the panel only roughly fits. Every popover size moves together, so the
-                    // readout is not carved out of the scale to buy the margin back.
-                    .frame(height: 80)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(Self.gaugeAccessibilityLabel(name: title, usage: remaining,
-                                                                     timeRemaining: timeRemaining, pace: pace,
-                                                                     lines: spokenLines))
-                // The three lines are the only part of the card that observes the minute clock.
-                DialLinesView(clock: clock,
-                              title: title,
-                              pace: pace,
-                              rawRemaining: rawRemaining,
-                              displayRemaining: remaining,
-                              resetsAt: resetsAt,
-                              window: window)
+            if horizontal {
+                // Lines beside the dial: the card sizes to the 80pt dial instead of the fixed
+                // two-up height, and the lines get about 140pt of width where a two-up card
+                // gives them 114, so none of them needs to shrink at the largest text size.
+                HStack(spacing: 14) {
+                    dial.frame(width: 100)
+                    lines
+                    Spacer(minLength: 0)
+                }
+            } else {
+                VStack(spacing: 8) {
+                    dial
+                    lines
+                }
+                // Fill the fixed card height from the top, so the two cards in a row stay the same
+                // size and their dials line up even when one shows three lines and the other one.
+                .frame(maxHeight: .infinity, alignment: .top)
             }
-            // Fill the fixed card height from the top, so the two cards in a row stay the same
-            // size and their dials line up even when one shows three lines and the other one.
-            .frame(maxHeight: .infinity, alignment: .top)
         }
-        .frame(height: gaugeCardHeight)
+        .frame(height: horizontal ? nil : gaugeCardHeight)
     }
 
     /// Bars for the Models card (U4): an "All Models" bar from the real weekly aggregate
@@ -352,13 +391,17 @@ struct UsagePopoverView: View {
     /// weekly" pace word). The lines under the dials left this grey in R11: white at 11pt medium
     /// is the readable contrast, and this grey is what made them hard to read.
     fileprivate static let mutedLabelColor = Color(white: 0.6)
+    /// Footer text and the Settings gear. A fixed grey, not `.secondary`: the footer sits on the
+    /// popover's see-through background rather than on a card, and `.secondary` took on the colour
+    /// behind the popover (pink text over a pink wallpaper).
+    fileprivate static let footerTextColor = Color(white: 0.65)
 
     // MARK: - Pace (U2)
 
     /// Session window length: 5h, consistent with the 5-tick session gauge (A3).
     static let sessionWindow: TimeInterval = 5 * 3600
     /// Weekly window length: 7 days.
-    static let weeklyWindow: TimeInterval = 7 * 24 * 3600
+    nonisolated static let weeklyWindow: TimeInterval = 7 * 24 * 3600
 
     /// Time remaining in the window as a percent (counts down 100 -> 0), clamped 0-100.
     /// The API supplies only `resetsAt` (the window end); the start is derived as
@@ -390,9 +433,9 @@ struct UsagePopoverView: View {
     /// faster than the clock). It is exactly how much longer the inner time arc is than the outer
     /// usage arc, so the RAG status names the visible gap between the two arcs.
     /// At or above this delta the pace is Caution (amber).
-    static let cautionDelta: Double = 10
+    nonisolated static let cautionDelta: Double = 10
     /// At or above this delta the pace is Danger (red).
-    static let dangerDelta: Double = 25
+    nonisolated static let dangerDelta: Double = 25
 
     /// Pace status for one window, from the current usage snapshot only. Mirrors
     /// `timeRemainingPercent` (window start = `resetsAt - window`; a nil/past/non-finite delta
@@ -400,7 +443,7 @@ struct UsagePopoverView: View {
     /// ahead of pace (negative delta) is always `.onTrack`, and 0% usage remaining is `.danger`
     /// (already used up). No early-window or near-reset guard is needed: unlike a projected run-out
     /// time, the delta is stable across the whole window (it never divides by elapsed time).
-    static func paceStatus(remainingPercent: Double, resetsAt: Date?, window: TimeInterval, now: Date = Date()) -> PaceStatus {
+    nonisolated static func paceStatus(remainingPercent: Double, resetsAt: Date?, window: TimeInterval, now: Date = Date()) -> PaceStatus {
         guard let resetsAt,
               let r = CountdownFormat.remainingSeconds(until: resetsAt, now: now) else { return .unknown }
         if remainingPercent <= 0 { return .danger }
@@ -428,7 +471,7 @@ struct UsagePopoverView: View {
     }
 
     /// Copy for the pace caption under each dial (#31). nil hides the line (`.unknown`, KTD4).
-    static func paceCaption(_ status: PaceStatus) -> String? {
+    nonisolated static func paceCaption(_ status: PaceStatus) -> String? {
         switch status {
         case .onTrack:       return "On Track"
         case .caution:       return "Caution"
@@ -452,11 +495,12 @@ struct UsagePopoverView: View {
     }
 
     @ViewBuilder
-    private func unifiedBarRow<Trailing: View>(
+    private func unifiedBarRow<Trailing: View, Detail: View>(
         label: String,
         remainingPercent: Double?,
         fillColor: Color? = nil,
-        @ViewBuilder trailing: () -> Trailing
+        @ViewBuilder trailing: () -> Trailing,
+        @ViewBuilder detail: () -> Detail
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline) {
@@ -466,6 +510,7 @@ struct UsagePopoverView: View {
                 Spacer()
                 trailing()
             }
+            detail()
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 3)
@@ -514,9 +559,11 @@ struct UsagePopoverView: View {
         return formatter.string(from: NSNumber(value: value)) ?? String(format: "$%.2f", value)
     }
 
-    /// Unified Usage-credits section (U5, KTD5/KTD7): one "Credits" row carries the spend state
-    /// and the prepaid balance on a single line. The status segment flexes and truncates; the
-    /// balance is right-pinned and never truncates. Each value formats in its own currency.
+    /// Unified Usage-credits section (U5, KTD5/KTD7): one "Credits" card with the label and the
+    /// prepaid balance on top and the spend state on its own line under them. The status used to
+    /// share the top line and was cut off ("Paused - monthly limit reach..."); on its own line it
+    /// wraps instead. The balance is right-pinned and never truncates. Each value formats in its
+    /// own currency.
     @ViewBuilder
     private func usageCreditsSection(credits: UsageCreditsData) -> some View {
         VStack(spacing: 6) {
@@ -539,18 +586,14 @@ struct UsagePopoverView: View {
             }()
 
             unifiedBarRow(label: "Credits", remainingPercent: barPercent, fillColor: barFillColor) {
-                HStack(spacing: 6) {
-                    creditsStatusSegment(state: credits.state)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    if let balance = credits.balance {
-                        Spacer(minLength: 6)
-                        creditsBalanceSegment(balance: balance)
-                            // Balance is the right-pinned anchor and must never truncate (KTD7).
-                            .layoutPriority(1)
-                            .fixedSize()
-                    }
+                if let balance = credits.balance {
+                    creditsBalanceSegment(balance: balance)
+                        // Balance is the right-pinned anchor and must never truncate (KTD7).
+                        .fixedSize()
                 }
+            } detail: {
+                creditsStatusSegment(state: credits.state)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             // Enabled state keeps its detail lines below the combined row.
@@ -902,7 +945,7 @@ private struct AccountListSection: View {
                     HStack(spacing: 6) {
                         Image(systemName: "plus.circle.fill")
                             .font(PopoverTextSize.font(12, offset: textOffset))
-                            .foregroundColor(.green)
+                            .foregroundColor(Color(white: 0.7))
                         Text("Add Account")
                             .font(PopoverTextSize.font(11, weight: .medium, offset: textOffset))
                             .foregroundColor(Color(white: 0.7))
@@ -950,7 +993,7 @@ private struct AccountListSection: View {
                     .frame(width: 7, height: 7)
 
                 Text(accountStore.disambiguatedName(for: account))
-                    .font(PopoverTextSize.font(11, offset: textOffset))
+                    .font(PopoverTextSize.font(11, weight: isActive ? .semibold : .regular, offset: textOffset))
                     .foregroundColor(.white)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -971,13 +1014,16 @@ private struct AccountListSection: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
+            // The active row is marked by a neutral fill, a bold name and the green dot. A green
+            // fill made it the loudest thing in the popover, and green already means "plenty
+            // left" on the dials and bars.
             .background(
                 RoundedRectangle(cornerRadius: 5)
-                    .fill(isActive ? Color.green.opacity(0.15) : Color.clear)
+                    .fill(isActive ? Color(white: 0.22) : Color.clear)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 5)
-                    .strokeBorder(isActive ? Color.green.opacity(0.3) : Color.clear, lineWidth: 1)
+                    .strokeBorder(isActive ? Color(white: 0.3) : Color.clear, lineWidth: 1)
             )
             .contentShape(Rectangle())
         }
@@ -1065,8 +1111,8 @@ private struct UsageCard<Content: View>: View {
 
 // MARK: - Minute-clock scope (KTD10)
 
-/// The three text lines under a dial, in drawn order: pace word (10pt), reset countdown, run-out
-/// (both 11pt medium and white, R11) (#44, KTD3).
+/// The three text lines under a dial, in drawn order: pace word (10pt), reset countdown (11pt
+/// medium), run-out (11pt semibold, the line to act on), both white (R11) (#44, KTD3).
 /// This is the whole tick scope for a card: it is the only view here that observes `PopoverClock`,
 /// so a minute tick re-prints these lines and nothing else. `ArcGauge` is its sibling in
 /// `gaugeCard`, never its child. Hidden from the accessibility tree because the dial's combined
@@ -1079,6 +1125,8 @@ private struct DialLinesView: View {
     let displayRemaining: Double
     let resetsAt: Date?
     let window: TimeInterval
+    /// Centred under the dial, or leading when the lines sit beside it.
+    var alignment: HorizontalAlignment = .center
 
     /// R12 text scale: the point offset every text size in this view adds to its base.
     @Environment(\.popoverTextOffset) private var textOffset
@@ -1089,7 +1137,7 @@ private struct DialLinesView: View {
         #endif
         let lines = UsagePopoverView.dialLines(pace: pace, rawRemaining: rawRemaining,
                                                resetsAt: resetsAt, window: window, now: clock.now)
-        return VStack(spacing: 2) {
+        return VStack(alignment: alignment, spacing: 2) {
             if let caption = lines.caption {
                 // The word shares the ring's red floor, on the DISPLAY value the ring uses (KD13).
                 Text(caption)
@@ -1097,16 +1145,20 @@ private struct DialLinesView: View {
                     .foregroundColor(UsagePopoverView.paceCaptionColor(remaining: displayRemaining, pace: pace))
             }
             // The countdown comes second and the forecast last, so the countdown sits in the same
-            // place whether or not a forecast is there, and both lines are white at 11pt medium:
-            // at 10pt regular in the muted grey they measured 5.3:1 against the card background
+            // place whether or not a forecast is there, and both lines are white at 11pt (the
+            // countdown medium, the run-out semibold): at 10pt regular in the muted grey they
+            // measured 5.3:1 against the card background
             // where the removed full-width Resets row measured 15:1, which is the R11 complaint.
             Text(lines.countdown)
                 .font(PopoverTextSize.font(11, weight: .medium, offset: textOffset))
                 .monospacedDigit()
                 .foregroundColor(.white)
             if let runOut = lines.runOut {
+                // Semibold, not medium: of the three lines this is the one to act on, so it gets
+                // the weight. Both stay white: greying the reset line would bring back the hard-to-read
+                // lines users reported.
                 Text(runOut)
-                    .font(PopoverTextSize.font(11, weight: .medium, offset: textOffset))
+                    .font(PopoverTextSize.font(11, weight: .semibold, offset: textOffset))
                     .foregroundColor(.white)
             }
         }
@@ -1141,7 +1193,11 @@ private struct FooterStatusLineView: View {
             version: AppVersion.marketing,
             updated: UsagePopoverView.lastUpdatedText(lastFetch: lastFetch, now: clock.now)))
             .font(PopoverTextSize.font(10, weight: .medium, offset: textOffset))
-            .foregroundColor(.secondary)
+            .foregroundColor(UsagePopoverView.footerTextColor)
+            // The gear shares this row now, so at the largest text size a long line
+            // ("Usage updated 45 minutes ago · v1.75") shrinks a little instead of wrapping.
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
     }
 }
 

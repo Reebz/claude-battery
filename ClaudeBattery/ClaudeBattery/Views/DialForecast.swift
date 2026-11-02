@@ -32,7 +32,7 @@ extension UsagePopoverView {
 
     /// Below this fraction of the window elapsed no run-out is projected: a burst of use at the
     /// start of a fresh window divides by a tiny elapsed time and projects a run-out minutes away.
-    static let minElapsedFraction: Double = 0.10
+    nonisolated static let minElapsedFraction: Double = 0.10
 
     /// Seconds until usage runs out at the current burn rate, from the current snapshot only, or
     /// nil when there is nothing sound to project. `pace` is the result of `paceStatus` on the SAME
@@ -44,7 +44,7 @@ extension UsagePopoverView {
     /// the elapsed time negative). Window start is `resetsAt - window`, as in `timeRemainingPercent`.
     /// The formula `(window - r) * remaining / (100 - remaining)` is below `r` exactly when the
     /// pace delta is positive, so the estimate always lands before the reset.
-    static func runOutSeconds(remainingPercent: Double, resetsAt: Date?, window: TimeInterval,
+    nonisolated static func runOutSeconds(remainingPercent: Double, resetsAt: Date?, window: TimeInterval,
                               pace: PaceStatus, now: Date = Date()) -> TimeInterval? {
         guard pace == .caution || pace == .danger else { return nil }
         guard let resetsAt,
@@ -59,7 +59,7 @@ extension UsagePopoverView {
     /// Rounds a run-out to the nearest 5 minutes on the session window and the nearest hour on
     /// the weekly window, never below one quantum, so poll-to-poll jitter in the integer
     /// percentages does not move the shown value.
-    static func quantiseRunOut(_ seconds: TimeInterval, window: TimeInterval) -> TimeInterval {
+    nonisolated static func quantiseRunOut(_ seconds: TimeInterval, window: TimeInterval) -> TimeInterval {
         let quantum: TimeInterval = window == weeklyWindow ? 3600 : 300
         return max(1, (seconds / quantum).rounded()) * quantum
     }
@@ -67,9 +67,9 @@ extension UsagePopoverView {
     /// Copy for the run-out line, the last line under a dial (R11), relative so it cannot be
     /// mistaken for a reset time (KD6). Prints the seconds it is given; the caller quantises first.
     /// nil hides it.
-    static func runOutLine(seconds: TimeInterval?) -> String? {
+    nonisolated static func runOutLine(seconds: TimeInterval?) -> String? {
         guard let seconds else { return nil }
-        return "Out in ~" + CountdownFormat.minuteResolution(seconds: seconds)
+        return "Out in ~" + CountdownFormat.runOutResolution(seconds: seconds)
     }
 
     // MARK: - Dial lines (#44, KTD3)
@@ -92,7 +92,7 @@ extension UsagePopoverView {
     /// purpose: at the 11pt medium the countdown now uses (R11) the old, longer wording
     /// measured about 130pt against the 114pt card content width, so `minimumScaleFactor` would
     /// quietly shrink the one line the reporter said was already hard to read. This fits.
-    static let resetUnavailableLine = "No reset time"
+    nonisolated static let resetUnavailableLine = "No reset time"
 
     /// The lines under one dial from the current snapshot (KTD3). Takes no display value and no
     /// weekly-limited flag: `pace` already encodes weekly-limited-versus-Danger through
@@ -102,7 +102,7 @@ extension UsagePopoverView {
     /// prints exactly what it is given, and then dropped unless it still lands strictly before the
     /// reset: `pace` is graded at poll time while these lines re-print on the minute clock, so a
     /// stale Caution can otherwise project past a reset the countdown says is nearer.
-    static func dialLines(pace: PaceStatus, rawRemaining: Double, resetsAt: Date?, window: TimeInterval,
+    nonisolated static func dialLines(pace: PaceStatus, rawRemaining: Double, resetsAt: Date?, window: TimeInterval,
                           now: Date = Date()) -> DialLines {
         guard let resetsAt,
               let resetSeconds = CountdownFormat.remainingSeconds(until: resetsAt, now: now) else {
@@ -215,6 +215,21 @@ enum CountdownFormat {
         return "<1m"
     }
 
+    /// Compact menu-bar run-out for an account with no 5-hour limit, never more than 3 characters:
+    /// under a minute `"<1m"`, under an hour `"Nm"`, under 48 hours `"Nh"` (e.g. "14h", "47h"), then
+    /// whole days `"Nd"` (e.g. "2d", "6d"), saturating at `"9d+"` from 10 days. Hours are kept up to
+    /// 48 because close to running out is where the precision matters; a weekly run-out never
+    /// exceeds 7 days. Truncates like `components`, so it never claims more time than the dial line.
+    static func compactRunOut(seconds: TimeInterval) -> String {
+        let (days, hours, minutes) = components(seconds: max(0, seconds))
+        let totalHours = days * 24 + hours
+        if days >= 10 { return "9d+" }
+        if totalHours >= 48 { return "\(days)d" }
+        if totalHours >= 1 { return "\(totalHours)h" }
+        if minutes >= 1 { return "\(minutes)m" }
+        return "<1m"
+    }
+
     /// Whole days, hours and minutes of a duration, truncated (`Int(seconds)`), shared by the
     /// dial countdown and the spoken label so both print the same numbers for the same instant.
     static func components(seconds: TimeInterval) -> (days: Int, hours: Int, minutes: Int) {
@@ -232,5 +247,16 @@ enum CountdownFormat {
         if hours > 0 { return String(format: "%dh %02dm", hours, minutes) }
         if minutes >= 1 { return "\(minutes)m" }
         return "<1m"
+    }
+
+    /// The run-out line's duration: `minuteResolution` with a zero last field dropped, so "11h"
+    /// and "2d" rather than "11h 00m" and "2d 00h". The run-out is an estimate the weekly dial
+    /// rounds to whole hours, so the padded zeros carried nothing. The reset countdown keeps its
+    /// padding, because it ticks every minute and a steady width keeps it from jumping.
+    static func runOutResolution(seconds: TimeInterval) -> String {
+        let (days, hours, minutes) = components(seconds: seconds)
+        if days > 0 && hours == 0 { return "\(days)d" }
+        if days == 0 && hours > 0 && minutes == 0 { return "\(hours)h" }
+        return minuteResolution(seconds: seconds)
     }
 }

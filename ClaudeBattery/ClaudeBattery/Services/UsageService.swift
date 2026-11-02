@@ -957,6 +957,18 @@ struct UsageData: Equatable {
     /// has to be recorded rather than assumed. `pollUsage` is what acts on it.
     let sessionPercentWasRead: Bool
     let weeklyPercentWasRead: Bool
+    /// Whether this account has a 5-hour limit at all. Some plans (Ultra, for verified accounts)
+    /// have only weekly limits, and every Session surface - the session battery, the Session
+    /// card and the session countdown - is hidden for them.
+    ///
+    /// Read from the shape of each response, never from the plan name: those accounts still
+    /// report `rate_limit_tier` "default_claude_max_20x", and the pricing page drops the 5-hour
+    /// limit only for verified accounts, so the plan string cannot answer the question. False only
+    /// when a weekly percentage was read AND no 5-hour limit appears in either shape - no
+    /// `session` entry in `limits[]` and a null or absent `five_hour`. A listed session with
+    /// nothing used and no reset time is an idle window on a plan that HAS the limit, and a
+    /// response with no weekly reading is too broken to change the layout on.
+    let hasSessionLimit: Bool
     /// The active account's 5h-over-weekly capacity ratio, measured (`RatioMeasurement`) or off the
     /// table (`PlanRatio`), or nil when the plan is unknown and nothing has been measured yet. Nil
     /// disables the conversion entirely rather than substituting a guess (R3).
@@ -994,6 +1006,9 @@ struct UsageData: Equatable {
             weeklyResetDate = response.sevenDay?.resetsAt
             weeklyPercentWasRead = utilization != nil
         }
+
+        let listsSessionLimit = limits?.contains(where: { $0.kind == "session" }) ?? false
+        hasSessionLimit = !(weeklyPercentWasRead && !listsSessionLimit && response.fiveHour == nil)
 
         // Per-model: from weekly_scoped when limits[] present, else legacy seven_day_* gated
         // on non-null so an absent model hides its bar rather than faking 100% (KTD3).
@@ -1184,6 +1199,7 @@ extension UsageService {
             "rate_limit_tier": jsonOrNull(rateLimitTier),
             "capabilities": jsonOrNull(capabilities),
             "billing_type": jsonOrNull(billingType),
+            "session_limit_present": usage.hasSessionLimit,
             "session_remaining": usage.sessionRemaining,
             "session_resets_at": jsonOrNull(usage.sessionResetDate.map(iso.string(from:))),
             "weekly_remaining": usage.weeklyRemaining,

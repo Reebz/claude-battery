@@ -389,6 +389,26 @@ final class NoSecretsExportGateTests: XCTestCase {
         }
         XCTAssertEqual(payload["session_remaining"] as? Double, 40)
         XCTAssertEqual(payload["weekly_remaining"] as? Double, 80)
+        XCTAssertEqual(payload["session_limit_present"] as? Bool, true)
+
+        // An account with no 5-hour limit reads session 100 with no reset, exactly like an idle
+        // window, so only this field tells a reader which of the two a reporter's file shows.
+        let weeklyOnly = UsageData(from: UsageResponse(fiveHour: nil,
+                                                       sevenDay: try! JSONDecoder().decode(
+                                                           UsageTier.self, from: Data(#"{"utilization": 20}"#.utf8)),
+                                                       sevenDayOpus: nil,
+                                                       sevenDaySonnet: nil,
+                                                       extraUsage: nil,
+                                                       limits: nil,
+                                                       spend: nil))
+        let weeklyOnlyPayload = UsageService.planSamplePayload(accountId: UUID(),
+                                                               rateLimitTier: "default_claude_max_20x",
+                                                               capabilities: ["chat", "claude_max"],
+                                                               billingType: nil,
+                                                               usage: weeklyOnly,
+                                                               measurement: empty)
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(weeklyOnlyPayload))
+        XCTAssertEqual(weeklyOnlyPayload["session_limit_present"] as? Bool, false)
 
         // And the populated shape carries what it was given, measured ratio included: 42 weekly
         // points over 400 session points is 0.105, above the confidence bar and inside the

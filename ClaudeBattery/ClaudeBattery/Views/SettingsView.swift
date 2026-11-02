@@ -87,8 +87,8 @@ struct SettingsView: View {
             }
 
             Section {
-                Toggle("Show session countdown in menu bar", isOn: $showSessionCountdown)
-                Text("Adds a compact session countdown (e.g. \"4h+\", \"32m\") to the left of the menu bar icon. Hidden when there is no active session.")
+                Toggle("Show countdown in menu bar", isOn: $showSessionCountdown)
+                Text("With a 5-hour limit, shows the time until your session resets (for example \"4h+\" or \"32m\"). Without one, shows how long until you run out at your current pace (for example \"14h\" or \"3d\"), and only when you are on pace to run out before your weekly reset.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
